@@ -1,0 +1,185 @@
+#pragma once
+#include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <windows.h>
+#include <shlobj.h>
+#include "config.hpp"
+#include "log.hpp"
+#include "vehicle_data.hpp"
+
+namespace storage {
+
+// Store per-save garage files right alongside GTASAsf*.b in Documents\GTA San Andreas User Files\GTA5GarageSaves!
+// Completely immune to ModLoader virtual filesystem / directory locks!
+inline std::string GetSaveDir() {
+    char docs[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, docs)) && docs[0]) {
+        std::string userFiles = std::string(docs) + "\\GTA San Andreas User Files";
+        CreateDirectoryA(userFiles.c_str(), nullptr);
+        std::string dir = userFiles + "\\GTA5GarageSaves";
+        CreateDirectoryA(dir.c_str(), nullptr);
+        return dir;
+    }
+    std::string fallback = mod::Config().gameDir + "\\GTA5GarageSaves";
+    CreateDirectoryA(fallback.c_str(), nullptr);
+    return fallback;
+}
+
+// slotIndex: 1..8 for GTASAsf1.b..GTASAsf8.b, or 0 for unsaved/NewGame/SA-COOP session
+inline std::string GetSlotFilePath(int slotIndex) {
+    char name[64];
+    if (slotIndex >= 1 && slotIndex <= 8) {
+        std::snprintf(name, sizeof(name), "\\garage_slot_%d.ini", slotIndex);
+    } else {
+        std::snprintf(name, sizeof(name), "\\garage_autosave.ini");
+    }
+    return GetSaveDir() + name;
+}
+
+inline std::string HexEncode(const std::string& raw) {
+    static const char HEX[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(raw.size() * 2);
+    for (unsigned char c : raw) {
+        out.push_back(HEX[c >> 4]);
+        out.push_back(HEX[c & 0xF]);
+    }
+    return out;
+}
+
+inline std::string HexDecode(const char* hex) {
+    std::string out;
+    if (!hex) return out;
+    size_t n = std::strlen(hex);
+    out.reserve(n / 2);
+    auto val = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+        if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+        return 0;
+    };
+    for (size_t i = 0; i + 1 < n; i += 2) {
+        out.push_back(static_cast<char>((val(hex[i]) << 4) | val(hex[i + 1])));
+    }
+    return out;
+}
+
+inline bool SaveGarageToSlot(int slotIndex, const std::array<mod::OwnedVehicle, mod::MAX_OWNED_VEHICLES>& slots) {
+    std::string path = GetSlotFilePath(slotIndex);
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) {
+        modlog::Info("[Storage] Failed to open %s for writing", path.c_str());
+        return false;
+    }
+
+    std::fprintf(f, "; GTA5GarageAndTuning Per-Save Garage Data (Slot %d)\n\n", slotIndex);
+    for (int i = 0; i < mod::MAX_OWNED_VEHICLES; ++i) {
+        const auto& v = slots[i];
+        std::fprintf(f, "[Slot%d]\n", i);
+        std::fprintf(f, "Occupied=%d\n", v.occupied ? 1 : 0);
+        if (!v.occupied) {
+            std::fprintf(f, "\n");
+            continue;
+        }
+        std::fprintf(f, "Destroyed=%d\n", v.destroyed ? 1 : 0);
+        std::fprintf(f, "ModelId=%d\n", v.modelId);
+        std::fprintf(f, "NameHex=%s\n", HexEncode(v.displayNameGame).c_str());
+        std::fprintf(f, "Color1=%u\n", v.visuals.primaryColor);
+        std::fprintf(f, "Color2=%u\n", v.visuals.secondaryColor);
+        std::fprintf(f, "Paintjob=%d\n", static_cast<int>(v.visuals.paintjob));
+
+        std::string upgStr;
+        for (int u = 0; u < 15; ++u) {
+            if (u > 0) upgStr += ",";
+            upgStr += std::to_string(v.visuals.upgrades[u]);
+        }
+        std::fprintf(f, "Upgrades=%s\n", upgStr.c_str());
+
+        std::fprintf(f, "Engine=%u\n", v.tuning.engineLevel);
+        std::fprintf(f, "Transmission=%u\n", v.tuning.transmissionLevel);
+        std::fprintf(f, "Suspension=%u\n", v.tuning.suspensionLevel);
+        std::fprintf(f, "Brakes=%u\n", v.tuning.brakesLevel);
+        std::fprintf(f, "TiresGrip=%u\n", v.tuning.tiresGripLevel);
+        std::fprintf(f, "Armor=%u\n", v.tuning.armorLevel);
+        std::fprintf(f, "Bulletproof=%d\n", v.tuning.bulletproofTires ? 1 : 0);
+        std::fprintf(f, "Turbo=%d\n", v.tuning.turbo ? 1 : 0);
+        std::fprintf(f, "Xenon=%d\n", v.tuning.xenonLights ? 1 : 0);
+        std::fprintf(f, "Neon=%u\n", static_cast<unsigned>(v.tuning.neonColor));
+        std::fprintf(f, "Horn=%u\n", v.tuning.hornType);
+        std::fprintf(f, "Plate=%s\n\n", v.tuning.plateText);
+    }
+
+    std::fclose(f);
+    modlog::Info("[Storage] Saved garage to %s", path.c_str());
+    return true;
+}
+
+inline bool LoadGarageFromSlot(int slotIndex, std::array<mod::OwnedVehicle, mod::MAX_OWNED_VEHICLES>& slots) {
+    for (auto& v : slots) v = mod::OwnedVehicle{};
+
+    std::string path = GetSlotFilePath(slotIndex);
+    DWORD attr = GetFileAttributesA(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        modlog::Info("[Storage] No saved garage file for slot %d (%s) -> starting fresh", slotIndex, path.c_str());
+        return false;
+    }
+
+    const char* p = path.c_str();
+    for (int i = 0; i < mod::MAX_OWNED_VEHICLES; ++i) {
+        char sec[32];
+        std::snprintf(sec, sizeof(sec), "Slot%d", i);
+        if (GetPrivateProfileIntA(sec, "Occupied", 0, p) == 0) continue;
+
+        auto& v = slots[i];
+        v.occupied  = true;
+        v.destroyed = GetPrivateProfileIntA(sec, "Destroyed", 0, p) != 0;
+        v.modelId   = GetPrivateProfileIntA(sec, "ModelId", 0, p);
+
+        char buf[256] = {};
+        GetPrivateProfileStringA(sec, "NameHex", "", buf, sizeof(buf), p);
+        v.displayNameGame = HexDecode(buf);
+
+        v.visuals.primaryColor   = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Color1", 0, p));
+        v.visuals.secondaryColor = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Color2", 0, p));
+        v.visuals.paintjob       = static_cast<int8_t>(GetPrivateProfileIntA(sec, "Paintjob", -1, p));
+
+        GetPrivateProfileStringA(sec, "Upgrades", "", buf, sizeof(buf), p);
+        {
+            char* cur = buf;
+            for (int u = 0; u < 15 && cur && *cur; ++u) {
+                char* comma = std::strchr(cur, ',');
+                if (comma) *comma = '\0';
+                v.visuals.upgrades[u] = static_cast<int16_t>(std::atoi(cur));
+                cur = comma ? (comma + 1) : nullptr;
+            }
+        }
+
+        v.tuning.engineLevel       = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Engine", 0, p));
+        v.tuning.transmissionLevel = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Transmission", 0, p));
+        v.tuning.suspensionLevel   = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Suspension", 0, p));
+        v.tuning.brakesLevel       = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Brakes", 0, p));
+        v.tuning.tiresGripLevel    = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "TiresGrip", 0, p));
+        v.tuning.armorLevel        = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Armor", 0, p));
+        v.tuning.bulletproofTires  = GetPrivateProfileIntA(sec, "Bulletproof", 0, p) != 0;
+        v.tuning.turbo             = GetPrivateProfileIntA(sec, "Turbo", 0, p) != 0;
+        v.tuning.xenonLights       = GetPrivateProfileIntA(sec, "Xenon", 0, p) != 0;
+        v.tuning.neonColor         = static_cast<mod::NeonColor>(GetPrivateProfileIntA(sec, "Neon", 0, p));
+        v.tuning.hornType          = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Horn", 0, p));
+
+        GetPrivateProfileStringA(sec, "Plate", "", buf, sizeof(buf), p);
+        {
+            size_t len = std::strlen(buf);
+            if (len > 8) len = 8;
+            std::memcpy(v.tuning.plateText, buf, len);
+            v.tuning.plateText[len] = '\0';
+        }
+    }
+
+    modlog::Info("[Storage] Loaded garage from %s", path.c_str());
+    return true;
+}
+
+} // namespace storage

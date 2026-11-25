@@ -1,0 +1,18 @@
+# Build artifacts & release packages
+build/
+dist/
+*.asi
+*.dll
+*.o
+*.obj
+*.pdb
+*.log
+*.zip
+
+# Editor / OS clutter
+.vscode/
+.vs/
+.idea/
+*.user
+Thumbs.db
+.DS_Store
