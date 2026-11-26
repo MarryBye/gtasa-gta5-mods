@@ -1,6 +1,7 @@
 #include "garage.hpp"
 #include <cstring>
 #include "config.hpp"
+#include "delivery.hpp"
 #include "log.hpp"
 #include "storage.hpp"
 #include "tuning_physics.hpp"
@@ -112,7 +113,13 @@ void UpsertSafehouseRecord(int hideoutGarageId, sa::CVehicle* veh, int personalS
     if (targetIdx < 0) targetIdx = (freeIdx >= 0) ? freeIdx : (mod::MAX_SAFEHOUSE_CARS - 1);
 
     auto& dst = g_safehouseCars[targetIdx];
-    bool changed = (!dst.occupied || dst.hideoutGarageId != hideoutGarageId || dst.personalSlotIdx != personalSlotIdx);
+    bool changed = (!dst.occupied || dst.hideoutGarageId != hideoutGarageId ||
+                    dst.personalSlotIdx != personalSlotIdx || dst.modelId != mid ||
+                    dst.visuals.primaryColor != vis.primaryColor ||
+                    dst.visuals.secondaryColor != vis.secondaryColor ||
+                    dst.tuning.engineLevel != tun.engineLevel ||
+                    dst.tuning.turbo != tun.turbo ||
+                    std::strcmp(dst.tuning.plateText, tun.plateText) != 0);
     dst.occupied        = true;
     dst.hideoutGarageId = hideoutGarageId;
     dst.personalSlotIdx = personalSlotIdx;
@@ -171,6 +178,8 @@ void RestoreTuningOntoSafehouseVehicle(sa::CVehicle* veh, const mod::VisualAppea
             g_activeSlot      = personalSlotIdx;
         }
     }
+    // Keep CreatedBy == 1 (RANDOM_VEHICLE) while parked inside the safehouse garage so walking away
+    // again cleanly stores & repairs it in GTA SA's CStoredCar table!
     modlog::Info("[Garage] Restored safehouse vehicle tuning/wear/plate (model=%d, personalSlot=%d, eng=%u, turbo=%d).",
                  veh->GetModelIndex(), personalSlotIdx, tun.engineLevel, tun.turbo ? 1 : 0);
 }
@@ -178,18 +187,28 @@ void RestoreTuningOntoSafehouseVehicle(sa::CVehicle* veh, const mod::VisualAppea
 void TickSafehousePersistence() {
     if (sa::GetActiveInterior() != 0 || workshop::IsWorkshopActive()) return;
     uint32_t nowMs = sa::GetTimeMs();
+    sa::CPed* localPed = sa::FindPlayerPed(0);
     sa::CVehicle* playerVeh = sa::FindPlayerVehicle(0, false);
     bool urgentPlayerCheck = (playerVeh != nullptr && tuning::GetLiveTuning(playerVeh) == nullptr);
-    if (!urgentPlayerCheck && (nowMs - g_lastSafehouseScanMs < 350)) return;
+    // Keep scan interval tight (180ms) so parked personal vehicles are released to RANDOM_VEHICLE
+    // BEFORE the safehouse garage door finishes closing!
+    if (!urgentPlayerCheck && (nowMs - g_lastSafehouseScanMs < 180)) return;
     g_lastSafehouseScanMs = nowMs;
 
     auto* pool = sa::GetVehiclePool();
     if (!pool || !pool->objects || !pool->byteMap || pool->size <= 0 || pool->size > 2000) return;
 
+    const bool coopActive = sa::IsCoopModLoaded();
+    const bool delivering = delivery::IsDeliveryInProgress();
+
     for (int i = 0; i < pool->size; ++i) {
         if ((pool->byteMap[i] & 0x80) != 0) continue;
         auto* v = reinterpret_cast<sa::CVehicle*>(pool->objects + static_cast<size_t>(i) * sa::VEHICLE_POOL_STRIDE);
         if (!sa::IsVehicleValid(v) || v->Health() <= 0.0f) continue;
+
+        // SA-COOP guard: never touch a vehicle currently driven by another player or NPC!
+        sa::CPed* drv = v->GetDriver();
+        if (drv != nullptr && drv != localPed) continue;
 
         int gIdx = sa::FindHideoutGarageIndexAt(v->GetPosition());
         if (gIdx < 0) continue;
@@ -198,11 +217,30 @@ void TickSafehousePersistence() {
         int liveSlot = FindSlotForLiveVehicle(v);
 
         if (liveTun != nullptr || liveSlot >= 0) {
-            // 1. Live tuned / personal vehicle currently parked inside a safehouse garage -> continuously remember it!
+            // 1. Live tuned / personal vehicle currently parked inside a safehouse garage -> remember it!
             mod::PerformanceTuning tun = liveTun ? *liveTun : g_slots[liveSlot].tuning;
             mod::VehicleWear wear      = tuning::GetLiveWear(v);
             if (liveSlot >= 0 || mod::HasAnyCustomTuning(tun) || wear.HasAnyWear()) {
                 UpsertSafehouseRecord(gIdx, v, liveSlot, tun, wear);
+                if (liveSlot >= 0 && liveSlot < mod::MAX_OWNED_VEHICLES) {
+                    SnapshotVehicleToSlot(v, liveSlot);
+                }
+            }
+
+            // CRITICAL FIX for safehouse storage & auto-repair:
+            // CGarage::StoreAndRemoveCarsForThisHideout (0x00449995) skips any car where
+            // veh->m_nCreatedBy == 2 (MISSION_VEHICLE, set by 0x00A5 CREATE_CAR from Mechanic/Dealership)!
+            // As soon as our personal car is parked inside a hideout garage with no driver (and not mid-delivery),
+            // release it to RANDOM_VEHICLE (1) so GTA SA stores it in GTASAsfN.b AND repairs it when the door closes!
+            if (liveSlot >= 0 && v == g_activeVeh && drv == nullptr && !delivering && v->CreatedBy() == 2) {
+                int32_t h = sa::GetVehicleHandle(v);
+                if (h > 0) {
+                    sa::ScriptCmd(0x01C3).Int(h).Run(); // MARK_CAR_AS_NO_LONGER_NEEDED
+                }
+                v->CreatedBy() = 1; // RANDOM_VEHICLE -> accepted by StoreAndRemoveCarsForThisHideout!
+                g_safehouseDirtySave = true;
+                modlog::Info("[Garage] Released personal vehicle (slot=%d, model=%d) to safehouse garage #%d for vanilla storage & repair.",
+                             liveSlot, v->GetModelIndex(), gIdx);
             }
             continue;
         }
@@ -233,7 +271,8 @@ void TickSafehousePersistence() {
         }
 
         // 3. Fallback for personal cars parked in a safehouse garage BEFORE this update (match occupied slots!)
-        if (!GetActivePersonalVehicle()) {
+        // In SA-COOP, only run fallback when the car is unoccupied or driven by local CJ.
+        if (!GetActivePersonalVehicle() && (!coopActive || drv == nullptr || drv == localPed)) {
             int bestSlot = -1;
             int bestSlSc = 0;
             for (int s = 0; s < mod::MAX_OWNED_VEHICLES; ++s) {
@@ -625,6 +664,17 @@ void Tick() {
         sa::CVehicle* playerVeh = sa::FindPlayerVehicle(0, false);
         if (playerVeh == g_activeVeh) {
             ClearDeliveryBlip();
+        }
+    }
+
+    // Outside safehouse garages, keep our active personal vehicle marked as MISSION_VEHICLE (2)
+    // so GTA SA never despawns it when parked outside shops/interiors!
+    // (When parked back inside a hideout garage and exited, TickSafehousePersistence releases it back to 1!)
+    if (!workshop::IsWorkshopActive() && !delivery::IsDeliveryInProgress() && sa::GetActiveInterior() == 0) {
+        sa::CPed* drv = g_activeVeh->GetDriver();
+        if (drv == sa::FindPlayerPed(0) && g_activeVeh->CreatedBy() != 2 &&
+            sa::FindHideoutGarageIndexAt(g_activeVeh->GetPosition()) < 0) {
+            g_activeVeh->CreatedBy() = 2;
         }
     }
 

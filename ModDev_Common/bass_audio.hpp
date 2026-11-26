@@ -170,6 +170,15 @@ inline void StopStream(HSTREAM stream) {
     }
 }
 
+inline void FreeStream(HSTREAM stream) {
+    auto& c = Engine();
+    if (!c.ready || !stream || !c.StreamFree) return;
+    if (c.ChannelIsActive(stream) == ACTIVE_PLAYING) {
+        c.ChannelStop(stream);
+    }
+    c.StreamFree(stream);
+}
+
 inline void PlayLoopStream(HSTREAM stream, float volume, float freqHz) {
     auto& c = Engine();
     if (!c.ready || !stream) return;

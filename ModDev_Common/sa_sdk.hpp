@@ -712,11 +712,33 @@ struct CVehicle : CEntity {
     int16_t* Upgrades() { return reinterpret_cast<int16_t*>(Raw() + 0x43A); }
     const int16_t* Upgrades() const { return reinterpret_cast<const int16_t*>(Raw() + 0x43A); }
 
-    CPed*   GetDriver() const { return *reinterpret_cast<CPed* const*>(Raw() + 0x460); }
-    float&  GasPedal() { return *reinterpret_cast<float*>(Raw() + 0x49C); }
-    float&  BrakePedal() { return *reinterpret_cast<float*>(Raw() + 0x4A0); }
-    uint8_t GetCurrentGear() const { return *reinterpret_cast<const uint8_t*>(Raw() + 0x4B4); }
-    float&  Health() { return *reinterpret_cast<float*>(Raw() + 0x4C0); }
+    CPed*    GetDriver() const { return *reinterpret_cast<CPed* const*>(Raw() + 0x460); }
+    float&   GasPedal() { return *reinterpret_cast<float*>(Raw() + 0x49C); }
+    float&   BrakePedal() { return *reinterpret_cast<float*>(Raw() + 0x4A0); }
+    // Verified at 0x00449995 (CGarage::StoreAndRemoveCarsForThisHideout: cmp BYTE PTR [esi+0x4a4], 0x2)
+    // 1 = RANDOM_VEHICLE (safehouse garages store & repair), 2 = MISSION_VEHICLE (never despawns on street)
+    uint8_t& CreatedBy() { return *reinterpret_cast<uint8_t*>(Raw() + 0x4A4); }
+    uint8_t  CreatedBy() const { return *reinterpret_cast<const uint8_t*>(Raw() + 0x4A4); }
+    uint8_t  GetCurrentGear() const { return *reinterpret_cast<const uint8_t*>(Raw() + 0x4B4); }
+    float&   Health() { return *reinterpret_cast<float*>(Raw() + 0x4C0); }
+
+    // Verified in CVehicle::CVehicle (0x6D5F36: m_vehicleAudio @ +0x138),
+    // CAEVehicleAudioEntity::RequestNewSound (0x4F7AFC: m_aEngineSounds[slot].m_pSound @ +0xE8 + slot*8),
+    // CAESound::Initialise (0x4EFE99: m_fSpeed @ +0x1C, 0x4EFF2A: m_nIsUsed @ +0x58).
+    // Returns live native engine playback pitch ratio (e.g. 0.55..2.10), or 0.0f if unavailable.
+    float GetLiveEnginePitchRatio() const {
+        const uint8_t* ae = Raw() + 0x138;
+        static constexpr int kPrioritySlots[4] = {1, 2, 3, 4};
+        for (int slot : kPrioritySlots) {
+            const uint8_t* snd = *reinterpret_cast<const uint8_t* const*>(ae + 0xE8 + slot * 8);
+            if (!snd) continue;
+            int16_t isUsed = *reinterpret_cast<const int16_t*>(snd + 0x58);
+            if (isUsed != 1) continue;
+            float spd = *reinterpret_cast<const float*>(snd + 0x1C);
+            if (spd >= 0.30f && spd <= 3.00f) return spd;
+        }
+        return 0.0f;
+    }
     uint8_t GetHornState() const { return *reinterpret_cast<const uint8_t*>(Raw() + 0x514); }
     uint8_t GetOverrideLights() const { return *reinterpret_cast<const uint8_t*>(Raw() + 0x584); }
     void*&  CustomCarPlateTexture() { return *reinterpret_cast<void**>(Raw() + 0x588); }
@@ -1519,6 +1541,38 @@ namespace shopping {
         SetBoughtHash(GetUppercaseKey(itemName), bought);
     }
 } // namespace shopping
+
+// ============================================================================
+// Vehicle Audio Settings Table (Verified at 0x004F5C10: 0x00860AF0, stride 0x24)
+// ============================================================================
+#pragma pack(push, 1)
+struct tVehicleAudioSettings {
+    int8_t  m_nVehicleSoundType;    // +0x00 (0=Car, 1=Bike, 2=Bicycle, 3=Boat, 4=Heli, 5=Plane, 9=RC)
+    int8_t  _pad01;                 // +0x01
+    int16_t m_nEngineOnSoundBankId; // +0x02 (0-based index into audio\CONFIG\BankLkup.dat, -1 if none)
+    int16_t m_nEngineOffSoundBankId;// +0x04
+    int8_t  m_nBassSetting;         // +0x06
+    int8_t  _pad07;                 // +0x07
+    float   m_fBassEq;              // +0x08
+    float   m_fField14;             // +0x0C (base engine pitch scale, e.g. 1.00, 1.19)
+    int8_t  m_nHornTon;             // +0x10
+    int8_t  _pad11[3];              // +0x11
+    float   m_fHornHigh;            // +0x14
+    int8_t  m_nDoorSound;           // +0x18
+    int8_t  _pad19;                 // +0x19
+    int8_t  m_nRadioNum;            // +0x1A
+    int8_t  m_nRadioType;           // +0x1B
+    int8_t  m_nVehTypeForAudio;     // +0x1C
+    int8_t  _pad1D[3];              // +0x1D
+    float   m_fHornVolumeDelta;     // +0x20
+};
+static_assert(sizeof(tVehicleAudioSettings) == 0x24, "tVehicleAudioSettings must be 36 bytes");
+#pragma pack(pop)
+
+inline const tVehicleAudioSettings* GetVehicleAudioSettings(int32_t modelId) {
+    if (modelId < 400 || modelId > 611) return nullptr;
+    return reinterpret_cast<const tVehicleAudioSettings*>(0x00860AF0 + static_cast<size_t>(modelId - 400) * 0x24);
+}
 
 // ============================================================================
 // Native SCM Opcode Runner (Calls CRunningScript::ProcessOneCommand 0x00469EB0)

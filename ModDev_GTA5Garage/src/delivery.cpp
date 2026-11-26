@@ -819,12 +819,21 @@ bool IsMenuOpen() { return g_menuMode != MenuMode::Closed; }
 bool IsDeliveryInProgress() { return g_phase != DeliveryPhase::Idle; }
 
 void CancelDelivery(bool deleteVehicle) {
+    sa::CPed* mech = (g_delivPedHandle > 0) ? sa::GetPedFromHandle(g_delivPedHandle) : nullptr;
+    if (deleteVehicle && g_delivVehHandle > 0) {
+        // SA-COOP safety: never DELETE_CAR if a local or remote player is currently driving it!
+        sa::CVehicle* veh = sa::GetVehicleFromHandle(g_delivVehHandle);
+        sa::CPed* drv = veh ? veh->GetDriver() : nullptr;
+        bool safeToDelete = (drv == nullptr || drv == mech);
+        if (safeToDelete) {
+            sa::ScriptCmd(0x00A6).Int(g_delivVehHandle).Run(); // DELETE_CAR
+        } else {
+            sa::ScriptCmd(0x01C3).Int(g_delivVehHandle).Run(); // MARK_CAR_AS_NO_LONGER_NEEDED
+        }
+    }
     if (g_delivPedHandle > 0) {
         sa::ScriptCmd(0x009B).Int(g_delivPedHandle).Run(); // DELETE_CHAR
         g_delivPedHandle = -1;
-    }
-    if (deleteVehicle && g_delivVehHandle > 0) {
-        sa::ScriptCmd(0x00A6).Int(g_delivVehHandle).Run(); // DELETE_CAR
     }
     g_delivVehHandle = -1;
     g_delivSlot = -1;

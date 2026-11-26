@@ -675,17 +675,20 @@ void TickAll() {
             }
             tv.smoothRpm += (rawRpm - tv.smoothRpm) * std::min(1.0f, dt * 8.5f);
 
-            // Expressive Engine Exhaust Tone (Engine Lv 1..4) — layers warmly onto GTA SA's native engine!
-            // Keep quiet when parked idle off-gas or flying off-gas so sound never drones annoyingly!
-            bool engineAudible = v->IsEngineOn() && !(inAir && gas < 0.08f) && (speed > 0.015f || gas > 0.06f);
+            // Authentic Per-Vehicle Progressive Engine Tone (GENRL Sound Bank DSP, Engine Lv 1..4)
+            // Pitch-locked directly to GTA SA's live CAESound::m_fSpeed so each car retains its unique engine voice!
+            // Subtle cammed rumble at idle (Lv.2..4), full throaty growl/roar under throttle!
+            bool engineAudible = v->IsEngineOn() && !(inAir && gas < 0.08f) &&
+                                 (speed > 0.015f || gas > 0.05f || c.engineLevel >= 2);
             if (c.engineLevel >= 1 && engineAudible) {
-                audio::UpdateEngineTone(c.engineLevel, true, tv.smoothRpm, effectiveLoad);
+                float livePitch = v->GetLiveEnginePitchRatio();
+                audio::UpdateEngineTone(v->GetModelIndex(), c.engineLevel, true, tv.smoothRpm, effectiveLoad, livePitch);
                 engineAudioHandled = true;
 
-                // Subtle exhaust burble/pop on throttle lift at high RPM (Lv 3-4)
+                // Vehicle-tuned exhaust burble/pop on throttle lift at high RPM (Lv 3-4)
                 if (!inAir && c.engineLevel >= 3 && tv.prevGas > 0.45f && gas < 0.12f &&
                     tv.smoothRpm > 0.58f && speed > 0.20f && (nowMs - tv.lastPopMs > 900)) {
-                    audio::PlayExhaustPop(c.engineLevel);
+                    audio::PlayExhaustPop(v->GetModelIndex(), c.engineLevel);
                     tv.lastPopMs = nowMs;
                 }
             }
@@ -749,7 +752,7 @@ void TickAll() {
         }
     }
 
-    if (!engineAudioHandled) audio::UpdateEngineTone(0, false, 0.0f, 0.0f);
+    if (!engineAudioHandled) audio::StopEngineTone();
     if (!turboAudioHandled)  audio::UpdateTurboSpool(false, 0.0f);
     if (!hornAudioHandled)   audio::UpdateCustomHorn(0, false);
 }
