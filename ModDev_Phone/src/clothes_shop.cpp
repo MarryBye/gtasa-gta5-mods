@@ -51,11 +51,39 @@ wardrobe::ClothSnapshot      g_savedSnap{};
 bool                         g_camActive        = false;
 float                        g_camAngle         = 0.0f;  // Open-aisle world angle from CJ -> camera
 float                        g_camDist          = 2.0f;  // Safe unobstructed distance
+sa::CVector                  g_savedPos{};               // CJ's original fitting booth position
+bool                         g_hasSavedPos      = false;
+sa::CVector                  g_showroomPos{};            // Bright open showroom floor position
 float                        g_savedHeadingDeg  = 0.0f;  // CJ heading before entering clothes shop
 bool                         g_hasSavedHeading  = false;
 float                        g_pedYawDeg        = 0.0f;  // Interactive 360° CJ rotation angle (Clothes)
 float                        g_barberBaseAngle  = 0.0f;  // Base front angle of barber chair
 float                        g_barberOrbitOff   = 0.0f;  // Interactive camera orbit offset (Barber)
+
+// Verified open showroom floor coordinates for all 6 GTA SA clothing store interiors (from data\maps\interior\gen_int5.ipl)!
+// Moves CJ out of the closed fitting-room cubicle behind the curtain onto the bright, unobstructed main showroom floor.
+struct ShowroomSpot {
+    const char* shopKey;
+    float       x, y, z;
+    float       camDirAngle; // Angle from CJ toward the wide-open entrance aisle where the camera sits
+};
+
+constexpr ShowroomSpot kShowroomSpots[6] = {
+    {"LACS1",   203.78f,  -45.30f, 1001.80f, -kPi * 0.5f}, // Sub Urban (camera South looking North)
+    {"CSSPRT",  207.05f, -135.60f, 1003.51f, -kPi * 0.5f}, // ProLaps (camera South looking North)
+    {"CSCHP",   207.74f, -105.80f, 1005.26f, -kPi * 0.5f}, // Binco (camera South looking North)
+    {"CLOTHGP", 161.39f,  -92.10f, 1001.80f, -kPi * 0.5f}, // ZIP (camera South looking North)
+    {"CSEXL",   204.33f, -163.50f, 1000.52f, -kPi * 0.5f}, // Didier Sachs (camera South looking North)
+    {"CSDESGN", 223.10f,   -7.43f, 1002.21f,  0.0f},       // Victim (camera East looking West)
+};
+
+const ShowroomSpot* FindShowroomSpot(const char* shopKey) {
+    if (!shopKey) return nullptr;
+    for (const auto& s : kShowroomSpots) {
+        if (_stricmp(s.shopKey, shopKey) == 0) return &s;
+    }
+    return nullptr;
+}
 
 sa::tMenuPanel* GetInterceptedPanel(ShopMode* outMode = nullptr) {
     if (!pcfg::Get().enableClothesShopUI) return nullptr;
@@ -100,46 +128,78 @@ float ProbeRayClearDist(const sa::CVector& origin, float angleRad, float maxDist
 void BeginClothesPreviewCam(sa::CPed* ped) {
     if (!sa::IsPedValid(ped)) return;
     int32_t pedH = sa::GetPedHandle(ped);
+
+    g_savedPos    = ped->GetPosition();
+    g_hasSavedPos = true;
+
     if (pedH > 0) {
         sa::ScriptCmd(0x0172).Int(pedH).Out(g_savedHeadingDeg).Run(); // GET_CHAR_HEADING
         g_hasSavedHeading = true;
-        sa::ScriptCmd(0x0337).Int(pedH).Int(1).Run();                 // SET_CHAR_VISIBLE(ped, TRUE)
+    }
+
+    // Move CJ out of the closed fitting-room cubicle onto the bright open showroom floor!
+    const ShowroomSpot* spot = g_activeShop ? FindShowroomSpot(g_activeShop->shopKey.c_str()) : nullptr;
+    float preferredCamAngle  = 0.0f;
+    bool  hasPreferredAngle  = false;
+    if (spot && pedH > 0) {
+        float gz = spot->z;
+        sa::ScriptCmd(0x02CE).Float(spot->x).Float(spot->y).Float(spot->z + 1.5f).Out(gz).Run();
+        float placeZ = (gz > spot->z - 3.0f && gz < spot->z + 2.0f) ? gz : (spot->z - 0.95f);
+        g_showroomPos = {spot->x, spot->y, placeZ};
+        sa::ScriptCmd(0x00A1).Int(pedH).Float(g_showroomPos.x).Float(g_showroomPos.y).Float(g_showroomPos.z).Run(); // SET_CHAR_COORDINATES
+        sa::ScriptCmd(0x04D7).Int(pedH).Int(1).Run(); // FREEZE_CHAR_POSITION true
+        sa::ScriptCmd(0x0337).Int(pedH).Int(1).Run(); // SET_CHAR_VISIBLE true
+        preferredCamAngle = spot->camDirAngle;
+        hasPreferredAngle = true;
+    } else {
+        g_showroomPos = g_savedPos;
+        if (pedH > 0) sa::ScriptCmd(0x0337).Int(pedH).Int(1).Run();
     }
 
     sa::CVector p   = ped->GetPosition();
     sa::CVector fwd = ped->GetForward();
-    float fwdAngle  = std::atan2(fwd.y, fwd.x);
+    float fwdAngle  = hasPreferredAngle ? preferredCamAngle : std::atan2(fwd.y, fwd.x);
     sa::CVector eye{p.x, p.y, p.z + 0.35f};
 
-    // Probe 16 horizontal directions to find the widest unobstructed open store aisle (never behind fitting-room walls!)
-    constexpr int kRays = 16;
-    constexpr float kProbeMax = 2.75f;
-    float clearD[kRays];
-    for (int i = 0; i < kRays; ++i) {
-        float a = kPi2 * static_cast<float>(i) / static_cast<float>(kRays);
-        clearD[i] = ProbeRayClearDist(eye, a, kProbeMax);
-    }
-
-    int   bestIdx   = 0;
-    float bestScore = -1.0f;
-    for (int i = 0; i < kRays; ++i) {
-        float a       = kPi2 * static_cast<float>(i) / static_cast<float>(kRays);
-        float cSelf   = clearD[i];
-        float cLeft   = clearD[(i + kRays - 1) % kRays];
-        float cRight  = clearD[(i + 1) % kRays];
-        float widthMin = std::min({cSelf, cLeft * 0.94f + 0.15f, cRight * 0.94f + 0.15f});
-        float fwdAlign = std::cos(a - fwdAngle); // Mild tie-breaker preferring CJ's natural facing direction
-        float score    = widthMin + 0.12f * fwdAlign;
-        if (score > bestScore) {
-            bestScore = score;
-            bestIdx   = i;
+    if (hasPreferredAngle) {
+        float clearPref = ProbeRayClearDist(eye, preferredCamAngle, 2.75f);
+        if (clearPref >= 1.85f) {
+            g_camAngle = preferredCamAngle;
+            g_camDist  = std::clamp(clearPref - 0.30f, 1.65f, 2.20f);
+        } else {
+            hasPreferredAngle = false; // Fall back to 16-ray open-aisle scan
         }
     }
 
-    g_camAngle = kPi2 * static_cast<float>(bestIdx) / static_cast<float>(kRays);
-    g_camDist  = std::clamp(clearD[bestIdx] - 0.32f, 1.35f, 2.20f);
+    if (!hasPreferredAngle) {
+        constexpr int kRays = 16;
+        constexpr float kProbeMax = 2.75f;
+        float clearD[kRays];
+        for (int i = 0; i < kRays; ++i) {
+            float a = kPi2 * static_cast<float>(i) / static_cast<float>(kRays);
+            clearD[i] = ProbeRayClearDist(eye, a, kProbeMax);
+        }
 
-    // Turn CJ directly toward our open-aisle camera!
+        int   bestIdx   = 0;
+        float bestScore = -1.0f;
+        for (int i = 0; i < kRays; ++i) {
+            float a       = kPi2 * static_cast<float>(i) / static_cast<float>(kRays);
+            float cSelf   = clearD[i];
+            float cLeft   = clearD[(i + kRays - 1) % kRays];
+            float cRight  = clearD[(i + 1) % kRays];
+            float widthMin = std::min({cSelf, cLeft * 0.94f + 0.15f, cRight * 0.94f + 0.15f});
+            float fwdAlign = std::cos(a - fwdAngle);
+            float score    = widthMin + 0.12f * fwdAlign;
+            if (score > bestScore) {
+                bestScore = score;
+                bestIdx   = i;
+            }
+        }
+        g_camAngle = kPi2 * static_cast<float>(bestIdx) / static_cast<float>(kRays);
+        g_camDist  = std::clamp(clearD[bestIdx] - 0.32f, 1.45f, 2.20f);
+    }
+
+    // Turn CJ directly toward our open-aisle showroom camera!
     float toCamX = std::cos(g_camAngle);
     float toCamY = std::sin(g_camAngle);
     g_pedYawDeg  = std::atan2(-toCamX, toCamY) * (180.0f / kPi);
@@ -160,13 +220,18 @@ void BeginBarberPreviewCam(sa::CPed* ped) {
 void EndPreviewCam() {
     if (g_camActive) {
         g_camActive = false;
-        if (g_hasSavedHeading) {
-            sa::CPed* ped = sa::FindPlayerPed(0);
-            int32_t pedH  = sa::GetPedHandle(ped);
-            if (pedH > 0) {
-                sa::ScriptCmd(0x0173).Int(pedH).Float(g_savedHeadingDeg).Run();
+        sa::CPed* ped = sa::FindPlayerPed(0);
+        int32_t pedH  = sa::GetPedHandle(ped);
+        if (pedH > 0) {
+            if (g_hasSavedPos) {
+                sa::ScriptCmd(0x04D7).Int(pedH).Int(0).Run(); // FREEZE_CHAR_POSITION false
+                sa::ScriptCmd(0x00A1).Int(pedH).Float(g_savedPos.x).Float(g_savedPos.y).Float(g_savedPos.z - 0.95f).Run();
+                g_hasSavedPos = false;
             }
-            g_hasSavedHeading = false;
+            if (g_hasSavedHeading) {
+                sa::ScriptCmd(0x0173).Int(pedH).Float(g_savedHeadingDeg).Run();
+                g_hasSavedHeading = false;
+            }
         }
         sa::ScriptCmd(0x02EB).Run(); // RESTORE_CAMERA_JUMPCUT
     }
@@ -447,8 +512,14 @@ void PostScriptsTick() {
     int32_t pedH  = sa::GetPedHandle(ped);
 
     if (g_mode == ShopMode::Clothes) {
-        // Guarantee CJ stays visible in every fitting room and rotates 360° smoothly on Q/E or Left/Right!
+        // Guarantee CJ stays visible in the open showroom (even if cloth.sc tries to pull him into the booth!)
+        // and rotates 360° smoothly on Q/E or Left/Right!
         if (pedH > 0) {
+            sa::CVector curP = ped->GetPosition();
+            if (g_hasSavedPos && curP.Dist2D(g_showroomPos) > 0.45f) {
+                sa::ScriptCmd(0x00A1).Int(pedH).Float(g_showroomPos.x).Float(g_showroomPos.y).Float(g_showroomPos.z).Run();
+                sa::ScriptCmd(0x04D7).Int(pedH).Int(1).Run();
+            }
             sa::ScriptCmd(0x0337).Int(pedH).Int(1).Run(); // SET_CHAR_VISIBLE(ped, TRUE)
             if (k.IsDown('Q') || k.IsDown(VK_LEFT))        g_pedYawDeg -= dt * 125.0f;
             else if (k.IsDown('E') || k.IsDown(VK_RIGHT))  g_pedYawDeg += dt * 125.0f;

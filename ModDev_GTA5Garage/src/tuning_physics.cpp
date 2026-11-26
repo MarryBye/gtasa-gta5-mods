@@ -213,17 +213,23 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
     }
 
     // 3. Suspension (0..4) — 4-wheel vehicles
+    // Realistic flush sports lowering that stays compatible with Izzy's Lively Vehicle Physics
+    // (never slams chassis into the floor or forces broken wheel camber!).
     if (isFourWheel && c.suspensionLevel > 0) {
-        static constexpr float kSuspDrop[5]  = {0.00f, 0.032f, 0.062f, 0.092f, 0.122f};
+        static constexpr float kSuspDrop[5]  = {0.00f, 0.015f, 0.032f, 0.050f, 0.068f};
         static constexpr float kSuspForce[5] = {1.00f, 1.08f,  1.16f,  1.26f,  1.36f};
         static constexpr float kSuspDamp[5]  = {1.00f, 1.08f,  1.17f,  1.27f,  1.38f};
         static constexpr float kAntiDive[5]  = {1.00f, 1.14f,  1.28f,  1.42f,  1.56f};
         int sIdx = std::clamp<int>(c.suspensionLevel, 0, 4);
 
-        float newLower = out.m_fSuspensionLowerLimit + kSuspDrop[sIdx];
-        float maxSafeLower = std::min(-0.03f, out.m_fSuspensionUpperLimit - 0.12f);
+        float stockDroop = std::max(0.0f, -out.m_fSuspensionLowerLimit);
+        float drop       = std::min(kSuspDrop[sIdx], stockDroop * 0.42f);
+        float newLower   = out.m_fSuspensionLowerLimit + drop;
+        float maxSafeLower = std::min(-0.08f, out.m_fSuspensionUpperLimit - 0.16f);
         if (newLower > maxSafeLower) newLower = maxSafeLower;
-        out.m_fSuspensionLowerLimit = newLower;
+        if (newLower > out.m_fSuspensionLowerLimit) {
+            out.m_fSuspensionLowerLimit = newLower;
+        }
         out.m_fSuspensionForceLevel *= kSuspForce[sIdx];
         out.m_fSuspensionDampingLevel *= kSuspDamp[sIdx];
         out.m_fSuspensionAntiDiveMultiplier *= kAntiDive[sIdx];

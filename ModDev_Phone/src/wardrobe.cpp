@@ -7,6 +7,7 @@
 #include <sstream>
 #include <unordered_set>
 #include <windows.h>
+#include "clothes_shop.hpp"
 #include "log.hpp"
 #include "mod_bus.hpp"
 #include "phone_config.hpp"
@@ -607,9 +608,10 @@ void Tick() {
     }
 
     // 2. Periodically sync CJ's currently worn clothes (e.g., mission uniforms) into owned set
+    // CRITICAL: NEVER sync while previewing unowned clothes inside a Clothing Store!
     static uint32_t s_lastSyncMs = 0;
     uint32_t now = sa::GetTimeMs();
-    if (now - s_lastSyncMs >= 3000) {
+    if (!clothesshop::IsShopActive() && (now - s_lastSyncMs >= 3000)) {
         s_lastSyncMs = now;
         SyncWornClothesToOwned(ped);
     }

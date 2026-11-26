@@ -343,6 +343,81 @@ inline void RemoveUpgradeLive(sa::CVehicle* veh, int16_t modId) {
     int32_t h = sa::GetVehicleHandle(veh);
     if (h <= 0) return;
     sa::ScriptCmd(0x06E8).Int(h).Int(modId).Run(); // REMOVE_VEHICLE_MOD
+    // Ensure stale duplicate slots (especially Nitro 1008/1009/1010) never linger in m_anUpgrades[15]!
+    int16_t* u = veh->Upgrades();
+    for (int i = 0; i < 15; ++i) {
+        if (u[i] == modId) u[i] = -1;
+    }
+}
+
+// Removes ALL installed upgrades belonging to `cat` (prevents Nitro 1008/1009/1010 slot stacking!)
+inline void RemoveAllUpgradesInCat(sa::CVehicle* veh, ModCat cat) {
+    if (!sa::IsVehicleValid(veh)) return;
+    EnsureLoaded();
+    int32_t h = sa::GetVehicleHandle(veh);
+    if (h <= 0) return;
+
+    if (cat == ModCat::Nitro) {
+        // Call native CAutomobile::AddNitro(-1) via REMOVE_VEHICLE_MOD for all 3 nitro IDs & clear all duplicate slots!
+        for (int16_t nid : {int16_t(1009), int16_t(1008), int16_t(1010)}) {
+            if (VehicleHasUpgradeId(veh, nid)) {
+                sa::ScriptCmd(0x06E8).Int(h).Int(nid).Run();
+            }
+        }
+        int16_t* u = veh->Upgrades();
+        for (int i = 0; i < 15; ++i) {
+            if (u[i] == 1008 || u[i] == 1009 || u[i] == 1010) u[i] = -1;
+        }
+        // Reset CAutomobile nitro charge state cleanly via verified 0x006A3EA0 (AddNitro(-1))
+        if (veh->IsFourWheelLike()) {
+            using FnAddNitro = void(__thiscall*)(void*, int8_t);
+            reinterpret_cast<FnAddNitro>(0x006A3EA0)(veh, -1);
+        }
+        return;
+    }
+
+    int16_t* u = veh->Upgrades();
+    for (int i = 0; i < 15; ++i) {
+        int16_t mid = u[i];
+        if (mid >= 1000) {
+            auto it = DB().modById.find(mid);
+            if (it != DB().modById.end() && it->second.cat == cat) {
+                sa::ScriptCmd(0x06E8).Int(h).Int(mid).Run();
+                u[i] = -1;
+            }
+        }
+    }
+}
+
+// Cleanly installs a Nitro tier (1009=2x, 1008=5x, 1010=10x) guaranteeing exactly ONE nitro slot entry!
+inline void InstallNitroClean(sa::CVehicle* veh, int16_t nitroModId) {
+    if (!sa::IsVehicleValid(veh)) return;
+    RemoveAllUpgradesInCat(veh, ModCat::Nitro);
+    if (nitroModId != 1008 && nitroModId != 1009 && nitroModId != 1010) return;
+
+    InstallUpgradeLive(veh, nitroModId);
+
+    // Ensure exactly ONE copy of nitroModId exists in m_anUpgrades[15] (even on cars without ug_nitro dummy!)
+    int16_t* u = veh->Upgrades();
+    int keptSlot = -1;
+    for (int i = 0; i < 15; ++i) {
+        if (u[i] == 1008 || u[i] == 1009 || u[i] == 1010) {
+            if (keptSlot < 0) {
+                u[i] = nitroModId;
+                keptSlot = i;
+            } else {
+                u[i] = -1;
+            }
+        }
+    }
+    if (keptSlot < 0) {
+        for (int i = 0; i < 15; ++i) {
+            if (u[i] < 0) {
+                u[i] = nitroModId;
+                break;
+            }
+        }
+    }
 }
 
 } // namespace vehmods

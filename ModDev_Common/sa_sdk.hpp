@@ -1377,6 +1377,8 @@ namespace stats {
     constexpr uint16_t STAT_STAMINA    = 22;
     constexpr uint16_t STAT_MUSCLE     = 23;
     constexpr uint16_t STAT_MAX_HEALTH = 24;
+    constexpr uint16_t STAT_SEX_APPEAL = 25;
+    constexpr uint16_t STAT_RESPECT    = 64;
 
     // Verified at 0x00558E40 & 0x0055A070
     inline float Get(uint16_t statId) {

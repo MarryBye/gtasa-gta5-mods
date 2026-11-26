@@ -431,6 +431,8 @@ void CloseDealership(bool returnToPhone) {
     if (wasShowroom) {
         sa::ScriptCmd(0x02EB).Run();             // RESTORE_CAMERA_JUMPCUT
         sa::ScriptCmd(0x01B4).Int(0).Int(1).Run(); // SET_PLAYER_CONTROL true
+        sa::ScriptCmd(0x07CC).Int(0).Int(1).Run(); // SET_PLAYER_ENTER_CAR_BUTTON true
+        sa::GetPad0()[0x119] = 0;
     }
 
     if (goPhone) {

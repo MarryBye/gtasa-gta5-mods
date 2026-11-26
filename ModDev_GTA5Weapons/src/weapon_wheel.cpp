@@ -8,6 +8,7 @@
 #include "ammu_shop.hpp"
 #include "config.hpp"
 #include "log.hpp"
+#include "memory.hpp"
 #include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "ui_kit.hpp"
@@ -55,6 +56,18 @@ uint32_t      g_quickEquipAtMs    = 0;
 bool          g_quickPendingEquip = false;
 uint32_t      g_tabDownSinceMs    = 0;
 uint32_t      g_lastPickupCollectMs = 0;
+
+using FnGetDisplayVitalStats = int16_t(__thiscall*)(void*, void*);
+FnGetDisplayVitalStats g_origGetDisplayVitalStats = nullptr;
+
+// Suppresses vanilla GTA SA's TAB Character Vital Stats box so it NEVER flashes before Weapon Wheel opens!
+// Our clean UI Kit character stats card renders bottom-left whenever Weapon Wheel is held on TAB.
+int16_t __fastcall HookedGetDisplayVitalStats(void* pad, void*, void* ped) {
+    if (wcfg::Get().enableWeaponWheel) {
+        return 0;
+    }
+    return g_origGetDisplayVitalStats ? g_origGetDisplayVitalStats(pad, ped) : 0;
+}
 
 // Auto-collect ground weapon pickups into our multi-weapon arsenal when CJ holds a DIFFERENT weapon
 // in the same GTA SA weapon slot (fixes vanilla swap-sound loop when walking over e.g. 9mm while holding Deagle!).
@@ -293,6 +306,12 @@ std::string BuildAttachmentSummary(uint32_t weaponId) {
 
 } // namespace
 
+void InstallHooks() {
+    g_origGetDisplayVitalStats = reinterpret_cast<FnGetDisplayVitalStats>(
+        mem::HookCall(0x0058FC24, reinterpret_cast<uintptr_t>(&HookedGetDisplayVitalStats)));
+    modlog::Info("[Wheel] Hooked CHud::Draw -> CPad::GetDisplayVitalStats (0x0058FC24) to replace vanilla TAB stats box.");
+}
+
 void PreScriptsTick() {
     sa::CPed* ped = sa::FindPlayerPed(0);
     if (sa::GetGameState() == 9 && !sa::IsPauseMenuActive() && !sa::IsCutsceneRunning() &&
@@ -336,15 +355,15 @@ void PreScriptsTick() {
     const bool tabHeld   = ui::Keys().IsDown(wcfg::Get().wheelKey);
     const uint32_t now   = sa::GetTimeMs();
 
-    // 1. Hold TAB (>= 220ms) -> Detailed radial wheel!
-    // Quick TAB tap (< 220ms) passes straight through to GTA SA so player can answer story calls / view stats!
+    // 1. Hold TAB (>= 140ms) -> Detailed radial wheel + bottom-left CJ StatsCard + bottom-right Weapon StatsCard!
+    // Quick TAB tap (< 140ms) still passes cleanly to GTA SA for story phone calls!
     if (tabHeld) {
         uint32_t tickNow = GetTickCount();
         if (g_tabDownSinceMs == 0) {
             g_tabDownSinceMs = tickNow;
         }
-        if (g_mode != WheelMode::HoldTab && (tickNow - g_tabDownSinceMs) < 220) {
-            return; // Let short TAB tap pass natively to GTA SA (Answer Phone / Stats)!
+        if (g_mode != WheelMode::HoldTab && (tickNow - g_tabDownSinceMs) < 140) {
+            return;
         }
 
         if (g_mode != WheelMode::HoldTab) {
@@ -513,6 +532,34 @@ void Render2D() {
     }
 
     wheelUi.Render();
+
+    // Bottom-Left CJ Character StatsCard (replaces vanilla TAB stats box cleanly while holding TAB!)
+    if (g_mode == WheelMode::HoldTab && sa::IsPedValid(ped)) {
+        auto statPct = [](uint16_t sid) -> int {
+            return std::clamp(static_cast<int>(std::round(sa::stats::Get(sid) * 0.1f)), 0, 100);
+        };
+        int respect = statPct(sa::stats::STAT_RESPECT);
+        int stamina = statPct(sa::stats::STAT_STAMINA);
+        int muscle  = statPct(sa::stats::STAT_MUSCLE);
+        int fat     = statPct(sa::stats::STAT_FAT);
+        int sexy    = statPct(sa::stats::STAT_SEX_APPEAL);
+        int hp      = static_cast<int>(std::round(ped->GetHealth()));
+        int arm     = static_cast<int>(std::round(ped->GetArmor()));
+
+        char vitalsBuf[48];
+        std::snprintf(vitalsBuf, sizeof(vitalsBuf), "HP %d | %s %d%%",
+                      hp, ui::Loc("Броня", "Arm").c_str(), arm);
+
+        ui::StatsCard cjCard;
+        cjCard.SetTitle(ui::Loc("ПЕРСОНАЖ", "CJ STATS"), vitalsBuf)
+              .SetAnchorBottomLeft(148.0f, 16.0f, 18.0f)
+              .AddBar(ui::Loc("Уважение",     "Respect"),    respect, respect, 100, "%")
+              .AddBar(ui::Loc("Выносливость", "Stamina"),    stamina, stamina, 100, "%")
+              .AddBar(ui::Loc("Мускулы",      "Muscle"),     muscle,  muscle,  100, "%")
+              .AddBar(ui::Loc("Жир",          "Fat"),        fat,     fat,     100, "%")
+              .AddBar(ui::Loc("Привлекат.",   "Sex Appeal"), sexy,    sexy,    100, "%");
+        cjCard.Render();
+    }
 
     // Populate dumb ui::StatsCard component (bottom-right) for hovered firearm!
     if (hovDef && hovDef->category != wdata::WeaponCategory::Melee) {

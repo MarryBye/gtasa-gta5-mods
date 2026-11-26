@@ -156,7 +156,12 @@ inline void TriggerPostCloseShield(uint32_t ms = 160) {
 inline void UpdatePostCloseShield() {
     if (auto* b = modbus::GetBus(); b && b->postCloseShieldMs != 0) {
         if (static_cast<int32_t>(GetTickCount() - b->postCloseShieldMs) < 0) {
-            sa::ClearPadPhoneInputs();
+            // Block only attack/aim/mouse release so closing a menu NEVER blocks 'F' (Enter/Exit car) or driving!
+            uint8_t* pad = sa::GetPad0();
+            *reinterpret_cast<int16_t*>(pad + 0x0C) = 0; // RightShoulder1 (Aim)
+            *reinterpret_cast<int16_t*>(pad + 0x22) = 0; // ButtonCircle (Fire/Punch)
+            auto* ms = sa::GetNewMouseState();
+            if (ms) { ms->lmb = 0; ms->rmb = 0; }
         } else {
             b->postCloseShieldMs = 0;
         }
@@ -744,7 +749,10 @@ public:
     }
     StatsCard& SetNote(const std::string& noteGame) { m_note = noteGame; return *this; }
     StatsCard& SetAnchor(bool bottomRight, float w640 = 0.0f, float rightMargin640 = 16.0f, float yOffset448 = 18.0f) {
-        m_bottomRight = bottomRight; m_w640 = w640; m_rightMargin = rightMargin640; m_yOffset = yOffset448; return *this;
+        m_bottomRight = bottomRight; m_bottomLeft = false; m_w640 = w640; m_rightMargin = rightMargin640; m_yOffset = yOffset448; return *this;
+    }
+    StatsCard& SetAnchorBottomLeft(float w640 = 0.0f, float leftMargin640 = 16.0f, float yOffset448 = 18.0f) {
+        m_bottomRight = true; m_bottomLeft = true; m_w640 = w640; m_rightMargin = leftMargin640; m_yOffset = yOffset448; return *this;
     }
     StatsCard& AddBar(const std::string& labelGame, int curVal, int prevVal, int maxScale,
                       const std::string& unitGame = "", int pristineVal = -1) {
@@ -771,7 +779,8 @@ public:
 
         const float marginX = th.screenMarginX * xScale;
         const float marginY = th.screenMarginY * sy;
-        const float px      = std::clamp(sw - pw - m_rightMargin * xScale, marginX, std::max(marginX, sw - pw - marginX));
+        const float pxRaw   = m_bottomLeft ? (m_rightMargin * xScale) : (sw - pw - m_rightMargin * xScale);
+        const float px      = std::clamp(pxRaw, marginX, std::max(marginX, sw - pw - marginX));
         const float pyRaw   = m_bottomRight ? (sh - bodyH - m_yOffset * sy) : (m_yOffset * sy);
         const float py      = std::clamp(pyRaw, marginY, std::max(marginY, sh - bodyH - marginY));
 
@@ -825,6 +834,7 @@ private:
     std::string             m_note;
     std::vector<StatBarRow> m_rows;
     bool                    m_bottomRight = false;
+    bool                    m_bottomLeft  = false;
     float                   m_w640        = 0.0f;
     float                   m_rightMargin = 16.0f;
     float                   m_yOffset     = 18.0f;

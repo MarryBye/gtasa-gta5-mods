@@ -113,8 +113,11 @@ constexpr const char* kPlatePresets[7] = {
     "MY RIDE"
 };
 
-using FnMenuProcess = void(__cdecl*)(int8_t);
-FnMenuProcess g_origMenuProcess = nullptr;
+using FnMenuProcess  = void(__cdecl*)(int8_t);
+using FnCanGarageMod = bool(__thiscall*)(uint8_t*, sa::CVehicle*);
+FnMenuProcess  g_origMenuProcess = nullptr;
+FnCanGarageMod g_origCanModOpen  = nullptr;
+FnCanGarageMod g_origCanModClose = nullptr;
 
 // Session state
 bool          g_vanillaHookMode   = false;
@@ -654,9 +657,10 @@ void ApplySubPreview(sa::CVehicle* veh) {
     if (!veh || g_subOptions.empty()) return;
     int val = g_subOptions[g_subCursor].value;
 
-    // Live visual mod preview (Wheels, Spoilers, Bumpers, Skirts, Exhaust, Roof, Hood, Nitro)
+    // Live visual mod preview (Wheels, Spoilers, Bumpers, Skirts, Exhaust, Roof, Hood — skip Nitro on hover so slots never stack!)
     vehmods::ModCat vmc{};
     if (IsVisualModCategory(g_activeSubCat, vmc)) {
+        if (vmc == vehmods::ModCat::Nitro) return;
         if (g_previewVisualModId >= 1000 && g_previewVisualModId != g_savedVisualModId) {
             vehmods::RemoveUpgradeLive(veh, g_previewVisualModId);
             g_previewVisualModId = -1;
@@ -665,8 +669,7 @@ void ApplySubPreview(sa::CVehicle* veh) {
             vehmods::InstallUpgradeLive(veh, static_cast<int16_t>(val));
             g_previewVisualModId = static_cast<int16_t>(val);
         } else {
-            int16_t curM = vehmods::FindInstalledUpgradeInCat(veh, vmc);
-            if (curM >= 1000) vehmods::RemoveUpgradeLive(veh, curM);
+            vehmods::RemoveAllUpgradesInCat(veh, vmc);
             g_previewVisualModId = -1;
         }
         g_previewModified = true;
@@ -1028,6 +1031,14 @@ void PurchaseSubOption(sa::CVehicle* veh) {
     vehmods::ModCat vmc{};
     if (IsVisualModCategory(g_activeSubCat, vmc)) {
         if (cost > 0) sa::AddPlayerMoney(-cost);
+        if (vmc == vehmods::ModCat::Nitro) {
+            vehmods::InstallNitroClean(veh, static_cast<int16_t>(opt.value));
+        } else if (opt.value < 1000) {
+            vehmods::RemoveAllUpgradesInCat(veh, vmc);
+        } else if (!vehmods::VehicleHasUpgradeId(veh, static_cast<int16_t>(opt.value))) {
+            vehmods::RemoveAllUpgradesInCat(veh, vmc);
+            vehmods::InstallUpgradeLive(veh, static_cast<int16_t>(opt.value));
+        }
         g_savedVisualModId   = static_cast<int16_t>(opt.value);
         g_previewVisualModId = -1;
         g_previewModified    = false;
@@ -1200,12 +1211,15 @@ void EnterStandaloneWorkshop(int shopIdx, sa::CVehicle* veh) {
     sa::ScriptCmd(0x04BB).Int(shop.interiorId).Run();              // SET_AREA_VISIBLE
     sa::ScriptCmd(0x0860).Int(pedH).Int(shop.interiorId).Run();    // SET_CHAR_AREA_VISIBLE
     sa::ScriptCmd(0x0840).Int(h).Int(shop.interiorId).Run();       // SET_VEHICLE_AREA_VISIBLE
+    // Synchronously stream interior floor collision BEFORE querying ground Z so tires NEVER embed into floor!
+    sa::ScriptCmd(0x03CB).Float(shop.intX).Float(shop.intY).Float(shop.intZ).Run(); // LOAD_SCENE
 
-    // Find exact interior floor collision height and let GTA SA's suspension settle naturally during fade-in!
     float floorZ = shop.intZ;
-    sa::ScriptCmd(0x02CE).Float(shop.intX).Float(shop.intY).Float(shop.intZ + 1.5f).Out(floorZ).Run();
-    float placeZ = (floorZ > shop.intZ - 2.5f && floorZ < shop.intZ + 1.0f) ? (floorZ + 0.04f) : (shop.intZ - 0.12f);
+    sa::ScriptCmd(0x02CE).Float(shop.intX).Float(shop.intY).Float(shop.intZ + 2.5f).Out(floorZ).Run();
+    // Place slightly ABOVE solid floor so suspension drops down gently onto tires (never jammed upward from below!)
+    float placeZ = (floorZ > shop.intZ - 2.5f && floorZ < shop.intZ + 2.0f) ? (floorZ + 0.24f) : (shop.intZ + 0.20f);
 
+    veh->MoveSpeed() = {0.0f, 0.0f, 0.0f};
     sa::ScriptCmd(0x0519).Int(h).Int(0).Run(); // Keep unfrozen briefly so wheels drop flush onto the garage floor!
     sa::ScriptCmd(0x00AB).Int(h).Float(shop.intX).Float(shop.intY).Float(placeZ).Run();
     sa::ScriptCmd(0x0175).Int(h).Float(shop.intHeading).Run();
@@ -1213,7 +1227,7 @@ void EnterStandaloneWorkshop(int shopIdx, sa::CVehicle* veh) {
     sa::ScriptCmd(0x016A).Int(260).Int(1).Run();    // Smooth fade-in
 
     g_workshopFrozen        = false;
-    g_workshopSettleUntilMs = sa::GetTimeMs() + 420;
+    g_workshopSettleUntilMs = sa::GetTimeMs() + 560;
 
     FocusCameraForCategory(CategoryId::VanillaItem, veh, true);
     RebuildMainEntries(nullptr, veh);
@@ -1257,24 +1271,28 @@ void ExitStandaloneWorkshop() {
             float placeZ = (groundZ > shop.exitZ - 3.0f && groundZ < shop.exitZ + 3.0f) ? (groundZ + 0.04f) : shop.exitZ;
 
             g_workshopVeh->MoveSpeed() = {0.0f, 0.0f, 0.0f};
-            sa::ScriptCmd(0x00AB).Int(h).Float(shop.exitX).Float(shop.exitY).Float(placeZ).Run();
+            sa::ScriptCmd(0x00AB).Int(h).Float(shop.exitX).Float(shop.exitY).Float(placeZ + 0.14f).Run();
             sa::ScriptCmd(0x0175).Int(h).Float(shop.exitHeading).Run();
             sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run();
             sa::ScriptCmd(0x0519).Int(h).Int(0).Run(); // FREEZE_CAR_POSITION false
+            sa::ScriptCmd(0x020A).Int(h).Int(1).Run(); // LOCK_CAR_DOORS unlocked!
             sa::ScriptCmd(0x0361).Str8(shop.name).Run(); // Keep garage door closed until player drives away!
             g_doorBlockedShopIdx  = shopIdx;
             g_doorOpened[shopIdx] = false;
         } else if (h > 0) {
             sa::ScriptCmd(0x0519).Int(h).Int(0).Run();
+            sa::ScriptCmd(0x020A).Int(h).Int(1).Run();
         }
     } else {
         sa::ScriptCmd(0x04BB).Int(0).Run();
         if (pedH > 0) sa::ScriptCmd(0x0860).Int(pedH).Int(0).Run();
     }
 
-    sa::ScriptCmd(0x03E6).Run(); // CLEAR_HELP
-    sa::ScriptCmd(0x02EB).Run();
-    sa::ScriptCmd(0x01B4).Int(0).Int(1).Run();
+    sa::ScriptCmd(0x03E6).Run();               // CLEAR_HELP
+    sa::ScriptCmd(0x02EB).Run();               // RESTORE_CAMERA_JUMPCUT
+    sa::ScriptCmd(0x01B4).Int(0).Int(1).Run(); // SET_PLAYER_CONTROL true
+    sa::ScriptCmd(0x07CC).Int(0).Int(1).Run(); // SET_PLAYER_ENTER_CAR_BUTTON true (fixes 'F' locked after mod shop!)
+    sa::GetPad0()[0x119] = 0;                  // Directly clear CPad::bDisablePlayerEnterCar
     sa::ScriptCmd(0x016A).Int(260).Int(1).Run();
 
     g_standaloneMode = false;
@@ -1352,12 +1370,39 @@ void __cdecl HookedMenuSystemProcess(int8_t panelId) {
     if (g_origMenuProcess) g_origMenuProcess(panelId);
 }
 
+// Hooks BOTH CGarage::Update calls to CGarage::CanThisGarageModifyCar (0x0044C62E & 0x0044C6CB)!
+// Lets GTA SA's own CGarage::Update open mod shop doors ONCE & butter-smoothly for ANY land vehicle
+// (zero stuttering/re-closing!) and keeps a just-exited shop door closed until >22m away!
+bool __fastcall HookedCanGarageModifyCar(uint8_t* garage, void*, sa::CVehicle* veh) {
+    if (!garage || !sa::IsVehicleValid(veh)) return false;
+    float gx = (*reinterpret_cast<const float*>(garage + 0x28) + *reinterpret_cast<const float*>(garage + 0x2C)) * 0.5f;
+    float gy = (*reinterpret_cast<const float*>(garage + 0x30) + *reinterpret_cast<const float*>(garage + 0x34)) * 0.5f;
+    for (int i = 0; i < 5; ++i) {
+        float dx = gx - kModShops[i].cx;
+        float dy = gy - kModShops[i].cy;
+        if (dx * dx + dy * dy < 400.0f) {
+            if (i == g_doorBlockedShopIdx) return false;
+            if (sa::IsOnMission()) {
+                return g_origCanModOpen ? g_origCanModOpen(garage, veh) : false;
+            }
+            return veh->IsLandVehicle();
+        }
+    }
+    return g_origCanModOpen ? g_origCanModOpen(garage, veh) : false;
+}
+
 } // namespace
 
 void InstallHooks() {
     uintptr_t orig = mem::HookCall(0x0058FCDA, reinterpret_cast<uintptr_t>(&HookedMenuSystemProcess));
     g_origMenuProcess = reinterpret_cast<FnMenuProcess>(orig);
-    modlog::Info("[Workshop] Hooked CMenuSystem::Process at 0x0058FCDA (orig=0x%08X)", orig);
+
+    g_origCanModClose = reinterpret_cast<FnCanGarageMod>(
+        mem::HookCall(0x0044C62E, reinterpret_cast<uintptr_t>(&HookedCanGarageModifyCar)));
+    g_origCanModOpen = reinterpret_cast<FnCanGarageMod>(
+        mem::HookCall(0x0044C6CB, reinterpret_cast<uintptr_t>(&HookedCanGarageModifyCar)));
+
+    modlog::Info("[Workshop] Hooked CMenuSystem::Process (0x0058FCDA) + CGarage::CanModifyCar (0x0044C62E, 0x0044C6CB).");
 }
 
 void PreScriptsTick() {
@@ -1538,22 +1583,21 @@ void PostScriptsTick() {
     sa::CVehicle* veh = sa::FindPlayerVehicle(0, false);
     sa::CPed* ped = sa::FindPlayerPed(0);
     if (!veh || !ped || veh->GetDriver() != ped || !veh->IsLandVehicle()) {
-        for (int i = 0; i < 5; ++i) {
-            if (g_doorOpened[i]) {
-                sa::ScriptCmd(0x0361).Str8(kModShops[i].name).Run();
-                g_doorOpened[i] = false;
-            }
+        g_insideShopIdx = -1;
+        g_waitLeaveBox  = false;
+        if (ped && g_doorBlockedShopIdx >= 0 && g_doorBlockedShopIdx < 5) {
+            sa::CVector pp = ped->GetPosition();
+            const auto& bs = kModShops[g_doorBlockedShopIdx];
+            float dBlk = std::sqrt((pp.x - bs.cx) * (pp.x - bs.cx) + (pp.y - bs.cy) * (pp.y - bs.cy));
+            if (dBlk > 22.0f) g_doorBlockedShopIdx = -1;
         }
-        g_insideShopIdx      = -1;
-        g_waitLeaveBox       = false;
-        g_doorBlockedShopIdx = -1;
         return;
     }
 
     sa::CVector p = veh->GetPosition();
     int foundInside = -1;
 
-    // After exiting a workshop, keep its garage door CLOSED until the player drives > 22m away!
+    // After exiting a workshop, keep its garage door CLOSED (via HookedCanGarageModifyCar) until > 22m away!
     if (g_doorBlockedShopIdx >= 0 && g_doorBlockedShopIdx < 5) {
         const auto& bs = kModShops[g_doorBlockedShopIdx];
         float dBlk = std::sqrt((p.x - bs.cx) * (p.x - bs.cx) + (p.y - bs.cy) * (p.y - bs.cy));
@@ -1564,22 +1608,6 @@ void PostScriptsTick() {
 
     for (int i = 0; i < 5; ++i) {
         const auto& s = kModShops[i];
-        float dCenter = std::sqrt((p.x - s.cx) * (p.x - s.cx) + (p.y - s.cy) * (p.y - s.cy));
-        float dz      = std::fabs(p.z - s.cz);
-
-        // Keep door cleanly OPEN while approaching (idempotent OPEN_GARAGE overrides vanilla CGarage::Update
-        // trying to slam the door on non-vanilla-moddable cars!). After exiting, g_doorBlockedShopIdx keeps
-        // the door shut until the player drives > 22m away!
-        if (i != g_doorBlockedShopIdx && dCenter < 15.0f && dz < 5.0f) {
-            if (!sa::ScriptCmd(0x03B0).Str8(s.name).Run()) { // !IS_GARAGE_OPEN
-                sa::ScriptCmd(0x0360).Str8(s.name).Run();   // OPEN_GARAGE (idempotent while OPENING/OPEN!)
-            }
-            g_doorOpened[i] = true;
-        } else if (g_doorOpened[i] && (dCenter > 18.5f || dz > 6.5f)) {
-            sa::ScriptCmd(0x0361).Str8(s.name).Run(); // CLOSE_GARAGE once when leaving
-            g_doorOpened[i] = false;
-        }
-
         if (p.x >= s.minX && p.x <= s.maxX &&
             p.y >= s.minY && p.y <= s.maxY &&
             p.z >= s.minZ && p.z <= s.maxZ) {
@@ -1590,6 +1618,12 @@ void PostScriptsTick() {
     if (foundInside < 0) {
         g_insideShopIdx = -1;
         g_waitLeaveBox  = false;
+        // Safety guard: if vanilla carmod1.sc / CGarage left bDisablePlayerEnterCar (+0x119) stuck = 1
+        // after leaving a mod shop area in free roam, clear it so 'F' ALWAYS exits vehicles cleanly!
+        if (!sa::IsOnMission() && sa::GetActiveInterior() == 0 && !g_vanillaHookMode &&
+            !modbus::IsAnyModalMenuOpen() && sa::GetPad0()[0x119] != 0) {
+            sa::GetPad0()[0x119] = 0;
+        }
         return;
     }
 

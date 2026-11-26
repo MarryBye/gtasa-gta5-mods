@@ -163,6 +163,7 @@ void InstallAllHooks() {
         mem::HookCall(0x0053C70B, reinterpret_cast<uintptr_t>(&HookedGenericLoad)));
 
     ammu::InstallHooks();
+    wheel::InstallHooks();
     wvis::InstallHooks();
     waudio::InstallHooks();
 

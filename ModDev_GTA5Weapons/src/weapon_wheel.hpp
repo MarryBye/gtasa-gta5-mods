@@ -2,7 +2,10 @@
 
 namespace wheel {
 
-// Called before CTheScripts::Process each frame (handles TAB hold, mouse sector select, weapon cycling, slow-mo)
+// Hooks CHud::Draw -> CPad::GetDisplayVitalStats (0x0058FC24) to suppress vanilla TAB stats popup
+void InstallHooks();
+
+// Called before CTheScripts::Process each frame (handles TAB hold, mouse sector select, weapon cycling)
 void PreScriptsTick();
 
 // Called after CTheScripts::Process each frame (syncs player inventory cleanly)

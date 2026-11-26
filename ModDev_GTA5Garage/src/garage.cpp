@@ -120,10 +120,26 @@ void SnapshotVehicleToSlot(sa::CVehicle* veh, int slotIdx) {
         dst.visuals.paintjob       = -1;
     }
 
-    // All 15 vanilla upgrade slots (spoilers, bumpers, skirts, roof, hood, exhaust, wheels, nitro, hydraulics, stereo, etc.)
+    // All 15 vanilla upgrade slots (deduplicate Nitro 1008/1009/1010 so only one clean Nitro is stored!)
     const int16_t* upgs = veh->Upgrades();
+    int16_t lastNitro = -1;
     for (int i = 0; i < 15; ++i) {
-        dst.visuals.upgrades[i] = upgs[i];
+        if (upgs[i] == 1008 || upgs[i] == 1009 || upgs[i] == 1010) lastNitro = upgs[i];
+    }
+    int writeIdx = 0;
+    for (int i = 0; i < 15; ++i) dst.visuals.upgrades[i] = -1;
+    bool wroteNitro = false;
+    for (int i = 0; i < 15 && writeIdx < 15; ++i) {
+        int16_t u = upgs[i];
+        if (u < 1000) continue;
+        if (u == 1008 || u == 1009 || u == 1010) {
+            if (!wroteNitro && lastNitro >= 1000) {
+                dst.visuals.upgrades[writeIdx++] = lastNitro;
+                wroteNitro = true;
+            }
+            continue;
+        }
+        dst.visuals.upgrades[writeIdx++] = u;
     }
 
     // GTA 5 performance & visual tuning + ETS 2 wear state
@@ -201,24 +217,39 @@ void ApplySavedVehicleConfig(sa::CVehicle* veh, const mod::OwnedVehicle& data) {
     // 3. Ensure universal mount points exist for cars like Bullet/Infernus/Tahoma before attaching saved mods!
     sa::EnsureUniversalUpgradeMounts(veh);
 
-    // All 15 vanilla upgrades (request -> load -> install -> release)
+    // All 15 vanilla upgrades (request -> load -> install -> release; deduplicate legacy Nitro slots cleanly!)
+    int16_t savedNitro = -1;
     bool requestedAny = false;
     for (int i = 0; i < 15; ++i) {
         int16_t modId = data.visuals.upgrades[i];
+        if (modId == 1008 || modId == 1009 || modId == 1010) {
+            savedNitro = modId;
+            continue;
+        }
         if (modId >= 1000 && modId <= 1193) {
             sa::ScriptCmd(0x06E9).Int(modId).Run(); // REQUEST_VEHICLE_MOD
             requestedAny = true;
         }
     }
+    if (savedNitro >= 1000) {
+        sa::ScriptCmd(0x06E9).Int(savedNitro).Run();
+        requestedAny = true;
+    }
     if (requestedAny) {
         sa::ScriptCmd(0x038B).Run(); // LOAD_ALL_MODELS_NOW
         for (int i = 0; i < 15; ++i) {
             int16_t modId = data.visuals.upgrades[i];
+            if (modId == 1008 || modId == 1009 || modId == 1010) continue;
             if (modId >= 1000 && modId <= 1193) {
                 int32_t dummyOut = 0;
                 sa::ScriptCmd(0x06E7).Int(handle).Int(modId).Out(dummyOut).Run(); // ADD_VEHICLE_MOD
                 sa::ScriptCmd(0x06EB).Int(modId).Run(); // MARK_VEHICLE_MOD_AS_NO_LONGER_NEEDED
             }
+        }
+        if (savedNitro >= 1000) {
+            int32_t dummyOut = 0;
+            sa::ScriptCmd(0x06E7).Int(handle).Int(savedNitro).Out(dummyOut).Run();
+            sa::ScriptCmd(0x06EB).Int(savedNitro).Run();
         }
     }
 
