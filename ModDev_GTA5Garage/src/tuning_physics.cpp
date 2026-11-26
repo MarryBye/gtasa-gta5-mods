@@ -1,5 +1,6 @@
 #include "tuning_physics.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -10,6 +11,7 @@
 #include "audio.hpp"
 #include "config.hpp"
 #include "log.hpp"
+#include "memory.hpp"
 
 namespace tuning {
 
@@ -41,6 +43,41 @@ struct TrackedVehicle {
 };
 
 TrackedVehicle g_tracked[MAX_TRACKED_VEHICLES];
+
+// Lock-free active player vehicle pitch target for the native CAEVehicleAudioEntity::GetFreqForPlayerEngineSound hook.
+// Each EMS Engine Level (1..4) progressively lowers the vehicle's OWN original GTA SA engine sound pitch
+// across idle, acceleration, coasting, gear shifts & mid-air without making it louder!
+std::atomic<uintptr_t> g_activePitchVeh{0};
+std::atomic<float>     g_activePitchScale{1.0f};
+
+using GetFreqForPlayerEngineFn = float(__thiscall*)(uint8_t*, void*, int32_t);
+GetFreqForPlayerEngineFn g_origGetFreqForPlayerEngine = nullptr;
+
+inline float EngineLevelToPitchScale(uint8_t engLevel) {
+    static constexpr float kPitchScales[5] = {
+        1.00f, // Stock
+        0.92f, // EMS Lv.1 (-8% deeper)
+        0.85f, // EMS Lv.2 (-15% deeper)
+        0.78f, // EMS Lv.3 (-22% deeper)
+        0.71f, // EMS Lv.4 (-29% deeper)
+    };
+    return kPitchScales[std::min<int>(engLevel, 4)];
+}
+
+float __fastcall Hook_GetFreqForPlayerEngineSound(uint8_t* self, void* /*edx*/, void* state, int32_t slot) {
+    float freq = g_origGetFreqForPlayerEngine(self, state, slot);
+    if (self && mod::Config().enableEngineTone) {
+        // Verified at 0x004F82E5: mov ecx, DWORD PTR [esi+0x4] -> CVehicle* m_pEntity
+        uintptr_t vehAddr = *reinterpret_cast<const uintptr_t*>(self + 0x04);
+        if (vehAddr != 0 && vehAddr == g_activePitchVeh.load(std::memory_order_relaxed)) {
+            float scale = g_activePitchScale.load(std::memory_order_relaxed);
+            if (scale > 0.45f && scale < 1.0f) {
+                freq = std::max(0.28f, freq * scale);
+            }
+        }
+    }
+    return freq;
+}
 
 struct CachedModelHandling {
     bool              valid       = false;
@@ -472,6 +509,11 @@ void ApplyTuning(sa::CVehicle* veh, const mod::PerformanceTuning& cfg, const mod
         tv->wear.ClampAll();
     }
     RebuildHandling(*tv);
+
+    if (veh == sa::FindPlayerVehicle(0, false)) {
+        g_activePitchVeh.store(reinterpret_cast<uintptr_t>(veh), std::memory_order_relaxed);
+        g_activePitchScale.store(EngineLevelToPitchScale(tv->cfg.engineLevel), std::memory_order_relaxed);
+    }
 }
 
 void SetLiveWear(sa::CVehicle* veh, const mod::VehicleWear& wear) {
@@ -499,6 +541,10 @@ mod::PerformanceTuning* GetLiveTuningMutable(sa::CVehicle* veh) {
 }
 
 void DetachVehicle(sa::CVehicle* veh) {
+    if (reinterpret_cast<uintptr_t>(veh) == g_activePitchVeh.load(std::memory_order_relaxed)) {
+        g_activePitchVeh.store(0, std::memory_order_relaxed);
+        g_activePitchScale.store(1.0f, std::memory_order_relaxed);
+    }
     TrackedVehicle* tv = FindSlot(veh);
     if (!tv) return;
     if (sa::IsVehicleValid(tv->veh) && tv->origHandling) {
@@ -509,6 +555,8 @@ void DetachVehicle(sa::CVehicle* veh) {
 }
 
 void ResetAll() {
+    g_activePitchVeh.store(0, std::memory_order_relaxed);
+    g_activePitchScale.store(1.0f, std::memory_order_relaxed);
     for (int i = 0; i < MAX_TRACKED_VEHICLES; ++i) {
         if (g_tracked[i].inUse) {
             if (sa::IsVehicleValid(g_tracked[i].veh) && g_tracked[i].origHandling) {
@@ -519,6 +567,40 @@ void ResetAll() {
         }
     }
     audio::StopAll();
+}
+
+void InstallAudioHooks() {
+    if (g_origGetFreqForPlayerEngine != nullptr) return;
+
+    // Verified in gta_sa.exe 1.0 US (Hoodlum):
+    // 0x004F8070: 83 EC 08        sub esp, 0x8
+    // 0x004F8073: 8B 54 24 0C     mov edx, [esp+0xC]
+    // 0x004F8077: D9 42 1C        fld DWORD PTR [edx+0x1C]
+    constexpr uintptr_t kTargetAddr = 0x004F8070;
+    constexpr size_t    kStolenLen  = 7;
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(kTargetAddr);
+    if (bytes[0] != 0x83 || bytes[1] != 0xEC || bytes[2] != 0x08 ||
+        bytes[3] != 0x8B || bytes[4] != 0x54 || bytes[5] != 0x24 || bytes[6] != 0x0C) {
+        modlog::Info("[AudioHook] Unexpected prolog at 0x004F8070; native engine pitch scaling skipped.");
+        return;
+    }
+
+    auto* tramp = static_cast<uint8_t*>(VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!tramp) return;
+
+    std::memcpy(tramp, bytes, kStolenLen);
+    tramp[kStolenLen] = 0xE9; // JMP back to kTargetAddr + 7
+    int32_t relBack = static_cast<int32_t>((kTargetAddr + kStolenLen) - (reinterpret_cast<uintptr_t>(tramp) + kStolenLen + 5));
+    std::memcpy(tramp + kStolenLen + 1, &relBack, 4);
+    FlushInstructionCache(GetCurrentProcess(), tramp, kStolenLen + 5);
+    g_origGetFreqForPlayerEngine = reinterpret_cast<GetFreqForPlayerEngineFn>(tramp);
+
+    uint8_t patch[kStolenLen] = {0xE9, 0, 0, 0, 0, 0x90, 0x90};
+    int32_t relHook = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&Hook_GetFreqForPlayerEngineSound) - (kTargetAddr + 5));
+    std::memcpy(patch + 1, &relHook, 4);
+    mem::PatchBytes(kTargetAddr, patch, kStolenLen);
+
+    modlog::Info("[AudioHook] Installed native engine pitch hook at 0x004F8070 (CAEVehicleAudioEntity::GetFreqForPlayerEngineSound).");
 }
 
 void TickAll() {
@@ -534,7 +616,7 @@ void TickAll() {
     const float dt = std::clamp(sa::GetTimeStep() / 50.0f, 0.001f, 0.05f);
     const uint32_t nowMs = sa::GetTimeMs();
 
-    bool engineAudioHandled = false;
+    bool pitchAssigned      = false;
     bool turboAudioHandled  = false;
     bool hornAudioHandled   = false;
 
@@ -659,38 +741,12 @@ void TickAll() {
                 }
             }
 
-            // Estimate smooth in-gear RPM (0..1) so engine tone sweeps naturally with every shift!
-            float rawRpm = 0.08f;
-            float effectiveLoad = gas;
-            if (inAir) {
-                // Wheels unloaded in mid-air: free-rev lightly only while holding gas, drop immediately to quiet idle off-gas!
-                rawRpm        = std::clamp(0.10f + gas * 0.44f, 0.08f, 0.54f);
-                effectiveLoad = gas * 0.28f;
-            } else {
-                float gearMax = 0.20f;
-                if (gear >= 1 && gear < 6) {
-                    gearMax = std::max(0.15f, tv.customHandling.m_transmissionData.m_aGears[gear].m_fMaxVelocity);
-                }
-                rawRpm = std::clamp((speed / gearMax) * 0.85f + gas * 0.28f, 0.08f, 1.0f);
-            }
-            tv.smoothRpm += (rawRpm - tv.smoothRpm) * std::min(1.0f, dt * 8.5f);
-
-            // Authentic Per-Vehicle Progressive Engine Tone (GENRL Sound Bank DSP, Engine Lv 1..4)
-            // Pitch-locked directly to GTA SA's live CAESound::m_fSpeed so each car retains its unique engine voice!
-            // Subtle cammed rumble at idle (Lv.2..4), full throaty growl/roar under throttle!
-            bool engineAudible = v->IsEngineOn() && !(inAir && gas < 0.08f) &&
-                                 (speed > 0.015f || gas > 0.05f || c.engineLevel >= 2);
-            if (c.engineLevel >= 1 && engineAudible) {
-                float livePitch = v->GetLiveEnginePitchRatio();
-                audio::UpdateEngineTone(v->GetModelIndex(), c.engineLevel, true, tv.smoothRpm, effectiveLoad, livePitch);
-                engineAudioHandled = true;
-
-                // Vehicle-tuned exhaust burble/pop on throttle lift at high RPM (Lv 3-4)
-                if (!inAir && c.engineLevel >= 3 && tv.prevGas > 0.45f && gas < 0.12f &&
-                    tv.smoothRpm > 0.58f && speed > 0.20f && (nowMs - tv.lastPopMs > 900)) {
-                    audio::PlayExhaustPop(v->GetModelIndex(), c.engineLevel);
-                    tv.lastPopMs = nowMs;
-                }
+            // Native GTA SA Engine Pitch Deepening (Engine Lv 1..4) — lowers THIS vehicle's own authentic
+            // GTA SA sound bank pitch across idle, accel, off-throttle coasting & mid-air without increasing volume!
+            if (c.engineLevel >= 1) {
+                g_activePitchVeh.store(reinterpret_cast<uintptr_t>(v), std::memory_order_relaxed);
+                g_activePitchScale.store(EngineLevelToPitchScale(c.engineLevel), std::memory_order_relaxed);
+                pitchAssigned = true;
             }
 
             // Transmission crisp upshift punch (grounded only!)
@@ -701,7 +757,7 @@ void TickAll() {
                 v->MoveSpeed().y += fwd.y * kick;
             }
 
-            // Turbocharger boost thrust + soft subtle spool & BOV (grounded load only — decays cleanly in mid-air!)
+            // Turbocharger boost thrust + soft subtle spool & gentle BOV on gear shifts / throttle lift
             if (c.turbo) {
                 bool onGas = (!inAir && v->GasPedal() > 0.22f && v->IsEngineOn());
                 if (onGas && speed > 0.03f) {
@@ -718,8 +774,8 @@ void TickAll() {
                         }
                     }
                 } else {
-                    if (!inAir && (tv.prevGas > 0.38f && gas <= 0.15f && tv.turboBoost > 0.45f) &&
-                        (nowMs - tv.lastBovMs > 650)) {
+                    if (!inAir && (tv.prevGas > 0.35f && gas <= 0.15f && tv.turboBoost > 0.40f) &&
+                        (nowMs - tv.lastBovMs > 600)) {
                         audio::PlayTurboBov(tv.turboBoost);
                         tv.lastBovMs = nowMs;
                         tv.turboBoost *= 0.25f;
@@ -727,10 +783,11 @@ void TickAll() {
                     tv.turboBoost = std::max(0.0f, tv.turboBoost - dt * (inAir ? 4.5f : 2.8f));
                 }
 
-                if (!inAir && gear > tv.prevGear && tv.turboBoost > 0.52f && (nowMs - tv.lastBovMs > 650)) {
+                // Crisp light BOV pshh on brisk gear upshifts under boost!
+                if (!inAir && gear > tv.prevGear && tv.turboBoost > 0.30f && (nowMs - tv.lastBovMs > 550)) {
                     audio::PlayTurboBov(tv.turboBoost);
                     tv.lastBovMs = nowMs;
-                    tv.turboBoost *= 0.55f;
+                    tv.turboBoost *= 0.52f;
                 }
 
                 if (!inAir && tv.turboBoost >= 0.08f) {
@@ -752,7 +809,10 @@ void TickAll() {
         }
     }
 
-    if (!engineAudioHandled) audio::StopEngineTone();
+    if (!pitchAssigned) {
+        g_activePitchVeh.store(0, std::memory_order_relaxed);
+        g_activePitchScale.store(1.0f, std::memory_order_relaxed);
+    }
     if (!turboAudioHandled)  audio::UpdateTurboSpool(false, 0.0f);
     if (!hornAudioHandled)   audio::UpdateCustomHorn(0, false);
 }

@@ -36,7 +36,11 @@ mod::PerformanceTuning* GetLiveTuningMutable(sa::CVehicle* veh);
 void DetachVehicle(sa::CVehicle* veh);
 void ResetAll();
 
-// Per-frame physics, wear accumulation, armor mitigation, bulletproof tires, turbo boost & audio, engine tone, custom horn
+// Install native GTA SA engine audio pitch hook (CAEVehicleAudioEntity::GetFreqForPlayerEngineSound @ 0x004F8070)
+// Progressively lowers each upgraded vehicle's OWN original GTA SA engine sound pitch (Lv.1..Lv.4) without raising volume!
+void InstallAudioHooks();
+
+// Per-frame physics, wear accumulation, armor mitigation, bulletproof tires, turbo boost & audio, native engine pitch, custom horn
 void TickAll();
 
 } // namespace tuning
