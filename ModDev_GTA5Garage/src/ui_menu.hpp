@@ -40,6 +40,7 @@ inline void DrawVehicleStatsPanel(const std::string& vehicleNameGame,
     spec.rows = {
         {Loc("Макс. скорость", "Top Speed"),    curSpd,             prevSpd,                maxSpd, spdUnit, prisSpd},
         {Loc("Ускорение",      "Acceleration"), cur.accelRating,    preview.accelRating,    120,    "",      pristine ? pristine->accelRating    : -1},
+        {Loc("Передачи",       "Gears"),        cur.numGears,       preview.numGears,       5,      "",      -1},
         {Loc("Торможение",     "Braking"),      cur.brakeRating,    preview.brakeRating,    120,    "",      pristine ? pristine->brakeRating    : -1},
         {Loc("Управление",     "Handling"),     cur.handlingRating, preview.handlingRating, 120,    "",      pristine ? pristine->handlingRating : -1},
         {Loc("Кузов (Броня)",  "Armor"),        cur.armorPercent,   preview.armorPercent,   200,    "%",     pristine ? pristine->armorPercent   : -1},
@@ -61,7 +62,7 @@ inline void DrawPlateInputBox(const std::string& plateText, int price) {
     spec.text            = plateText;
     spec.placeholderGame = "GROVE ST";
     spec.maxLen          = 8;
-    spec.line1HintGame   = Loc("Enter - Применить | Esc - Отмена", "Enter - Apply | Esc - Cancel");
+    spec.line1HintGame   = Loc("Enter: Применить  -  Esc: Отмена", "Enter: Apply  -  Esc: Cancel");
     spec.line2HintGame   = Loc("Латиница A-Z, цифры 0-9, пробел", "A-Z, 0-9, Space, Backspace");
     spec.plateStyle      = false;
     DrawTextInputBox(spec);

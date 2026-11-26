@@ -416,7 +416,7 @@ void Render2D() {
             prevHp  = std::min(maxHp, hp + d.healHp);
             prevCap = std::min(cfg.maxFoodCapacity, usedFood + w);
             char nb[80];
-            std::snprintf(nb, sizeof(nb), "+%d HP | %s: %d | %s: %d",
+            std::snprintf(nb, sizeof(nb), "+%d HP, %s: %d, %s: %d",
                           d.healHp, ui::Loc("Объём", "Size").c_str(), w,
                           ui::Loc("Свободно", "Free").c_str(), freeFood);
             note = nb;

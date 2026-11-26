@@ -830,7 +830,7 @@ void Render2D() {
         spec.colRightGame  = ui::Loc(pc.rus, pc.eng);
         spec.footerGame    = g_remoteMode
             ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет", "A/D Color")
-            : ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет | Q/E Кам. | Z/X Зум", "A/D Color | Q/E Cam | Z/X Zoom");
+            : ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет, Q/E Кам., Z/X Зум", "A/D Color, Q/E Cam, Z/X Zoom");
         spec.selectedIndex = g_vehCursor;
 
         for (const auto* cv : g_catList) {
@@ -865,7 +865,7 @@ void Render2D() {
         const auto* cv = g_catList[g_vehCursor];
         auto stats = tuning::ComputeStatsForModel(cv->modelId, mod::PerformanceTuning{}, mod::VehicleWear{});
         const auto& pc = kShowroomColors[g_colorIdx % kShowroomColorCount];
-        std::string note = ui::Loc("Новый (Износ 0%) | ", "Factory New (0% Wear) | ") + ui::Loc(pc.rus, pc.eng);
+        std::string note = ui::Loc("Новый (Износ 0%), ", "Factory New (0% Wear), ") + ui::Loc(pc.rus, pc.eng);
         ui::DrawVehicleStatsPanel(sa::GetVehicleDisplayNameGameEncoded(cv->modelId), stats, stats, true, note, nullptr);
     }
 }

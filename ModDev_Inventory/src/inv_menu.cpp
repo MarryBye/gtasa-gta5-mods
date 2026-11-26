@@ -338,7 +338,7 @@ void Render2D() {
             prevHp = std::min(maxHp, hp + inv::kFoodDefs[g_snackCursor].healHp);
         }
         char nb[64];
-        std::snprintf(nb, sizeof(nb), "%s: %d/%d | %s: %d",
+        std::snprintf(nb, sizeof(nb), "%s: %d/%d, %s: %d",
                       ui::Loc("Карман", "Pocket").c_str(), st.GetUsedFoodCapacity(), cfg.maxFoodCapacity,
                       ui::Loc("Объём", "Size").c_str(), cfg.foodWeight[g_snackCursor]);
         note = nb;
@@ -353,7 +353,7 @@ void Render2D() {
         note = nb;
     } else {
         char nb[64];
-        std::snprintf(nb, sizeof(nb), "%s: %d/%d | %s: %d/%d",
+        std::snprintf(nb, sizeof(nb), "%s: %d/%d, %s: %d/%d",
                       ui::Loc("Еда", "Food").c_str(), st.GetUsedFoodCapacity(), cfg.maxFoodCapacity,
                       ui::Loc("Броня", "Armor").c_str(), st.GetUsedArmorCapacity(), cfg.maxArmorCapacity);
         note = nb;

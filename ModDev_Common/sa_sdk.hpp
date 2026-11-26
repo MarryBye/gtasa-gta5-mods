@@ -721,6 +721,7 @@ struct CVehicle : CEntity {
     uint8_t  CreatedBy() const { return *reinterpret_cast<const uint8_t*>(Raw() + 0x4A4); }
     uint8_t  GetCurrentGear() const { return *reinterpret_cast<const uint8_t*>(Raw() + 0x4B4); }
     float&   Health() { return *reinterpret_cast<float*>(Raw() + 0x4C0); }
+    float    Health() const { return *reinterpret_cast<const float*>(Raw() + 0x4C0); }
 
     // Verified in CVehicle::CVehicle (0x6D5F36: m_vehicleAudio @ +0x138),
     // CAEVehicleAudioEntity::RequestNewSound (0x4F7AFC: m_aEngineSounds[slot].m_pSound @ +0xE8 + slot*8),
@@ -785,6 +786,47 @@ constexpr size_t PED_POOL_STRIDE     = 0x7C4;
 
 inline CPoolRaw* GetVehiclePool() { return *reinterpret_cast<CPoolRaw**>(0x00B74494); }
 inline CPoolRaw* GetPedPool()     { return *reinterpret_cast<CPoolRaw**>(0x00B74490); }
+
+inline bool IsVehicleValid(const CVehicle* v);
+
+// Verified at 0x006D0460: void __thiscall cTransmission::InitGearRatios(cTransmission* this)
+// Recomputes all forward gear curves (1..m_nNumberOfGears) + reverse gear cleanly!
+inline void InitTransmissionGearRatios(cTransmission* tr) {
+    if (!tr) return;
+    if (tr->m_nNumberOfGears < 1) tr->m_nNumberOfGears = 1;
+    if (tr->m_nNumberOfGears > 5) tr->m_nNumberOfGears = 5;
+    if (tr->m_fMinGearVelocity >= -0.02f || !std::isfinite(tr->m_fMinGearVelocity)) {
+        tr->m_fMinGearVelocity = -0.25f;
+    }
+    using Fn = void(__thiscall*)(cTransmission*);
+    reinterpret_cast<Fn>(0x006D0460)(tr);
+}
+
+// Verified against CDamageManager::ResetDamageStatus (0x006C20E0) at CAutomobile + 0x5A0:
+// +0x04 engineStatus (u8), +0x05 wheelStatus[4] (u32), +0x09 doorStatus[0..5] (u32+u16),
+// +0x10 lightsStatus (u32), +0x14 panelsStatus (u32).
+inline bool IsVehicleVisuallyDamaged(const CVehicle* v) {
+    if (!IsVehicleValid(v)) return false;
+    if (v->Health() < 999.0f) return true;
+    const uint8_t* raw = v->Raw();
+    if (v->IsFourWheelLike()) {
+        const uint8_t* dm = raw + 0x5A0;
+        if (dm[0x04] != 0) return true; // engine smoke/damage
+        uint32_t wheels = 0, doors0 = 0, lights = 0, panels = 0;
+        uint16_t doors1 = 0;
+        std::memcpy(&wheels, dm + 0x05, 4);
+        std::memcpy(&doors0, dm + 0x09, 4);
+        std::memcpy(&doors1, dm + 0x0D, 2);
+        std::memcpy(&lights, dm + 0x10, 4);
+        std::memcpy(&panels, dm + 0x14, 4);
+        return (wheels != 0 || doors0 != 0 || doors1 != 0 || lights != 0 || panels != 0);
+    }
+    if (v->IsBikeLike()) {
+        const uint8_t* bw = raw + 0x65C;
+        return (bw[0] != 0 || bw[1] != 0);
+    }
+    return false;
+}
 
 inline bool IsVehicleValid(const CVehicle* v) {
     if (!v) return false;

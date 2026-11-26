@@ -216,7 +216,8 @@ void PopulateWheelFromArsenal(const sa::CPed* ped) {
         if (activeDef && activeDef->category == kSectorCats[i]) {
             pref = activeId;
         }
-        if (pref == 0 && !sr.owned.empty() && sa::IsPedValid(ped)) {
+        // Note: For Melee, pref == 0 legitimately means Unarmed (Fists), so never overwrite it with live slot!
+        if (kSectorCats[i] != wdata::WeaponCategory::Melee && pref == 0 && !sr.owned.empty() && sa::IsPedValid(ped)) {
             uint8_t gtaSlot = sr.owned[0]->gtaSlot;
             uint32_t liveId = ped->Weapons()[gtaSlot].m_nType;
             if (liveId != 0) pref = liveId;

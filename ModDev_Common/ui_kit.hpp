@@ -186,12 +186,11 @@ inline void UpdatePostCloseShield() {
     }
 }
 
-// Keep mouse edges synced even when a module's menu is closed so opening a menu while LMB is held won't false-fire!
+// Keep mouse edges synced even when a module's menu is closed (legacy no-op now that mouse uses KeyTracker edges!)
 inline void SyncIdleMouseEdges() {
-    auto* ms = sa::GetNewMouseState();
     auto& me = MouseEdges();
-    me.prevLmb = ms && (ms->lmb != 0);
-    me.prevRmb = ms && (ms->rmb != 0);
+    me.prevLmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    me.prevRmb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
 }
 
 class ListInputController {
@@ -200,15 +199,8 @@ public:
     MenuInput Poll(bool blockPad = true) const {
         MenuInput out{};
         auto* ms = sa::GetNewMouseState();
-        auto& me = MouseEdges();
-        const bool lmbNow  = ms && (ms->lmb != 0);
-        const bool rmbNow  = ms && (ms->rmb != 0);
-        const bool lmbJust = lmbNow && !me.prevLmb;
-        const bool rmbJust = rmbNow && !me.prevRmb;
-        const bool whUp    = ms && (ms->wheelUp != 0);
-        const bool whDn    = ms && (ms->wheelDown != 0);
-        me.prevLmb = lmbNow;
-        me.prevRmb = rmbNow;
+        const bool whUp = ms && (ms->wheelUp != 0);
+        const bool whDn = ms && (ms->wheelDown != 0);
 
         bool debounced = false;
         if (auto* b = modbus::GetBus(); b && b->menuInputUnlockMs != 0) {
@@ -221,6 +213,12 @@ public:
 
         if (!debounced) {
             const auto& k = Keys();
+            const bool focused = sa::IsGameWindowFocused();
+            // Use physical VK_LBUTTON / VK_RBUTTON single-edge detection from KeyTracker instead of
+            // CMouseControllerState (which gets zeroed by ClearPadListInputs -> caused 60-clicks/sec!).
+            const bool lmbJust = focused && k.JustPressed(VK_LBUTTON);
+            const bool rmbJust = focused && k.JustPressed(VK_RBUTTON);
+
             out.up     = whUp || k.Repeated(VK_UP)   || k.Repeated('W');
             out.down   = whDn || k.Repeated(VK_DOWN) || k.Repeated('S');
             out.left   = k.JustPressed(VK_LEFT)  || k.JustPressed('A');
@@ -228,6 +226,11 @@ public:
             out.accept = lmbJust || k.JustPressed(VK_RETURN) || k.JustPressed('F');
             out.back   = rmbJust || k.JustPressed(VK_BACK)   || k.JustPressed(VK_ESCAPE);
             out.del    = k.JustPressed(VK_DELETE);
+
+            // Prevent mouse switch bounce or accidental double-activation across submenu transitions!
+            if (lmbJust || rmbJust) {
+                LockMenuInputBriefly(145);
+            }
         }
 
         if (blockPad) {
@@ -280,11 +283,13 @@ inline std::string StandardFooter(const char* acceptRus = "Выбрать", cons
                                   const char* backRus   = "Назад",   const char* backEng   = "Back",
                                   const char* extraRus  = nullptr,   const char* extraEng  = nullptr)
 {
-    std::string s = Loc("F/Enter/ЛКМ - ", "F/Enter/LMB - ") + Loc(acceptRus, acceptEng);
+    // Avoid '|' (0x7C) because MSKL Russificator remaps 0x7C to a custom glyph!
+    // ':' and '-' and ',' are 100% standard across SanLtd, MSKL, 1C, Smart & Vanilla English fonts.
+    std::string s = Loc("F/Enter/ЛКМ: ", "F/Enter/LMB: ") + Loc(acceptRus, acceptEng);
     if (extraRus && extraRus[0]) {
-        s += " | " + Loc(extraRus, extraEng ? extraEng : extraRus);
+        s += "  -  " + Loc(extraRus, extraEng ? extraEng : extraRus);
     }
-    s += " | " + Loc("Back/Esc/ПКМ - ", "Back/Esc/RMB - ") + Loc(backRus, backEng);
+    s += "  -  " + Loc("Back/Esc/ПКМ: ", "Back/Esc/RMB: ") + Loc(backRus, backEng);
     return s;
 }
 

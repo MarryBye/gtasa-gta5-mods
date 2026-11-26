@@ -1,6 +1,5 @@
 #include "tuning_physics.hpp"
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -11,7 +10,6 @@
 #include "audio.hpp"
 #include "config.hpp"
 #include "log.hpp"
-#include "memory.hpp"
 
 namespace tuning {
 
@@ -43,41 +41,6 @@ struct TrackedVehicle {
 };
 
 TrackedVehicle g_tracked[MAX_TRACKED_VEHICLES];
-
-// Lock-free active player vehicle pitch target for the native CAEVehicleAudioEntity::GetFreqForPlayerEngineSound hook.
-// Each EMS Engine Level (1..4) progressively lowers the vehicle's OWN original GTA SA engine sound pitch
-// across idle, acceleration, coasting, gear shifts & mid-air without making it louder!
-std::atomic<uintptr_t> g_activePitchVeh{0};
-std::atomic<float>     g_activePitchScale{1.0f};
-
-using GetFreqForPlayerEngineFn = float(__thiscall*)(uint8_t*, void*, int32_t);
-GetFreqForPlayerEngineFn g_origGetFreqForPlayerEngine = nullptr;
-
-inline float EngineLevelToPitchScale(uint8_t engLevel) {
-    static constexpr float kPitchScales[5] = {
-        1.00f, // Stock
-        0.92f, // EMS Lv.1 (-8% deeper)
-        0.85f, // EMS Lv.2 (-15% deeper)
-        0.78f, // EMS Lv.3 (-22% deeper)
-        0.71f, // EMS Lv.4 (-29% deeper)
-    };
-    return kPitchScales[std::min<int>(engLevel, 4)];
-}
-
-float __fastcall Hook_GetFreqForPlayerEngineSound(uint8_t* self, void* /*edx*/, void* state, int32_t slot) {
-    float freq = g_origGetFreqForPlayerEngine(self, state, slot);
-    if (self && mod::Config().enableEngineTone) {
-        // Verified at 0x004F82E5: mov ecx, DWORD PTR [esi+0x4] -> CVehicle* m_pEntity
-        uintptr_t vehAddr = *reinterpret_cast<const uintptr_t*>(self + 0x04);
-        if (vehAddr != 0 && vehAddr == g_activePitchVeh.load(std::memory_order_relaxed)) {
-            float scale = g_activePitchScale.load(std::memory_order_relaxed);
-            if (scale > 0.45f && scale < 1.0f) {
-                freq = std::max(0.28f, freq * scale);
-            }
-        }
-    }
-    return freq;
-}
 
 struct CachedModelHandling {
     bool              valid       = false;
@@ -163,9 +126,11 @@ bool LoadHandlingFromCfgFallback(int32_t modelId, sa::tHandlingData& out, bool& 
             out.m_fTractionBias = tracBias;
             out.m_transmissionData.m_nNumberOfGears = static_cast<uint8_t>(std::clamp(numGears, 1, 5));
             out.m_transmissionData.m_fMaxGearVelocity = maxVelKmh / 180.0f;
+            out.m_transmissionData.m_fMinGearVelocity = -0.25f;
             out.m_transmissionData.m_fEngineAcceleration = accel * 0.4f * 0.0004f;
             out.m_transmissionData.m_fEngineInertia = inertia;
             out.m_fBrakeDeceleration = brakeDecel * 0.0004f;
+            sa::InitTransmissionGearRatios(&out.m_transmissionData);
             return true;
         }
     }
@@ -226,10 +191,18 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
     static constexpr float kEngDrag[5]  = {1.00f, 0.92f, 0.84f, 0.75f, 0.66f};
     int eIdx = std::clamp<int>(c.engineLevel, 0, 4);
 
-    // 2. Transmission (0..3): snappier revs/shifts + extra pull
-    static constexpr float kTransAccel[4]   = {1.00f, 1.08f, 1.17f, 1.28f};
-    static constexpr float kTransInertia[4] = {1.00f, 0.80f, 0.62f, 0.45f};
+    // 2. Transmission (0..3): adds extra forward gears (up to GTA SA's 5-speed max, e.g. Hermes 4 -> 5!)
+    // + taller overdrive gear ratios (higher top-end breathing room) + snappier shift response!
+    static constexpr float kTransAccel[4]   = {1.00f, 1.08f, 1.18f, 1.30f};
+    static constexpr float kTransTop[4]     = {1.00f, 1.05f, 1.11f, 1.18f};
+    static constexpr float kTransInertia[4] = {1.00f, 0.80f, 0.60f, 0.42f};
     int tIdx = std::clamp<int>(c.transmissionLevel, 0, 3);
+
+    int baseGears = std::clamp<int>(base.m_transmissionData.m_nNumberOfGears, 1, 5);
+    int newGears  = baseGears;
+    if (tIdx == 1 && baseGears < 5)      newGears = std::min(5, baseGears + 1);
+    else if (tIdx == 2 && baseGears < 5) newGears = std::min(5, baseGears + 2);
+    else if (tIdx >= 3 && baseGears >= 2) newGears = 5;
 
     // Turbo: strong power boost + subtle top speed bump
     float turboAccel = c.turbo ? 1.16f : 1.00f;
@@ -237,16 +210,19 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
     float turboDrag  = c.turbo ? 0.92f : 1.00f;
 
     float accelMult = kEngAccel[eIdx] * kTransAccel[tIdx] * turboAccel;
-    float topMult   = kEngTop[eIdx] * turboTop;
+    float topMult   = kEngTop[eIdx] * kTransTop[tIdx] * turboTop;
 
     out.m_fDragMult *= (kEngDrag[eIdx] * turboDrag);
+    out.m_transmissionData.m_nNumberOfGears      = static_cast<uint8_t>(newGears);
     out.m_transmissionData.m_fEngineAcceleration *= accelMult;
     out.m_transmissionData.m_fEngineInertia      *= kTransInertia[tIdx];
     out.m_transmissionData.m_fMaxGearVelocity    *= topMult;
-    for (int g = 1; g < 6; ++g) {
-        out.m_transmissionData.m_aGears[g].m_fMaxVelocity        *= topMult;
-        out.m_transmissionData.m_aGears[g].m_fChangeUpVelocity   *= topMult;
-        out.m_transmissionData.m_aGears[g].m_fChangeDownVelocity *= topMult;
+    if (out.m_transmissionData.m_fMaxGearVelocity <= 0.05f) {
+        for (int g = 1; g < 6; ++g) {
+            out.m_transmissionData.m_aGears[g].m_fMaxVelocity        *= topMult;
+            out.m_transmissionData.m_aGears[g].m_fChangeUpVelocity   *= topMult;
+            out.m_transmissionData.m_aGears[g].m_fChangeDownVelocity *= topMult;
+        }
     }
 
     // 3. Suspension (0..4) — 4-wheel vehicles
@@ -311,11 +287,13 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
         out.m_fDragMult *= (1.0f + 0.30f * wE + 0.12f * wTi);
         out.m_transmissionData.m_fEngineAcceleration *= wearAccelMult;
         out.m_transmissionData.m_fEngineInertia      *= (1.0f + 0.75f * wTr);
-        out.m_transmissionData.m_fMaxGearVelocity    *= wearTopMult;
-        for (int g = 1; g < 6; ++g) {
-            out.m_transmissionData.m_aGears[g].m_fMaxVelocity        *= wearTopMult;
-            out.m_transmissionData.m_aGears[g].m_fChangeUpVelocity   *= wearTopMult;
-            out.m_transmissionData.m_aGears[g].m_fChangeDownVelocity *= wearTopMult;
+        out.m_transmissionData.m_fMaxGearVelocity *= wearTopMult;
+        if (out.m_transmissionData.m_fMaxGearVelocity <= 0.05f) {
+            for (int g = 1; g < 6; ++g) {
+                out.m_transmissionData.m_aGears[g].m_fMaxVelocity        *= wearTopMult;
+                out.m_transmissionData.m_aGears[g].m_fChangeUpVelocity   *= wearTopMult;
+                out.m_transmissionData.m_aGears[g].m_fChangeDownVelocity *= wearTopMult;
+            }
         }
 
         // Brakes wear weakens deceleration strongly
@@ -332,6 +310,12 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
 
         // Chassis wear makes body take heavier impact damage
         out.m_fCollisionDamageMultiplier *= (1.0f + 0.85f * wC);
+    }
+
+    // Recompute ALL forward gear curves (1..m_nNumberOfGears) + reverse via GTA SA's native InitGearRatios (0x006D0460)!
+    // Ensures upgraded 4->5 gear cars (e.g. Hermes) shift smoothly all the way up to top speed without choking!
+    if (out.m_transmissionData.m_fMaxGearVelocity > 0.05f) {
+        sa::InitTransmissionGearRatios(&out.m_transmissionData);
     }
 }
 
@@ -391,6 +375,7 @@ VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, bool isFour
     float wC = std::clamp(wear.chassis, 0.0f, 100.0f) * 0.01f;
     int baseArmor = 100 + std::clamp<int>(cfg.armorLevel, 0, 5) * 20;
     st.armorPercent = std::clamp(static_cast<int>(std::round(static_cast<float>(baseArmor) * (1.0f - 0.48f * wC))), 20, 200);
+    st.numGears     = std::clamp<int>(sim.m_transmissionData.m_nNumberOfGears, 1, 5);
 
     return st;
 }
@@ -509,11 +494,6 @@ void ApplyTuning(sa::CVehicle* veh, const mod::PerformanceTuning& cfg, const mod
         tv->wear.ClampAll();
     }
     RebuildHandling(*tv);
-
-    if (veh == sa::FindPlayerVehicle(0, false)) {
-        g_activePitchVeh.store(reinterpret_cast<uintptr_t>(veh), std::memory_order_relaxed);
-        g_activePitchScale.store(EngineLevelToPitchScale(tv->cfg.engineLevel), std::memory_order_relaxed);
-    }
 }
 
 void SetLiveWear(sa::CVehicle* veh, const mod::VehicleWear& wear) {
@@ -541,10 +521,6 @@ mod::PerformanceTuning* GetLiveTuningMutable(sa::CVehicle* veh) {
 }
 
 void DetachVehicle(sa::CVehicle* veh) {
-    if (reinterpret_cast<uintptr_t>(veh) == g_activePitchVeh.load(std::memory_order_relaxed)) {
-        g_activePitchVeh.store(0, std::memory_order_relaxed);
-        g_activePitchScale.store(1.0f, std::memory_order_relaxed);
-    }
     TrackedVehicle* tv = FindSlot(veh);
     if (!tv) return;
     if (sa::IsVehicleValid(tv->veh) && tv->origHandling) {
@@ -555,8 +531,6 @@ void DetachVehicle(sa::CVehicle* veh) {
 }
 
 void ResetAll() {
-    g_activePitchVeh.store(0, std::memory_order_relaxed);
-    g_activePitchScale.store(1.0f, std::memory_order_relaxed);
     for (int i = 0; i < MAX_TRACKED_VEHICLES; ++i) {
         if (g_tracked[i].inUse) {
             if (sa::IsVehicleValid(g_tracked[i].veh) && g_tracked[i].origHandling) {
@@ -569,38 +543,45 @@ void ResetAll() {
     audio::StopAll();
 }
 
-void InstallAudioHooks() {
-    if (g_origGetFreqForPlayerEngine != nullptr) return;
+void EnsureStreetVehicleWear(sa::CVehicle* veh) {
+    if (!mod::Config().enableWearSystem || !sa::IsVehicleValid(veh) || !veh->IsLandVehicle()) return;
+    // Never overwrite an already-tracked vehicle (Dealership 0%-wear, registered personal car, or already-rolled street car!)
+    if (FindSlot(veh) != nullptr) return;
+    // Never assign random street wear to a vehicle sitting inside a vanilla safehouse garage (let safehouse restore run!)
+    if (sa::FindHideoutGarageIndexAt(veh->GetPosition()) >= 0) return;
+    // Don't artificially slow down scripted mission-spawned vehicles during active story missions
+    if (sa::IsOnMission() && veh->CreatedBy() == 2) return;
 
-    // Verified in gta_sa.exe 1.0 US (Hoodlum):
-    // 0x004F8070: 83 EC 08        sub esp, 0x8
-    // 0x004F8073: 8B 54 24 0C     mov edx, [esp+0xC]
-    // 0x004F8077: D9 42 1C        fld DWORD PTR [edx+0x1C]
-    constexpr uintptr_t kTargetAddr = 0x004F8070;
-    constexpr size_t    kStolenLen  = 7;
-    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(kTargetAddr);
-    if (bytes[0] != 0x83 || bytes[1] != 0xEC || bytes[2] != 0x08 ||
-        bytes[3] != 0x8B || bytes[4] != 0x54 || bytes[5] != 0x24 || bytes[6] != 0x0C) {
-        modlog::Info("[AudioHook] Unexpected prolog at 0x004F8070; native engine pitch scaling skipped.");
-        return;
+    // Deterministic per-vehicle wear roll strictly averaging 25%..75% across all 6 subsystems
+    uint32_t seed = static_cast<uint32_t>(sa::GetVehicleHandle(veh)) * 2654435761u ^
+                    static_cast<uint32_t>(veh->GetModelIndex()) * 2246822519u ^
+                    (sa::GetTimeMs() / 4000u) * 3266489917u;
+    auto nextF = [&]() -> float {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>((seed >> 8) & 0xFFFF) / 65535.0f;
+    };
+
+    float targetAvg = 25.0f + nextF() * 50.0f; // 25%..75% average mechanical wear!
+    float raw[6];
+    float sum = 0.0f;
+    for (int i = 0; i < 6; ++i) {
+        raw[i] = std::clamp(targetAvg + (nextF() - 0.5f) * 30.0f, 12.0f, 92.0f);
+        sum += raw[i];
     }
+    float shift = targetAvg - (sum / 6.0f);
 
-    auto* tramp = static_cast<uint8_t*>(VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-    if (!tramp) return;
+    mod::VehicleWear w{};
+    w.engine       = std::clamp(raw[0] + shift, 10.0f, 95.0f);
+    w.transmission = std::clamp(raw[1] + shift, 10.0f, 95.0f);
+    w.brakes       = std::clamp(raw[2] + shift, 10.0f, 95.0f);
+    w.tires        = std::clamp(raw[3] + shift, 10.0f, 95.0f);
+    w.suspension   = std::clamp(raw[4] + shift, 10.0f, 95.0f);
+    w.chassis      = std::clamp(raw[5] + shift, 10.0f, 95.0f);
+    w.ClampAll();
 
-    std::memcpy(tramp, bytes, kStolenLen);
-    tramp[kStolenLen] = 0xE9; // JMP back to kTargetAddr + 7
-    int32_t relBack = static_cast<int32_t>((kTargetAddr + kStolenLen) - (reinterpret_cast<uintptr_t>(tramp) + kStolenLen + 5));
-    std::memcpy(tramp + kStolenLen + 1, &relBack, 4);
-    FlushInstructionCache(GetCurrentProcess(), tramp, kStolenLen + 5);
-    g_origGetFreqForPlayerEngine = reinterpret_cast<GetFreqForPlayerEngineFn>(tramp);
-
-    uint8_t patch[kStolenLen] = {0xE9, 0, 0, 0, 0, 0x90, 0x90};
-    int32_t relHook = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&Hook_GetFreqForPlayerEngineSound) - (kTargetAddr + 5));
-    std::memcpy(patch + 1, &relHook, 4);
-    mem::PatchBytes(kTargetAddr, patch, kStolenLen);
-
-    modlog::Info("[AudioHook] Installed native engine pitch hook at 0x004F8070 (CAEVehicleAudioEntity::GetFreqForPlayerEngineSound).");
+    ApplyTuning(veh, mod::PerformanceTuning{}, &w);
+    modlog::Info("[Wear] Assigned realistic street wear to model %d (avg=%.1f%%: eng=%.0f, tr=%.0f, brk=%.0f, tir=%.0f, sus=%.0f, chs=%.0f).",
+                 veh->GetModelIndex(), w.Average(), w.engine, w.transmission, w.brakes, w.tires, w.suspension, w.chassis);
 }
 
 void TickAll() {
@@ -613,10 +594,14 @@ void TickAll() {
     sa::CPed* playerPed = sa::FindPlayerPed(0);
     bool playerDriving = (playerVeh != nullptr && playerPed != nullptr && playerVeh->GetDriver() == playerPed);
 
+    // Street-picked vehicles start with 25%-75% mechanical wear so Dealership 0%-wear purchases stay valuable!
+    if (playerDriving && playerVeh->IsLandVehicle()) {
+        EnsureStreetVehicleWear(playerVeh);
+    }
+
     const float dt = std::clamp(sa::GetTimeStep() / 50.0f, 0.001f, 0.05f);
     const uint32_t nowMs = sa::GetTimeMs();
 
-    bool pitchAssigned      = false;
     bool turboAudioHandled  = false;
     bool hornAudioHandled   = false;
 
@@ -741,14 +726,6 @@ void TickAll() {
                 }
             }
 
-            // Native GTA SA Engine Pitch Deepening (Engine Lv 1..4) — lowers THIS vehicle's own authentic
-            // GTA SA sound bank pitch across idle, accel, off-throttle coasting & mid-air without increasing volume!
-            if (c.engineLevel >= 1) {
-                g_activePitchVeh.store(reinterpret_cast<uintptr_t>(v), std::memory_order_relaxed);
-                g_activePitchScale.store(EngineLevelToPitchScale(c.engineLevel), std::memory_order_relaxed);
-                pitchAssigned = true;
-            }
-
             // Transmission crisp upshift punch (grounded only!)
             if (!inAir && c.transmissionLevel > 0 && gear > tv.prevGear && gas > 0.3f && speed > 0.10f) {
                 sa::CVector fwd = v->GetForward();
@@ -809,10 +786,6 @@ void TickAll() {
         }
     }
 
-    if (!pitchAssigned) {
-        g_activePitchVeh.store(0, std::memory_order_relaxed);
-        g_activePitchScale.store(1.0f, std::memory_order_relaxed);
-    }
     if (!turboAudioHandled)  audio::UpdateTurboSpool(false, 0.0f);
     if (!hornAudioHandled)   audio::UpdateCustomHorn(0, false);
 }

@@ -617,7 +617,7 @@ void DrawBottomRightWeaponStats(const sa::CPed* ped) {
                 int w = GetBusArmorWeight(bus, idx - 2);
                 prevCap = std::min(maxCap, usedCap + w);
                 char nb[64];
-                std::snprintf(nb, sizeof(nb), "%s: %d | %s: %d",
+                std::snprintf(nb, sizeof(nb), "%s: %d, %s: %d",
                               ui::Loc("Объём", "Size").c_str(), w,
                               ui::Loc("Свободно", "Free").c_str(), std::max(0, maxCap - usedCap));
                 sp.footerNoteGame = nb;
@@ -919,7 +919,7 @@ void Render2D() {
         spec.titleGame     = def ? ui::Loc(def->nameRus, def->nameEng) : ui::Loc("ОРУЖИЕ", "WEAPON");
         spec.colLeftGame   = ui::Loc("МОДУЛИ И ПАТРОНЫ", "MODS & AMMO");
         spec.colRightGame  = ui::Loc("СТАТУС", "STATUS");
-        spec.footerGame    = ui::StandardFooter("Выбр.", "Pick", "Назад", "Back", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom");
+        spec.footerGame    = ui::StandardFooter("Выбр.", "Pick", "Назад", "Back", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom");
         spec.selectedIndex = g_modCursor;
 
         int curAmmo = def ? wstore::Store().GetWeaponAmmo(ped, def) : 0;
@@ -959,7 +959,7 @@ void Render2D() {
         spec.titleGame     = ModSlotTitle(g_activeModSlot);
         spec.colLeftGame   = ui::Loc("ВАРИАНТ", "PART");
         spec.colRightGame  = ui::Loc("ЦЕНА", "PRICE");
-        spec.footerGame    = ui::StandardFooter("Уст.", "Equip", "Назад", "Back", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom");
+        spec.footerGame    = ui::StandardFooter("Уст.", "Equip", "Назад", "Back", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom");
         spec.selectedIndex = g_optCursor;
 
         for (const auto& opt : g_slotOptions) {

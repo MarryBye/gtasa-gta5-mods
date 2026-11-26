@@ -467,10 +467,12 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
 
     switch (cat) {
         case CategoryId::MaintenanceHub: {
-            // 1. Always-available Pay 'n' Spray full body/bumper/parts repair (works even at 1000 HP with visual dents!)
+            // 1. Body/Panels/Lights/Tires/HP repair: available whenever ANY visual or health damage exists;
+            //    shows "Intact" (free/unavailable) when the car is completely undamaged!
+            bool needsRepair = sa::IsVehicleVisuallyDamaged(veh);
             g_subOptions.push_back({
                 ui::Loc("Починить авто (Кузов и Детали)", "Repair Vehicle (Body & Parts)"),
-                cfg.priceRepair, false, 1
+                needsRepair ? cfg.priceRepair : 0, !needsRepair, 1
             });
             // 2. ETS 2-style Mechanical Wear & Overhaul submenu
             if (cfg.enableWearSystem) {
@@ -546,12 +548,22 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
             g_subOptions.push_back({ui::Loc("Улучшение EMS Ур. 4", "EMS Upgrade Lv. 4"), cfg.priceEngine[3], cur.engineLevel == 4, 4});
             break;
 
-        case CategoryId::Transmission:
-            g_subOptions.push_back({ui::Loc("Стоковая коробка", "Stock Transmission"), 0, cur.transmissionLevel == 0, 0});
-            g_subOptions.push_back({ui::Loc("Уличная трансмиссия", "Street Transmission"), cfg.priceTrans[0], cur.transmissionLevel == 1, 1});
-            g_subOptions.push_back({ui::Loc("Спортивная трансмиссия", "Sport Transmission"), cfg.priceTrans[1], cur.transmissionLevel == 2, 2});
-            g_subOptions.push_back({ui::Loc("Гоночная трансмиссия", "Race Transmission"), cfg.priceTrans[2], cur.transmissionLevel == 3, 3});
+        case CategoryId::Transmission: {
+            auto gearLabel = [&](const char* rus, const char* eng, uint8_t tLv) {
+                auto tmp = cur;
+                tmp.transmissionLevel = tLv;
+                int g = tuning::ComputeStats(veh, tmp, mod::VehicleWear{}).numGears;
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "%s (%d %s)",
+                              ui::Loc(rus, eng).c_str(), g, ui::Loc("пер.", "sp").c_str());
+                return std::string(buf);
+            };
+            g_subOptions.push_back({gearLabel("Стоковая коробка",       "Stock Transmission",  0), 0,                cur.transmissionLevel == 0, 0});
+            g_subOptions.push_back({gearLabel("Уличная трансмиссия",    "Street Transmission", 1), cfg.priceTrans[0], cur.transmissionLevel == 1, 1});
+            g_subOptions.push_back({gearLabel("Спортивная трансмиссия", "Sport Transmission",  2), cfg.priceTrans[1], cur.transmissionLevel == 2, 2});
+            g_subOptions.push_back({gearLabel("Гоночная трансмиссия",   "Race Transmission",   3), cfg.priceTrans[2], cur.transmissionLevel == 3, 3});
             break;
+        }
 
         case CategoryId::Suspension:
             g_subOptions.push_back({ui::Loc("Стоковая подвеска", "Stock Suspension"), 0, cur.suspensionLevel == 0, 0});
@@ -918,9 +930,15 @@ void PurchaseSubOption(sa::CVehicle* veh) {
         return;
     }
 
-    // Maintenance Hub: (1) Full Pay 'n' Spray Body/Parts Repair (ALWAYS available!), (2) Open Wear Service submenu
+    // Maintenance Hub: (1) Visual/Body/Parts Repair (only when damaged!), (2) Open Wear Service submenu
     if (g_activeSubCat == CategoryId::MaintenanceHub) {
         if (opt.value == 1) {
+            if (opt.installed || !sa::IsVehicleVisuallyDamaged(veh)) {
+                sa::PlayFrontendSound(sa::SFX_ERROR);
+                ui::ShowHelp("Машина полностью целая — ремонт не требуется.",
+                             "Vehicle is already intact — no repair needed.");
+                return;
+            }
             int cost = opt.price;
             if (cost > 0 && sa::GetPlayerMoney() < cost) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
@@ -941,6 +959,7 @@ void PurchaseSubOption(sa::CVehicle* veh) {
             }
             sa::PlayFrontendSound(sa::SFX_BUY);
             ui::ShowHelp("~g~Автомобиль полностью отремонтирован!", "~g~Vehicle fully repaired & cleaned!");
+            RebuildSubOptions(CategoryId::MaintenanceHub, veh);
             return;
         }
         if (opt.value == 2) {
@@ -1255,6 +1274,9 @@ void EnterStandaloneWorkshop(int shopIdx, sa::CVehicle* veh) {
 
     g_workshopFrozen        = false;
     g_workshopSettleUntilMs = 0;
+
+    // Assign realistic 25%-75% wear to any newly-picked street vehicle entering the workshop!
+    tuning::EnsureStreetVehicleWear(veh);
 
     FocusCameraForCategory(CategoryId::VanillaItem, veh, true);
     RebuildMainEntries(nullptr, veh);
@@ -1689,7 +1711,7 @@ void Render2D() {
         spec.colLeftGame  = ui::Loc("КАТЕГОРИЯ", "CATEGORY");
         spec.colRightGame = ui::Loc("СТАТУС", "STATUS");
         spec.footerGame   = g_standaloneMode
-            ? ui::StandardFooter("Выбр.", "Sel", "Выход", "Exit", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom")
+            ? ui::StandardFooter("Выбр.", "Sel", "Выход", "Exit", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom")
             : ui::StandardFooter("Выбрать", "Select", "Выход", "Exit");
         spec.selectedIndex = g_mainCursor;
 
@@ -1713,7 +1735,7 @@ void Render2D() {
         spec.colLeftGame  = ui::Loc("УЛУЧШЕНИЕ", "UPGRADE");
         spec.colRightGame = ui::Loc("ЦЕНА", "PRICE");
         spec.footerGame   = g_standaloneMode
-            ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom")
+            ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom")
             : ui::StandardFooter("Купить", "Buy", "Назад", "Back");
         spec.selectedIndex = g_subCursor;
 
@@ -1725,6 +1747,12 @@ void Render2D() {
                 row.rightColor = sa::IsVehicleValid(g_workshopVeh)
                     ? ui::GetWearColor(tuning::GetLiveWear(g_workshopVeh).Average())
                     : sa::CRGBA{200, 200, 200, 255};
+            } else if (g_activeSubCat == CategoryId::MaintenanceHub && opt.value == 1 && opt.installed) {
+                row.rightGame  = ui::Loc("Целая", "Intact");
+                row.rightColor = {115, 235, 130, 255};
+            } else if (g_activeSubCat == CategoryId::Maintenance && opt.installed) {
+                row.rightGame  = ui::Loc("Износ 0%", "0% Wear");
+                row.rightColor = {115, 235, 130, 255};
             } else if (opt.installed) {
                 row.rightGame  = ui::Loc("Уст.", "Owned");
                 row.rightColor = {115, 235, 130, 255};

@@ -246,10 +246,16 @@ public:
         int32_t pedH = sa::GetPedHandle(ped);
         if (pedH <= 0) return;
 
-        // Unarmed (Fists): just switch active weapon to 0 without overwriting knuckles/melee!
+        // Unarmed (Fists): In GTA SA, Fists (id=0) and Brass Knuckles (id=1) share slot 0!
+        // If Brass Knuckles occupy slot 0, SET_CURRENT_CHAR_WEAPON(0) re-equips knuckles unless we
+        // first preserve Brass Knuckles in our arsenal and clear slot 0 via REMOVE_WEAPON_FROM_CHAR (0x0555)!
         if (def->id == 0) {
+            if (ped->Weapons()[0].m_nType == 1) {
+                m_loadouts[1].owned = true;
+                sa::ScriptCmd(0x0555).Int(pedH).Int(1).Run(); // REMOVE_WEAPON_FROM_CHAR (knuckles stay owned in wheel!)
+            }
             if (setCurrent) {
-                sa::ScriptCmd(0x01B9).Int(pedH).Int(0).Run();
+                sa::ScriptCmd(0x01B9).Int(pedH).Int(0).Run(); // SET_CURRENT_CHAR_WEAPON -> Bare Fists!
             }
             SetPreferredWeapon(wdata::WeaponCategory::Melee, 0);
             return;

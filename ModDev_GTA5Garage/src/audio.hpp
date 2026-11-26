@@ -51,10 +51,10 @@ inline void SynthesizeSounds() {
                 bp1 += 0.11f * (hp - bp1);
                 bp2 += 0.11f * (bp1 - bp2);
 
-                float turbine = 0.34f * std::sin(PI2 * 520.0f * t) + 0.12f * std::sin(PI2 * 1040.0f * t);
-                float s = turbine * 0.60f + bp2 * 0.95f;
+                float turbine = 0.36f * std::sin(PI2 * 560.0f * t) + 0.14f * std::sin(PI2 * 1120.0f * t);
+                float s = turbine * 0.62f + bp2 * 0.95f;
                 if (pass == 1) {
-                    pcm[i] = static_cast<int16_t>(std::clamp(static_cast<int>(s * 14500.0f), -32000, 32000));
+                    pcm[i] = static_cast<int16_t>(std::clamp(static_cast<int>(s * 20500.0f), -32000, 32000));
                 }
             }
         }
@@ -83,7 +83,7 @@ inline void SynthesizeSounds() {
             float freq = 850.0f * std::exp(-t * 3.0f) + 320.0f;
             float body = 0.16f * std::sin(PI2 * freq * t);
             float s = (lp2 * 1.15f + body) * env * flutter;
-            pcm[i] = static_cast<int16_t>(std::clamp(static_cast<int>(s * 22000.0f), -32000, 32000));
+            pcm[i] = static_cast<int16_t>(std::clamp(static_cast<int>(s * 28500.0f), -32000, 32000));
         }
         st.wavBov = bass::BuildWav16Mono(pcm, sr);
     }
@@ -153,8 +153,8 @@ inline void UpdateTurboSpool(bool active, float boost01) {
         return;
     }
     boost01 = std::clamp(boost01, 0.0f, 1.0f);
-    // Gentle non-intrusive turbine whistle under boost
-    bass::PlayLoopStream(st.spoolStream, 0.010f + boost01 * 0.055f, 24000.0f + boost01 * 18500.0f);
+    // Clean audible turbine whistle under boost (balanced alongside custom Vehicle Sounds mods)
+    bass::PlayLoopStream(st.spoolStream, 0.028f + boost01 * 0.112f, 25000.0f + boost01 * 19500.0f);
 }
 
 inline void PlayTurboBov(float intensity01) {
@@ -163,8 +163,8 @@ inline void PlayTurboBov(float intensity01) {
     if (!st.initialized) EnsureInit();
     if (!st.initialized) return;
     intensity01 = std::clamp(intensity01, 0.25f, 1.0f);
-    // Soft crisp fluttery pshh on gear shift / throttle lift
-    bass::PlaySample(st.bovSample, 0.075f + intensity01 * 0.105f, 34000.0f + intensity01 * 9500.0f);
+    // Crisp fluttery Blow-Off Valve pshh on gear upshift / throttle lift
+    bass::PlaySample(st.bovSample, 0.14f + intensity01 * 0.17f, 34500.0f + intensity01 * 9500.0f);
 }
 
 inline void UpdateCustomHorn(int hornType, bool pressed) {

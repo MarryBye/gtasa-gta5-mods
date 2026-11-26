@@ -12,6 +12,7 @@ struct VehicleStats {
     int brakeRating    = 0;   // 0..100+ braking score
     int handlingRating = 0;   // 0..100+ grip & stability score
     int armorPercent   = 100; // 100%..200% effective durability
+    int numGears       = 5;   // Forward gears (1..5; Transmission upgrades increase gear count up to 5!)
 };
 
 // Apply (or update) all GTA 5 performance tuning + ETS 2 wear penalties to a live CVehicle*
@@ -36,11 +37,10 @@ mod::PerformanceTuning* GetLiveTuningMutable(sa::CVehicle* veh);
 void DetachVehicle(sa::CVehicle* veh);
 void ResetAll();
 
-// Install native GTA SA engine audio pitch hook (CAEVehicleAudioEntity::GetFreqForPlayerEngineSound @ 0x004F8070)
-// Progressively lowers each upgraded vehicle's OWN original GTA SA engine sound pitch (Lv.1..Lv.4) without raising volume!
-void InstallAudioHooks();
+// Assign realistic 25%-75% initial mechanical wear to any untracked street vehicle (never affects Dealership/owned/safehouse cars!)
+void EnsureStreetVehicleWear(sa::CVehicle* veh);
 
-// Per-frame physics, wear accumulation, armor mitigation, bulletproof tires, turbo boost & audio, native engine pitch, custom horn
+// Per-frame physics, wear accumulation, armor mitigation, bulletproof tires, turbo boost & audio, custom horn
 void TickAll();
 
 } // namespace tuning

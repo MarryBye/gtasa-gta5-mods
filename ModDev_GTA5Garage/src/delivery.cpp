@@ -645,7 +645,7 @@ void Render2D() {
         std::snprintf(pageBuf, sizeof(pageBuf), "%s %d/%d",
                       ui::Loc("СТР.", "PAGE").c_str(), g_page + 1, numPages);
         spec.colRightGame = pageBuf;
-        spec.footerGame   = ui::StandardFooter("Вызвать", "Request", "Назад", "Back", "A/D Стр. | Del", "A/D Page | Del");
+        spec.footerGame   = ui::StandardFooter("Вызвать", "Request", "Назад", "Back", "A/D Стр., Del", "A/D Page, Del");
         spec.selectedIndex = g_rowInPage;
 
         const auto& slots = garage::Slots();
@@ -775,15 +775,15 @@ void Render2D() {
                     note += wbuf;
                 }
                 if (slot.tuning.turbo) {
-                    if (!note.empty()) note += " | ";
+                    if (!note.empty()) note += ", ";
                     note += ui::Loc("Турбо", "Turbo");
                 }
                 if (slot.tuning.bulletproofTires) {
-                    if (!note.empty()) note += " | ";
+                    if (!note.empty()) note += ", ";
                     note += ui::Loc("Пулест.", "BP");
                 }
                 if (slot.tuning.plateText[0] != '\0') {
-                    if (!note.empty()) note += " | ";
+                    if (!note.empty()) note += ", ";
                     note += slot.tuning.plateText;
                 }
             }

@@ -619,7 +619,7 @@ void Render2D() {
         const auto& hairs = wardrobe::HairCatalog();
         menu.SetTitle(ui::Loc(g_activeShop->nameRus.c_str(), g_activeShop->nameEng.c_str()))
             .SetColumns(ui::Loc("ПРИЧЁСКА", "HAIRCUT"), ui::Loc("ЦЕНА", "PRICE"))
-            .SetFooter(ui::StandardFooter("Подстричься", "Buy Cut", "Встать", "Leave", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom"));
+            .SetFooter(ui::StandardFooter("Подстричься", "Buy Cut", "Встать", "Leave", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom"));
 
         for (int hairIdx : g_slotItems) {
             const auto& item = hairs[hairIdx];
@@ -650,7 +650,7 @@ void Render2D() {
     if (g_screen == Screen::Categories) {
         menu.SetTitle(ui::Loc(g_activeShop->nameRus.c_str(), g_activeShop->nameEng.c_str()))
             .SetColumns(ui::Loc("КАТЕГОРИЯ ОДЕЖДЫ", "CLOTHING CATEGORY"), ui::Loc("КУПЛЕНО", "OWNED"))
-            .SetFooter(ui::StandardFooter("Выбр.", "Select", "Выход", "Exit", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom"));
+            .SetFooter(ui::StandardFooter("Выбр.", "Select", "Выход", "Exit", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom"));
 
         for (int slotIdx : g_availSlots) {
             uint32_t bp = wardrobe::kSlotBodyParts[slotIdx];
@@ -671,7 +671,7 @@ void Render2D() {
         int slotIdx = g_availSlots[std::clamp(g_catCursor, 0, static_cast<int>(g_availSlots.size()) - 1)];
         menu.SetTitle(ui::Loc(wardrobe::SlotNameRus(slotIdx), wardrobe::SlotNameEng(slotIdx)))
             .SetColumns(ui::Loc("ОДЕЖДА", "ITEM"), ui::Loc("ЦЕНА / СТАТУС", "PRICE / STATUS"))
-            .SetFooter(ui::StandardFooter("Куп./Над.", "Buy/Wear", "Назад", "Back", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom"));
+            .SetFooter(ui::StandardFooter("Куп./Над.", "Buy/Wear", "Назад", "Back", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom"));
 
         for (int idx : g_slotItems) {
             const auto& item = cat[idx];
