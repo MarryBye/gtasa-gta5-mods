@@ -144,6 +144,25 @@ void UnlockEnexList(const char* const* names, size_t count) {
     }
 }
 
+// Verified against gta_sa.exe 1.0 US (0x00447570..0x00447588):
+//   CGarages::NumGarages @ 0x0096C024 (int32_t, max 50)
+//   CGarages::aGarages   @ 0x0096C048 (stride 0xD8, m_anName[8] @ +0x44, m_nType @ +0x4C)
+int GetGarageCurrentType(const char* name) {
+    if (!name || !name[0]) return -1;
+    int32_t count = *reinterpret_cast<const int32_t*>(0x0096C024);
+    if (count < 0) count = 0;
+    if (count > 50) count = 50;
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(0x0096C048);
+    for (int32_t i = 0; i < count; ++i) {
+        const uint8_t* g = base + static_cast<size_t>(i) * 0xD8;
+        const char* gname = reinterpret_cast<const char*>(g + 0x44);
+        if (_strnicmp(gname, name, 8) == 0) {
+            return static_cast<int>(g[0x4C]);
+        }
+    }
+    return -1;
+}
+
 void ApplyShopUnlocks(bool tryAddBlips) {
     // Never fight story mission interior locks while a mission is active!
     if (sa::IsOnMission()) return;
@@ -151,8 +170,12 @@ void ApplyShopUnlocks(bool tryAddBlips) {
     if (g_cfg.unlockModShops) {
         uint8_t* scriptSpace = reinterpret_cast<uint8_t*>(0x00A49960);
         for (const auto& u : kModShops) {
-            sa::ScriptCmd(0x02FA).Str8(u.name).Int(u.garageType).Run();
-            sa::ScriptCmd(0x0299).Str8(u.name).Run();
+            // CRITICAL: Only call 0x02FA CHANGE_GARAGE_TYPE if this garage isn't already set to its target type!
+            // Re-running 0x02FA every 4 seconds resets CGarage::m_nDoorState to CLOSED, causing open-door replay loops!
+            if (GetGarageCurrentType(u.name) != u.garageType) {
+                sa::ScriptCmd(0x02FA).Str8(u.name).Int(u.garageType).Run();
+                sa::ScriptCmd(0x0299).Str8(u.name).Run();
+            }
             if (tryAddBlips && g_cfg.addMapIcons) {
                 int32_t& blipVar = *reinterpret_cast<int32_t*>(scriptSpace + u.blipGlobalOff);
                 if (blipVar == 0 && !HasExistingRadarBlip(u.x, u.y, 27, 45.0f)) {

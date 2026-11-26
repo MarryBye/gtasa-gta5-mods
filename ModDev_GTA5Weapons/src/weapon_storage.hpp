@@ -24,7 +24,17 @@ public:
         m_slot = 0;
         m_loadouts.clear();
         for (int c = 0; c < wdata::kWheelCategoryCount; ++c) m_preferredWeapon[c] = 0;
+        for (int s = 0; s < 13; ++s) m_lastLiveSlotType[s] = 0;
         modlog::Info("[WStore] Started fresh New Game -> cleared weapon arsenal.");
+    }
+
+    // Zeroes stored ammo for ALL weapons (e.g. Heavy/Thrown like RPG & Grenades) when CJ dies/gets busted
+    // and GTA SA strips his inventory, while keeping L.owned = true so purchased weapons stay in the wheel!
+    void ClearAllStoredAmmo() {
+        for (auto& kv : m_loadouts) {
+            kv.second.storedAmmo = 0;
+        }
+        for (int s = 0; s < 13; ++s) m_lastLiveSlotType[s] = 0;
     }
 
     void SaveToSlot(int slot) {
@@ -98,6 +108,7 @@ public:
     void LoadFromDisk() {
         m_loadouts.clear();
         for (int c = 0; c < wdata::kWheelCategoryCount; ++c) m_preferredWeapon[c] = 0;
+        for (int s = 0; s < 13; ++s) m_lastLiveSlotType[s] = 0;
 
         std::string path = BuildFilePath(m_slot, true);
         if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -146,6 +157,19 @@ public:
         const sa::CWeapon* w = ped->Weapons();
         for (int s = 0; s < 13; ++s) {
             uint32_t wid = w[s].m_nType;
+            uint32_t prevWid = m_lastLiveSlotType[s];
+
+            // If CJ just fired the last rocket/grenade in an individual-ammo slot (Heavy/Thrown),
+            // GTA SA clears w[s].m_nType to 0 -> zero that weapon's storedAmmo immediately!
+            if (wid == 0 && prevWid != 0) {
+                const auto* prevDef = wdata::FindDef(prevWid);
+                if (prevDef && !prevDef->sharesSlotAmmo && prevDef->category != wdata::WeaponCategory::Melee) {
+                    auto it = m_loadouts.find(prevWid);
+                    if (it != m_loadouts.end()) it->second.storedAmmo = 0;
+                }
+            }
+            m_lastLiveSlotType[s] = wid;
+
             if (wid == 0) continue;
             const auto* def = wdata::FindDef(wid);
             if (!def) continue;
@@ -156,6 +180,11 @@ public:
                 L.owned = true;
                 if (!def->sharesSlotAmmo && def->category != wdata::WeaponCategory::Melee) {
                     L.storedAmmo = static_cast<int>(w[s].m_nTotalAmmo);
+                }
+            } else if (!def->sharesSlotAmmo && def->category != wdata::WeaponCategory::Melee) {
+                auto it = m_loadouts.find(wid);
+                if (it != m_loadouts.end()) {
+                    it->second.storedAmmo = 0;
                 }
             }
         }
@@ -301,6 +330,7 @@ private:
 
     int      m_slot = 0;
     uint32_t m_preferredWeapon[wdata::kWheelCategoryCount] = {};
+    uint32_t m_lastLiveSlotType[13] = {};
     std::unordered_map<uint32_t, wdata::WeaponLoadout> m_loadouts;
 };
 

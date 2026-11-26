@@ -59,8 +59,8 @@ constexpr ModShopGarage kModShops[5] = {
 enum class CategoryId {
     VanillaItem = 0,
     // Standalone / Universal Visual Tuning
-    Repair,
-    Maintenance, // ETS 2-style Per-Part Mechanical Wear & Overhaul!
+    MaintenanceHub, // 2-option hub: (1) Repair Vehicle (Body & Parts), (2) Mechanical Overhaul (Wear)
+    Maintenance,    // ETS 2-style Per-Part Mechanical Wear & Overhaul!
     Paintjob,
     PaintPrimary,
     PaintSecondary,
@@ -259,25 +259,28 @@ void RebuildMainEntries(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
     const bool isFourWheel = veh->IsFourWheelLike();
     const auto cur = GetCurrentVehTuning(veh);
 
-    // ETS 2-style Mechanical Wear & Maintenance entry (shown in BOTH Mode A & Mode B!)
-    if (mod::Config().enableWearSystem) {
-        auto wear = tuning::GetLiveWear(veh);
-        int avgW  = static_cast<int>(std::round(wear.Average()));
-        char wbuf[32];
-        if (avgW > 0) std::snprintf(wbuf, sizeof(wbuf), "%s %d%%", ui::Loc("Износ", "Wear").c_str(), avgW);
-        else          std::snprintf(wbuf, sizeof(wbuf), "%s", ui::Loc("Идеал 0%", "Mint 0%").c_str());
-        g_mainEntries.push_back({CategoryId::Maintenance, -1,
-            ui::Loc("ТО и Состояние узлов", "Maintenance & Wear"), wbuf});
+    // Always-available Repair & Maintenance Hub (BOTH Vanilla & Standalone modes, even at 1000 HP with visual dents!)
+    {
+        std::string badge;
+        if (mod::Config().enableWearSystem) {
+            auto wear = tuning::GetLiveWear(veh);
+            int avgW  = static_cast<int>(std::round(wear.Average()));
+            if (avgW > 0) {
+                char wbuf[32];
+                std::snprintf(wbuf, sizeof(wbuf), "%s %d%%", ui::Loc("Износ", "Wear").c_str(), avgW);
+                badge = wbuf;
+            } else {
+                badge = ui::Loc("Ремонт / ТО", "Repair / Service");
+            }
+        } else {
+            badge = FormatPrice(mod::Config().priceRepair);
+        }
+        g_mainEntries.push_back({CategoryId::MaintenanceHub, -1,
+            ui::Loc("ТО и Обслуживание", "Repair & Service"), badge});
     }
 
     // In Standalone Mode B: expose ALL visual tuning (Wheels, Paintjobs, Colors, Spoilers, Bumpers, Skirts, Exhaust, Roof, Hood, Hydraulics, Nitro, Stereo!)
     if (!vanillaPanel) {
-        if (veh->Health() < 995.0f) {
-            g_mainEntries.push_back({CategoryId::Repair, -1,
-                ui::Loc("Починить транспорт", "Repair Vehicle"),
-                FormatPrice(mod::Config().priceRepair)});
-        }
-
         // Paintjobs (Vinyls) if vehicle model has any
         int32_t h = sa::GetVehicleHandle(veh);
         int32_t numPj = 0;
@@ -404,7 +407,8 @@ void RebuildMainEntries(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
 
 std::string GetSubmenuTitle(CategoryId cat) {
     switch (cat) {
-        case CategoryId::Maintenance:    return ui::Loc("ТО И ИЗНОС УЗЛОВ", "MAINTENANCE & WEAR");
+        case CategoryId::MaintenanceHub: return ui::Loc("ТО И ОБСЛУЖИВАНИЕ", "REPAIR & SERVICE");
+        case CategoryId::Maintenance:    return ui::Loc("ОБСЛУЖИВАНИЕ УЗЛОВ", "MECHANICAL SERVICE");
         case CategoryId::Paintjob:       return ui::Loc("ВИНИЛЫ (ПОКРАСКА)", "PAINTJOBS");
         case CategoryId::PaintPrimary:   return ui::Loc("ОСНОВНОЙ ЦВЕТ", "PRIMARY COLOR");
         case CategoryId::PaintSecondary: return ui::Loc("ДОП. ЦВЕТ", "SECONDARY COLOR");
@@ -462,6 +466,24 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
     }
 
     switch (cat) {
+        case CategoryId::MaintenanceHub: {
+            // 1. Always-available Pay 'n' Spray full body/bumper/parts repair (works even at 1000 HP with visual dents!)
+            g_subOptions.push_back({
+                ui::Loc("Починить авто (Кузов и Детали)", "Repair Vehicle (Body & Parts)"),
+                cfg.priceRepair, false, 1
+            });
+            // 2. ETS 2-style Mechanical Wear & Overhaul submenu
+            if (cfg.enableWearSystem) {
+                auto w = tuning::GetLiveWear(veh);
+                int avgW = static_cast<int>(std::round(w.Average()));
+                char wlbl[96];
+                std::snprintf(wlbl, sizeof(wlbl), "%s (%d%%)",
+                              ui::Loc("Обслуживание авто (Износ)", "Mechanical Service (Wear)").c_str(), avgW);
+                g_subOptions.push_back({wlbl, 0, false, 2});
+            }
+            g_subCursor = 0;
+            return;
+        }
         case CategoryId::Maintenance: {
             auto w = tuning::GetLiveWear(veh);
             int cEng = mod::ComputePartServiceCost(w.engine,       cfg.maintBaseEngine,  cur, cfg.maintCostMult);
@@ -698,12 +720,6 @@ void ApplySubPreview(sa::CVehicle* veh) {
         auto preview = g_savedTuningBeforeSub;
         preview.suspensionLevel = static_cast<uint8_t>(val);
         tuning::ApplyTuning(veh, preview);
-        if (g_standaloneMode) {
-            int32_t h = sa::GetVehicleHandle(veh);
-            if (h > 0) sa::ScriptCmd(0x0519).Int(h).Int(0).Run(); // Temporarily unfreeze so ride-height settles visibly!
-            g_workshopFrozen = false;
-            g_workshopSettleUntilMs = sa::GetTimeMs() + 260;
-        }
         g_previewModified = true;
         return;
     }
@@ -866,26 +882,6 @@ void FocusCameraForCategory(CategoryId cat, sa::CVehicle* veh, bool snapImmediat
 void EnterSubmenu(CategoryId cat, sa::CVehicle* veh) {
     if (!veh) return;
 
-    // Direct 1-click Repair action
-    if (cat == CategoryId::Repair) {
-        g_standaloneEnteredMs = 0;
-        int cost = mod::Config().priceRepair;
-        if (sa::GetPlayerMoney() < cost) {
-            sa::PlayFrontendSound(sa::SFX_ERROR);
-            ui::ShowHelp("~r~Недостаточно денег!", "~r~Not enough money!");
-            return;
-        }
-        sa::AddPlayerMoney(-cost);
-        int32_t h = sa::GetVehicleHandle(veh);
-        if (h > 0) {
-            sa::ScriptCmd(0x0A30).Int(h).Run();
-            sa::ScriptCmd(0x0878).Int(h).Float(0.0f).Run();
-        }
-        sa::PlayFrontendSound(sa::SFX_BUY);
-        ui::ShowHelp("~g~Транспорт отремонтирован!", "~g~Vehicle repaired!");
-        return;
-    }
-
     g_activeSubCat         = cat;
     g_savedTuningBeforeSub = GetCurrentVehTuning(veh);
     g_savedCol1            = veh->PrimaryColor();
@@ -919,6 +915,40 @@ void PurchaseSubOption(sa::CVehicle* veh) {
         g_plateInputBuf = g_savedTuningBeforeSub.plateText;
         g_typingPlate   = true;
         sa::PlayFrontendSound(sa::SFX_SELECT);
+        return;
+    }
+
+    // Maintenance Hub: (1) Full Pay 'n' Spray Body/Parts Repair (ALWAYS available!), (2) Open Wear Service submenu
+    if (g_activeSubCat == CategoryId::MaintenanceHub) {
+        if (opt.value == 1) {
+            int cost = opt.price;
+            if (cost > 0 && sa::GetPlayerMoney() < cost) {
+                sa::PlayFrontendSound(sa::SFX_ERROR);
+                ui::ShowHelp("~r~Недостаточно денег для ремонта!", "~r~Not enough money for repair!");
+                return;
+            }
+            if (cost > 0) sa::AddPlayerMoney(-cost);
+            int32_t h = sa::GetVehicleHandle(veh);
+            if (h > 0) {
+                sa::ScriptCmd(0x0A30).Int(h).Run();              // FIX_CAR (restores bumpers, doors, panels, lights, tires, HP!)
+                sa::ScriptCmd(0x0224).Int(h).Int(1000).Run();    // SET_CAR_HEALTH 1000
+                sa::ScriptCmd(0x0878).Int(h).Float(0.0f).Run();  // SET_VEHICLE_DIRT_LEVEL 0.0 (fresh shine!)
+            }
+            int ownedSlot = garage::FindSlotForLiveVehicle(veh);
+            if (ownedSlot >= 0) {
+                garage::SnapshotVehicleToSlot(veh, ownedSlot);
+                garage::SaveNow();
+            }
+            sa::PlayFrontendSound(sa::SFX_BUY);
+            ui::ShowHelp("~g~Автомобиль полностью отремонтирован!", "~g~Vehicle fully repaired & cleaned!");
+            return;
+        }
+        if (opt.value == 2) {
+            g_activeSubCat = CategoryId::Maintenance;
+            RebuildSubOptions(CategoryId::Maintenance, veh);
+            sa::PlayFrontendSound(sa::SFX_SELECT);
+            return;
+        }
         return;
     }
 
@@ -1207,27 +1237,24 @@ void EnterStandaloneWorkshop(int shopIdx, sa::CVehicle* veh) {
     sa::ScriptCmd(0x01B4).Int(0).Int(0).Run();      // SET_PLAYER_CONTROL false
     sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run(); // SET_CAR_FORWARD_SPEED 0
 
+    // Match Rockstar's exact carmod1.scm placement: REQUEST_COLLISION -> LOAD_SCENE -> SET_CAR_COORDINATES(shop.intZ) -> NEVER FREEZE!
+    // Keeping FREEZE_CAR_POSITION = 0 lets GTA SA's natural suspension springs hold the car cleanly on its 4 wheels
+    // at exact street ride height (fixes wheels clipping through fenders with Carpack / Izzy's Lively Vehicle Physics!).
     sa::ScriptCmd(0x04E4).Float(shop.intX).Float(shop.intY).Run(); // REQUEST_COLLISION
     sa::ScriptCmd(0x04BB).Int(shop.interiorId).Run();              // SET_AREA_VISIBLE
     sa::ScriptCmd(0x0860).Int(pedH).Int(shop.interiorId).Run();    // SET_CHAR_AREA_VISIBLE
     sa::ScriptCmd(0x0840).Int(h).Int(shop.interiorId).Run();       // SET_VEHICLE_AREA_VISIBLE
-    // Synchronously stream interior floor collision BEFORE querying ground Z so tires NEVER embed into floor!
     sa::ScriptCmd(0x03CB).Float(shop.intX).Float(shop.intY).Float(shop.intZ).Run(); // LOAD_SCENE
 
-    float floorZ = shop.intZ;
-    sa::ScriptCmd(0x02CE).Float(shop.intX).Float(shop.intY).Float(shop.intZ + 2.5f).Out(floorZ).Run();
-    // Place slightly ABOVE solid floor so suspension drops down gently onto tires (never jammed upward from below!)
-    float placeZ = (floorZ > shop.intZ - 2.5f && floorZ < shop.intZ + 2.0f) ? (floorZ + 0.24f) : (shop.intZ + 0.20f);
-
     veh->MoveSpeed() = {0.0f, 0.0f, 0.0f};
-    sa::ScriptCmd(0x0519).Int(h).Int(0).Run(); // Keep unfrozen briefly so wheels drop flush onto the garage floor!
-    sa::ScriptCmd(0x00AB).Int(h).Float(shop.intX).Float(shop.intY).Float(placeZ).Run();
+    sa::ScriptCmd(0x0519).Int(h).Int(0).Run(); // NEVER freeze car position inside mod shop (0 hits in Rockstar carmod1.scm!)
+    sa::ScriptCmd(0x00AB).Int(h).Float(shop.intX).Float(shop.intY).Float(shop.intZ + 0.04f).Run();
     sa::ScriptCmd(0x0175).Int(h).Float(shop.intHeading).Run();
     sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run();
     sa::ScriptCmd(0x016A).Int(260).Int(1).Run();    // Smooth fade-in
 
     g_workshopFrozen        = false;
-    g_workshopSettleUntilMs = sa::GetTimeMs() + 560;
+    g_workshopSettleUntilMs = 0;
 
     FocusCameraForCategory(CategoryId::VanillaItem, veh, true);
     RebuildMainEntries(nullptr, veh);
@@ -1329,9 +1356,15 @@ void ProcessMenuInput(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
         }
         if (in.back) {
             RevertSubPreview(veh);
-            g_inSubmenu = false;
-            if (g_standaloneMode) {
-                FocusCameraForCategory(CategoryId::VanillaItem, veh, false);
+            if (g_activeSubCat == CategoryId::Maintenance) {
+                g_activeSubCat = CategoryId::MaintenanceHub;
+                RebuildSubOptions(CategoryId::MaintenanceHub, veh);
+                g_subCursor = (g_subOptions.size() > 1) ? 1 : 0;
+            } else {
+                g_inSubmenu = false;
+                if (g_standaloneMode) {
+                    FocusCameraForCategory(CategoryId::VanillaItem, veh, false);
+                }
             }
             sa::PlayFrontendSound(sa::SFX_BACK);
         }
@@ -1484,19 +1517,13 @@ void PostScriptsTick() {
 
     // Smart Part Auto-Focus + Manual Orbit (Q/E, Arrows) + Zoom (Mouse Wheel / Z,X / +,-) inside Mod Shop Interior!
     if (g_standaloneMode && sa::IsVehicleValid(g_workshopVeh)) {
-        // Let wheels settle naturally onto the physical floor mesh during fade-in, then freeze cleanly!
-        if (!g_workshopFrozen) {
-            g_workshopVeh->MoveSpeed().x = 0.0f;
-            g_workshopVeh->MoveSpeed().y = 0.0f;
-            if (g_workshopVeh->MoveSpeed().z > 0.0f) g_workshopVeh->MoveSpeed().z = 0.0f;
-            if (sa::GetTimeMs() >= g_workshopSettleUntilMs) {
-                int32_t h = sa::GetVehicleHandle(g_workshopVeh);
-                if (h > 0) {
-                    sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run();
-                    sa::ScriptCmd(0x0519).Int(h).Int(1).Run(); // FREEZE_CAR_POSITION true once tires sit flush!
-                }
-                g_workshopFrozen = true;
-            }
+        // Keep car parked horizontally WITHOUT calling FREEZE_CAR_POSITION(h, 1):
+        // leaving MoveSpeed.z free lets GTA SA's own suspension hold the chassis at its exact natural ride height!
+        g_workshopVeh->MoveSpeed().x = 0.0f;
+        g_workshopVeh->MoveSpeed().y = 0.0f;
+        int32_t h = sa::GetVehicleHandle(g_workshopVeh);
+        if (h > 0) {
+            sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run();
         }
 
         // Clear any leftover vanilla "cannot modify this vehicle" help popup right after entering!
@@ -1695,8 +1722,10 @@ void Render2D() {
             ui::MenuRow row;
             row.leftGame  = e.labelGame;
             row.rightGame = e.rightGame;
-            if (e.cat == CategoryId::Maintenance && sa::IsVehicleValid(g_workshopVeh)) {
-                row.rightColor = ui::GetWearColor(tuning::GetLiveWear(g_workshopVeh).Average());
+            if (e.cat == CategoryId::MaintenanceHub && sa::IsVehicleValid(g_workshopVeh)) {
+                row.rightColor = mod::Config().enableWearSystem
+                    ? ui::GetWearColor(tuning::GetLiveWear(g_workshopVeh).Average())
+                    : sa::CRGBA{135, 225, 135, 255};
             } else if (e.cat == CategoryId::Registration) {
                 row.rightColor = {135, 225, 135, 255};
             } else {
@@ -1716,7 +1745,12 @@ void Render2D() {
         for (const auto& opt : g_subOptions) {
             ui::MenuRow row;
             row.leftGame = opt.labelGame;
-            if (opt.installed) {
+            if (g_activeSubCat == CategoryId::MaintenanceHub && opt.value == 2) {
+                row.rightGame  = ui::Loc("Открыть >", "Open >");
+                row.rightColor = sa::IsVehicleValid(g_workshopVeh)
+                    ? ui::GetWearColor(tuning::GetLiveWear(g_workshopVeh).Average())
+                    : sa::CRGBA{200, 200, 200, 255};
+            } else if (opt.installed) {
                 row.rightGame  = ui::Loc("Уст.", "Owned");
                 row.rightColor = {115, 235, 130, 255};
             } else {

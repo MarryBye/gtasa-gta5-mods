@@ -56,6 +56,7 @@ uint32_t      g_quickEquipAtMs    = 0;
 bool          g_quickPendingEquip = false;
 uint32_t      g_tabDownSinceMs    = 0;
 uint32_t      g_lastPickupCollectMs = 0;
+bool          g_wasWastedOrBusted = false;
 
 using FnGetDisplayVitalStats = int16_t(__thiscall*)(void*, void*);
 FnGetDisplayVitalStats g_origGetDisplayVitalStats = nullptr;
@@ -140,11 +141,16 @@ void ProcessGroundWeaponPickups(sa::CPed* ped) {
             L.storedAmmo = newA;
         }
 
-        // Remove pickup cleanly using GTA SA's own CPickup::GetRidOfObjects()
-        pk.GetRidOfObjects();
-        if (ptype == 3)       pk.m_nRegenerationTime = nowMs + 30000;
-        else if (ptype == 15) pk.m_nRegenerationTime = nowMs + 360000;
-        else                  pk.m_nPickupType = 0;
+        // Remove pickup cleanly matching GTA SA's exact CPickup::Update (0x0045759E / 0x00458740) & CPickup::Remove (0x004556C0)!
+        if (ptype == 3 || ptype == 15) {
+            // Street spawn: destroy 3D object, set bDisabled (bit 0) so CPickup::Update holds off until regen time!
+            pk.GetRidOfObjects();
+            pk.m_nFlags |= 0x01;
+            pk.m_nRegenerationTime = nowMs + ((ptype == 3) ? 30000u : 360000u);
+        } else {
+            // One-shot / dead-ped drop (4=ONCE, 5=ONCE_TIMEOUT): permanently remove object, blip, type & disable!
+            pk.Remove();
+        }
 
         wstore::Store().SaveToDisk();
         sa::PlayFrontendSound(sa::SFX_SELECT);
@@ -472,10 +478,33 @@ void PreScriptsTick() {
 
 void PostScriptsTick() {
     if (sa::GetGameState() != 9 || sa::IsPauseMenuActive()) return;
+    sa::CPed* ped = sa::FindPlayerPed(0);
+    if (sa::IsPedValid(ped)) {
+        uint8_t pstate = sa::GetPlayerState(0);
+        if (pstate == 1 || pstate == 2 || ped->GetHealth() <= 0.0f) {
+            g_wasWastedOrBusted = true;
+        } else if (g_wasWastedOrBusted && pstate == 0 && ped->GetHealth() > 0.0f) {
+            // CJ just respawned at hospital / police station!
+            // If GTA SA stripped live weapons (slots 2..8 all empty -> no girlfriend keep-weapons perk),
+            // also zero stored ammo on Heavy/Thrown weapons (RPG, Grenades, etc.) while keeping owned = true!
+            uint32_t liveAmmo = 0;
+            const sa::CWeapon* w = ped->Weapons();
+            for (int s = 2; s <= 8; ++s) {
+                liveAmmo += w[s].m_nTotalAmmo;
+            }
+            if (liveAmmo == 0) {
+                wstore::Store().ClearAllStoredAmmo();
+                wstore::Store().SaveToDisk();
+                modlog::Info("[Wheel] Respawned after Wasted/Busted (weapons stripped) -> cleared stored Heavy/Thrown ammo.");
+            }
+            g_wasWastedOrBusted = false;
+        }
+    }
+
     uint32_t now = sa::GetTimeMs();
     if (now - g_lastSyncMs >= 500) {
         g_lastSyncMs = now;
-        wstore::Store().SyncFromPlayerInventory(sa::FindPlayerPed(0));
+        wstore::Store().SyncFromPlayerInventory(ped);
     }
 }
 
@@ -589,6 +618,7 @@ void Reset() {
     g_mode              = WheelMode::Closed;
     g_quickPendingEquip = false;
     g_tabDownSinceMs    = 0;
+    g_wasWastedOrBusted = false;
 }
 
 } // namespace wheel

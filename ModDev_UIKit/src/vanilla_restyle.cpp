@@ -17,18 +17,33 @@ namespace {
 
 using FnVoid        = void(__cdecl*)();
 using FnDisplayMenu = void(__cdecl*)(uint8_t, uint8_t);
+using FnInputMenu   = void(__cdecl*)(uint8_t);
 using FnPrintString = void(__cdecl*)(float, float, const char*);
+using FnInsertKeys  = void(__cdecl*)(char*);
 
 FnVoid        g_origScriptsProcess  = nullptr;
 FnDisplayMenu g_origStd1            = nullptr;
 FnDisplayMenu g_origStd2            = nullptr;
 FnDisplayMenu g_origStd3            = nullptr;
+FnDisplayMenu g_origStd4            = nullptr;
 FnDisplayMenu g_origGrid1           = nullptr;
 FnDisplayMenu g_origGrid2           = nullptr;
 FnDisplayMenu g_origGrid3           = nullptr;
+FnDisplayMenu g_origGrid4           = nullptr;
+FnInputMenu   g_origInStd1          = nullptr;
+FnInputMenu   g_origInStd2          = nullptr;
+FnInputMenu   g_origInGrid1         = nullptr;
+FnInputMenu   g_origInGrid2         = nullptr;
 FnPrintString g_origHelpPrintString = nullptr;
+FnInsertKeys  g_origInsertHelpKeys  = nullptr;
 
-bool g_wasManagingVanillaPanel = false;
+bool     g_wasManagingVanillaPanel       = false;
+bool     g_blockTriangleAfterVanillaMenu = false;
+uint32_t g_blockTriangleUntilMs          = 0;
+
+// Captured right BEFORE CHud::SetHelpMessage substitutes ~k~~...~ control tokens into localized text!
+bool     g_lastHelpIsStoryPhone          = false;
+bool     g_lastHelpHasMenuControlTokens  = false;
 
 std::string ResolveGxtKey(const char* rawKey, int maxBytes = 10) {
     if (!rawKey || !rawKey[0]) return "";
@@ -73,6 +88,14 @@ bool IsPanelRowSelectable(const sa::tMenuPanel* p, int row) {
     return p->m_aaacRowItems[0][row][0] != '\0';
 }
 
+bool IsPanelUnclaimed(const sa::tMenuPanel* p) {
+    if (!p) return false;
+    char titleBuf[12] = {};
+    std::memcpy(titleBuf, p->m_acTitle, 10);
+    titleBuf[10] = '\0';
+    return !modbus::IsPanelClaimed(titleBuf);
+}
+
 sa::tMenuPanel* GetActiveUnclaimedVanillaPanel() {
     auto* bus = modbus::GetBus();
     if (!bus || !bus->restyleVanillaMenus) return nullptr;
@@ -80,24 +103,51 @@ sa::tMenuPanel* GetActiveUnclaimedVanillaPanel() {
 
     int8_t focus = sa::GetCurrentMenuInFocus();
     sa::tMenuPanel* p = (focus >= 0 && focus <= 1) ? sa::GetMenuPanel(focus) : nullptr;
-    if (!p) p = sa::GetMenuPanel(0);
-    if (!p) p = sa::GetMenuPanel(1);
+    if (!p || !p->m_bInteractive) p = sa::GetMenuPanel(0);
+    if (!p || !p->m_bInteractive) p = sa::GetMenuPanel(1);
     if (!p || !p->m_bInteractive || p->m_nNumRows == 0) return nullptr;
-
-    char titleBuf[12] = {};
-    std::memcpy(titleBuf, p->m_acTitle, 10);
-    titleBuf[10] = '\0';
-    if (modbus::IsPanelClaimed(titleBuf)) return nullptr;
+    if (!IsPanelUnclaimed(p)) return nullptr;
     return p;
+}
+
+// Intercepts CMessages::InsertPlayerControlKeysInString @ 0x00588C55 inside CHud::SetHelpMessage!
+// Sees the EXACT raw ~k~~...~ tokens BEFORE GTA SA replaces them with localized "Пробел"/"Space"/"F"!
+void __cdecl HookedInsertHelpKeys(char* rawHelpText) {
+    g_lastHelpIsStoryPhone         = false;
+    g_lastHelpHasMenuControlTokens = false;
+
+    if (rawHelpText && rawHelpText[0]) {
+        if (std::strstr(rawHelpText, "PED_ANSWER_PHONE") != nullptr) {
+            g_lastHelpIsStoryPhone = true;
+        } else if (std::strstr(rawHelpText, "PED_SPRINT") != nullptr ||
+                   std::strstr(rawHelpText, "VEHICLE_ENTER_EXIT") != nullptr ||
+                   std::strstr(rawHelpText, "GO_FORWARD") != nullptr ||
+                   std::strstr(rawHelpText, "GO_BACK") != nullptr ||
+                   std::strstr(rawHelpText, "GO_LEFT") != nullptr ||
+                   std::strstr(rawHelpText, "GO_RIGHT") != nullptr ||
+                   std::strstr(rawHelpText, "PED_CYCLE_WEAPON") != nullptr) {
+            g_lastHelpHasMenuControlTokens = true;
+        }
+    }
+
+    if (g_origInsertHelpKeys) g_origInsertHelpKeys(rawHelpText);
 }
 
 // Unified Controls Injector for ALL Unclaimed Vanilla CMenuSystem Menus (Gym, Tattoo, Barber on mission, Betting, Color Grids!):
 // Makes Enter / Space / LMB = SELECT (ButtonCross) and Backspace / Esc / RMB / F = BACK/EXIT (ButtonTriangle),
-// plus Mouse Wheel / Arrows / WASD scrolling! Fixes Gym minigame start & eliminates confusing vanilla Space/Enter reversal!
+// plus Mouse Wheel / Arrows / WASD scrolling!
+// Crucially holds ButtonTriangle suppressed after Accept until Enter/LMB/F are released so Gym scripts (gymbench/dumb/tread/bike)
+// NEVER mistake the tail end of an Enter press on Frame 2 for "Exit Equipment"!
 void __cdecl HookedScriptsProcess() {
     if (sa::GetGameState() == 9) {
+        const bool helpVisible = (*reinterpret_cast<const int32_t*>(0x00BAA474) != 0);
+        if (!helpVisible) {
+            g_lastHelpIsStoryPhone         = false;
+            g_lastHelpHasMenuControlTokens = false;
+        }
+
         if (auto* bus = modbus::GetBus()) {
-            bus->storyPhonePriority = sa::IsStoryPhoneRinging();
+            bus->storyPhonePriority = (helpVisible && g_lastHelpIsStoryPhone) || sa::IsStoryPhoneRinging();
         }
 
         if (!sa::IsPauseMenuActive() && !sa::IsCutsceneRunning()) {
@@ -107,11 +157,13 @@ void __cdecl HookedScriptsProcess() {
             if (p && !modbus::IsAnyModalMenuOpen()) {
                 if (!g_wasManagingVanillaPanel) {
                     g_wasManagingVanillaPanel = true;
+                    g_blockTriangleAfterVanillaMenu = false;
                     ui::LockMenuInputBriefly(150);
                 }
 
-                // Poll unified input & clear pad so vanilla InputStandardMenu NEVER misreads Enter as Cancel/Exit!
+                // Poll unified input & clear pad so vanilla scripts NEVER misread Enter as Cancel/Exit!
                 auto in = ui::PollMenuInput(true, true, true);
+                p->m_nAcceptedRow = static_cast<int8_t>(-99);
 
                 if (p->m_nType == 0) {
                     int n   = std::clamp<int>(p->m_nNumRows, 1, 12);
@@ -146,29 +198,63 @@ void __cdecl HookedScriptsProcess() {
 
                 uint8_t* pad = sa::GetPad0();
                 if (in.accept) {
-                    // Feed clean native ButtonCross (Accept) rising-edge straight to CMenuSystem & gym/tattoo/barber scripts!
+                    // Feed BOTH CMenuSystem m_nAcceptedRow (0x08D8) AND ButtonCross rising-edge (0x00E1(0,16) for GYM!)
+                    if (p->m_nType == 1 || IsPanelRowSelectable(p, p->m_nSelectedRow)) {
+                        p->m_nAcceptedRow = p->m_nSelectedRow;
+                    }
                     *reinterpret_cast<int16_t*>(pad + 0x20) = 255; // NewState.ButtonCross
                     *reinterpret_cast<int16_t*>(pad + 0x50) = 0;   // OldState.ButtonCross
-                    *reinterpret_cast<int16_t*>(pad + 0x1E) = 0;   // Ensure ButtonTriangle is ZERO even if Enter was pressed!
+                    *reinterpret_cast<int16_t*>(pad + 0x1E) = 0;   // NewState.ButtonTriangle = 0 even if Enter was pressed!
+                    *reinterpret_cast<int16_t*>(pad + 0x4E) = 0;
+                    sa::PlayFrontendSound(sa::SFX_SELECT);
+
+                    // CRITICAL GYM FIX: After gymbench/dumb/tread/bike deletes its menu on Frame 1,
+                    // keep ButtonTriangle suppressed until Enter/LMB/F are physically released so Frame 2 NEVER aborts the workout!
+                    g_blockTriangleAfterVanillaMenu = true;
+                    g_blockTriangleUntilMs          = GetTickCount() + 260;
+                    ui::TriggerPostCloseShield(260);
                 } else if (in.back) {
                     // Feed clean native ButtonTriangle (Cancel/Back) rising-edge!
                     *reinterpret_cast<int16_t*>(pad + 0x1E) = 255; // NewState.ButtonTriangle
                     *reinterpret_cast<int16_t*>(pad + 0x4E) = 0;   // OldState.ButtonTriangle
                     *reinterpret_cast<int16_t*>(pad + 0x20) = 0;
-                    ui::TriggerPostCloseShield(140);
+                    *reinterpret_cast<int16_t*>(pad + 0x50) = 0;
+                    sa::PlayFrontendSound(sa::SFX_BACK);
+
+                    g_blockTriangleAfterVanillaMenu = true;
+                    g_blockTriangleUntilMs          = GetTickCount() + 220;
+                    ui::TriggerPostCloseShield(220);
                 }
             } else {
                 g_wasManagingVanillaPanel = false;
                 ui::SyncIdleMouseEdges();
+
+                // Hold ButtonTriangle suppressed until Enter/F/Mouse are released after accepting/exiting a vanilla menu!
+                if (g_blockTriangleAfterVanillaMenu) {
+                    const auto& k = ui::Keys();
+                    bool keysHeld = k.IsDown(VK_RETURN) || k.IsDown('F') ||
+                                    k.IsDown(VK_LBUTTON) || k.IsDown(VK_RBUTTON) ||
+                                    k.IsDown(VK_BACK);
+                    uint8_t* pad = sa::GetPad0();
+                    *reinterpret_cast<int16_t*>(pad + 0x1E) = 0; // ButtonTriangle
+                    *reinterpret_cast<int16_t*>(pad + 0x4E) = 0;
+                    *reinterpret_cast<int16_t*>(pad + 0x22) = 0; // ButtonCircle (prevent LMB punch!)
+                    if (!keysHeld && static_cast<int32_t>(GetTickCount() - g_blockTriangleUntilMs) >= 0) {
+                        g_blockTriangleAfterVanillaMenu = false;
+                    }
+                }
+
                 if (!modbus::IsAnyModalMenuOpen()) {
                     ui::UpdatePostCloseShield();
                 }
             }
         } else {
-            g_wasManagingVanillaPanel = false;
+            g_wasManagingVanillaPanel       = false;
+            g_blockTriangleAfterVanillaMenu = false;
         }
     } else {
-        g_wasManagingVanillaPanel = false;
+        g_wasManagingVanillaPanel       = false;
+        g_blockTriangleAfterVanillaMenu = false;
     }
 
     if (g_origScriptsProcess) g_origScriptsProcess();
@@ -274,11 +360,10 @@ void HandleDisplayStandardMenu(uint8_t panelId, uint8_t isActive, FnDisplayMenu 
     auto* bus = modbus::GetBus();
     if (bus && bus->restyleVanillaMenus && sa::GetGameState() == 9 && !sa::IsPauseMenuActive()) {
         sa::tMenuPanel* p = sa::GetMenuPanel(panelId);
-        if (p && p->m_nType == 0 && p->m_nNumRows > 0) {
-            char titleBuf[12] = {};
-            std::memcpy(titleBuf, p->m_acTitle, 10);
-            titleBuf[10] = '\0';
-            if (modbus::IsPanelClaimed(titleBuf)) return;
+        if (p && p->m_nType == 0) {
+            if (!IsPanelUnclaimed(p)) return;
+            // Suppress 1-frame vanilla blue-box flash while script populates rows between 0x08D4 & 0x08DB!
+            if (p->m_nNumRows == 0 || p->m_nNumColumns == 0) return;
             RenderStandardPanelWithUIKit(panelId, isActive);
             return;
         }
@@ -290,16 +375,27 @@ void HandleDisplayGridMenu(uint8_t panelId, uint8_t isActive, FnDisplayMenu orig
     auto* bus = modbus::GetBus();
     if (bus && bus->restyleVanillaMenus && sa::GetGameState() == 9 && !sa::IsPauseMenuActive()) {
         sa::tMenuPanel* p = sa::GetMenuPanel(panelId);
-        if (p && p->m_nType == 1 && p->m_nNumRows > 0 && p->m_nNumColumns > 0) {
-            char titleBuf[12] = {};
-            std::memcpy(titleBuf, p->m_acTitle, 10);
-            titleBuf[10] = '\0';
-            if (modbus::IsPanelClaimed(titleBuf)) return;
+        if (p && p->m_nType == 1) {
+            if (!IsPanelUnclaimed(p)) return;
+            if (p->m_nNumRows == 0 || p->m_nNumColumns == 0) return;
             RenderGridPanelWithUIKit(panelId, isActive);
             return;
         }
     }
     if (origFn) origFn(panelId, isActive);
+}
+
+// Suppress vanilla CMenuSystem::InputStandardMenu / InputGridMenu whenever our unified input controller
+// is actively driving an unclaimed vanilla panel (eliminates double scrolling, raw Space/Enter conflicts & m_nAcceptedRow resets!).
+void HandleInputMenu(uint8_t panelId, FnInputMenu origFn) {
+    auto* bus = modbus::GetBus();
+    if (bus && bus->restyleVanillaMenus && sa::GetGameState() == 9 && !sa::IsPauseMenuActive()) {
+        sa::tMenuPanel* p = sa::GetMenuPanel(panelId);
+        if (p && p->m_bInteractive && IsPanelUnclaimed(p)) {
+            return;
+        }
+    }
+    if (origFn) origFn(panelId);
 }
 
 // Intercepts CFont::PrintString @ 0x0058C00F inside CHud::DrawHelpText (0x0058B6E0)!
@@ -311,9 +407,11 @@ void __cdecl HookedHelpPrintString(float x, float y, const char* text) {
     if (restyleHelp && statId == 0 && text && text[0] &&
         sa::GetGameState() == 9 && !sa::IsPauseMenuActive())
     {
-        // Suppress redundant vanilla top-left control-hint boxes while any UI Kit menu is showing its own unified footer!
-        bool anyMenuOpen = (sa::GetNumMenusInUse() > 0) || modbus::IsAnyModalMenuOpen();
-        if (anyMenuOpen && !sa::IsStoryPhoneRinging() && sa::IsVanillaMenuControlHint(text)) {
+        // Suppress redundant vanilla top-left Space/F control-hint boxes while ANY UI Kit menu is showing its own unified footer!
+        // (Still lets gameplay workout hints like GYM1_25 / GYM1_37 render normally once the weight/speed menu closes!)
+        bool anyMenuOpen  = (sa::GetNumMenusInUse() > 0) || modbus::IsAnyModalMenuOpen();
+        bool isStoryPhone = g_lastHelpIsStoryPhone || sa::IsStoryPhoneRinging();
+        if (anyMenuOpen && !isStoryPhone && (g_lastHelpHasMenuControlTokens || sa::IsVanillaMenuControlHint(text))) {
             return;
         }
 
@@ -335,9 +433,16 @@ void __cdecl HookedHelpPrintString(float x, float y, const char* text) {
 void __cdecl HookedStd1(uint8_t id, uint8_t act)  { HandleDisplayStandardMenu(id, act, g_origStd1); }
 void __cdecl HookedStd2(uint8_t id, uint8_t act)  { HandleDisplayStandardMenu(id, act, g_origStd2); }
 void __cdecl HookedStd3(uint8_t id, uint8_t act)  { HandleDisplayStandardMenu(id, act, g_origStd3); }
+void __cdecl HookedStd4(uint8_t id, uint8_t act)  { HandleDisplayStandardMenu(id, act, g_origStd4); }
 void __cdecl HookedGrid1(uint8_t id, uint8_t act) { HandleDisplayGridMenu(id, act, g_origGrid1); }
 void __cdecl HookedGrid2(uint8_t id, uint8_t act) { HandleDisplayGridMenu(id, act, g_origGrid2); }
 void __cdecl HookedGrid3(uint8_t id, uint8_t act) { HandleDisplayGridMenu(id, act, g_origGrid3); }
+void __cdecl HookedGrid4(uint8_t id, uint8_t act) { HandleDisplayGridMenu(id, act, g_origGrid4); }
+
+void __cdecl HookedInStd1(uint8_t id)  { HandleInputMenu(id, g_origInStd1); }
+void __cdecl HookedInStd2(uint8_t id)  { HandleInputMenu(id, g_origInStd2); }
+void __cdecl HookedInGrid1(uint8_t id) { HandleInputMenu(id, g_origInGrid1); }
+void __cdecl HookedInGrid2(uint8_t id) { HandleInputMenu(id, g_origInGrid2); }
 
 } // namespace
 
@@ -345,17 +450,29 @@ void InstallHooks() {
     g_origScriptsProcess = reinterpret_cast<FnVoid>(
         mem::HookCall(0x0053BFC7, reinterpret_cast<uintptr_t>(&HookedScriptsProcess)));
 
+    // ALL 4 DisplayStandardMenu sites + ALL 4 DisplayGridMenu sites (eliminates any vanilla flash!)
     g_origStd1  = reinterpret_cast<FnDisplayMenu>(mem::HookCall(0x00582687, reinterpret_cast<uintptr_t>(&HookedStd1)));
     g_origStd2  = reinterpret_cast<FnDisplayMenu>(mem::HookCall(0x005826D9, reinterpret_cast<uintptr_t>(&HookedStd2)));
     g_origStd3  = reinterpret_cast<FnDisplayMenu>(mem::HookCall(0x00582757, reinterpret_cast<uintptr_t>(&HookedStd3)));
+    g_origStd4  = reinterpret_cast<FnDisplayMenu>(mem::HookJump(0x00582627, reinterpret_cast<uintptr_t>(&HookedStd4)));
     g_origGrid1 = reinterpret_cast<FnDisplayMenu>(mem::HookCall(0x00582679, reinterpret_cast<uintptr_t>(&HookedGrid1)));
     g_origGrid2 = reinterpret_cast<FnDisplayMenu>(mem::HookCall(0x005826CF, reinterpret_cast<uintptr_t>(&HookedGrid2)));
     g_origGrid3 = reinterpret_cast<FnDisplayMenu>(mem::HookCall(0x0058274D, reinterpret_cast<uintptr_t>(&HookedGrid3)));
+    g_origGrid4 = reinterpret_cast<FnDisplayMenu>(mem::HookJump(0x0058261E, reinterpret_cast<uintptr_t>(&HookedGrid4)));
 
+    // ALL 4 InputStandardMenu / InputGridMenu tail-jump sites (sole unified input ownership!)
+    g_origInStd1  = reinterpret_cast<FnInputMenu>(mem::HookJump(0x00582722, reinterpret_cast<uintptr_t>(&HookedInStd1)));
+    g_origInStd2  = reinterpret_cast<FnInputMenu>(mem::HookJump(0x005825F7, reinterpret_cast<uintptr_t>(&HookedInStd2)));
+    g_origInGrid1 = reinterpret_cast<FnInputMenu>(mem::HookJump(0x00582717, reinterpret_cast<uintptr_t>(&HookedInGrid1)));
+    g_origInGrid2 = reinterpret_cast<FnInputMenu>(mem::HookJump(0x005825EE, reinterpret_cast<uintptr_t>(&HookedInGrid2)));
+
+    // Pre-substitution hook inside CHud::SetHelpMessage (0x00588C55) + DrawHelpText render hook (0x0058C00F)
+    g_origInsertHelpKeys = reinterpret_cast<FnInsertKeys>(
+        mem::HookCall(0x00588C55, reinterpret_cast<uintptr_t>(&HookedInsertHelpKeys)));
     g_origHelpPrintString = reinterpret_cast<FnPrintString>(
         mem::HookCall(0x0058C00F, reinterpret_cast<uintptr_t>(&HookedHelpPrintString)));
 
-    modlog::Info("[UIKit] Installed Unified Vanilla Input + StandardMenu + GridMenu + CHud::DrawHelpText hooks.");
+    modlog::Info("[UIKit] Installed complete Unified Vanilla Input (4x), Display (8x), Pre-Key Help & DrawHelpText hooks.");
 }
 
 } // namespace uikit_restyle

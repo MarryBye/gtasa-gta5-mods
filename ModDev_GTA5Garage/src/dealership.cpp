@@ -388,12 +388,12 @@ void SpawnShowroomPreview(int32_t modelId) {
 
     float gz = site.pz;
     sa::ScriptCmd(0x02CE).Float(site.px).Float(site.py).Float(site.pz + 2.5f).Out(gz).Run();
-    float z = (gz > site.pz - 6.0f && gz < site.pz + 6.0f) ? (gz + 0.14f) : (site.pz + 0.20f);
+    float z = (gz > site.pz - 6.0f && gz < site.pz + 6.0f) ? (gz + 0.04f) : (site.pz + 0.05f);
 
     int32_t vh = 0;
     sa::ScriptCmd(0x00A5).Int(modelId).Float(site.px).Float(site.py).Float(z).Out(vh).Run();
     if (vh > 0) {
-        // Place cleanly via SET_CAR_COORDINATES & leave unfrozen briefly so suspension settles naturally onto pavement!
+        // Place cleanly via SET_CAR_COORDINATES & keep unfrozen so natural suspension holds tires flush on pavement!
         sa::ScriptCmd(0x0519).Int(vh).Int(0).Run();
         sa::ScriptCmd(0x00AB).Int(vh).Float(site.px).Float(site.py).Float(z).Run();
         sa::ScriptCmd(0x0175).Int(vh).Float(site.pHeading).Run();
@@ -406,7 +406,7 @@ void SpawnShowroomPreview(int32_t modelId) {
         g_previewVehHandle     = vh;
         g_previewModelId       = modelId;
         g_previewFrozen        = false;
-        g_previewSettleUntilMs = sa::GetTimeMs() + 450;
+        g_previewSettleUntilMs = 0;
     } else {
         sa::ScriptCmd(0x0249).Int(modelId).Run();
     }
@@ -721,17 +721,12 @@ void Tick() {
     EnsureDealershipBlips();
 
     if (g_screen != Screen::Closed) {
-        // Settle showroom preview car onto its natural suspension before freezing!
-        if (!g_remoteMode && !g_previewFrozen && g_previewVehHandle > 0) {
+        // Keep showroom preview car parked horizontally WITHOUT FREEZE_CAR_POSITION so suspension stays 100% natural!
+        if (!g_remoteMode && g_previewVehHandle > 0) {
             if (sa::CVehicle* pv = sa::GetVehicleFromHandle(g_previewVehHandle)) {
                 pv->MoveSpeed().x = 0.0f;
                 pv->MoveSpeed().y = 0.0f;
-                if (pv->MoveSpeed().z > 0.0f) pv->MoveSpeed().z = 0.0f;
-                if (sa::GetTimeMs() >= g_previewSettleUntilMs) {
-                    sa::ScriptCmd(0x04BA).Int(g_previewVehHandle).Float(0.0f).Run();
-                    sa::ScriptCmd(0x0519).Int(g_previewVehHandle).Int(1).Run(); // FREEZE_CAR_POSITION true once tires sit flush!
-                    g_previewFrozen = true;
-                }
+                sa::ScriptCmd(0x04BA).Int(g_previewVehHandle).Float(0.0f).Run();
             }
         }
         UpdateShowroomCamera();

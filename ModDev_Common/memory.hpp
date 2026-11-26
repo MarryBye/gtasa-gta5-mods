@@ -40,13 +40,22 @@ inline uintptr_t HookCall(uintptr_t callAddr, uintptr_t newTarget) {
     return original;
 }
 
-// Replaces a 5-byte relative JMP (0xE9).
-inline void WriteJmp(uintptr_t jmpAddr, uintptr_t target) {
+// Replaces a 5-byte relative JMP (0xE9) and returns the original jump target.
+inline uintptr_t HookJump(uintptr_t jmpAddr, uintptr_t newTarget) {
+    int32_t oldRel = Read<int32_t>(jmpAddr + 1);
+    uintptr_t original = jmpAddr + 5 + static_cast<uintptr_t>(oldRel);
+
     uint8_t patch[5];
     patch[0] = 0xE9;
-    int32_t rel = static_cast<int32_t>(target - (jmpAddr + 5));
-    std::memcpy(patch + 1, &rel, 4);
+    int32_t newRel = static_cast<int32_t>(newTarget - (jmpAddr + 5));
+    std::memcpy(patch + 1, &newRel, 4);
     PatchBytes(jmpAddr, patch, 5);
+    return original;
+}
+
+// Replaces a 5-byte relative JMP (0xE9).
+inline void WriteJmp(uintptr_t jmpAddr, uintptr_t target) {
+    HookJump(jmpAddr, target);
 }
 
 } // namespace mem

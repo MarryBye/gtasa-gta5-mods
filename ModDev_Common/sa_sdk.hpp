@@ -1344,9 +1344,22 @@ struct CPickup {
         using Fn = void(__thiscall*)(CPickup*);
         reinterpret_cast<Fn>(0x00454CF0)(this);
     }
+
+    // Verified at 0x004556C0 (CPickup::Remove): destroys object & blip, sets m_nPickupType = 0 & m_nFlags |= 1!
+    void Remove() {
+        using Fn = void(__thiscall*)(CPickup*);
+        reinterpret_cast<Fn>(0x004556C0)(this);
+    }
 };
 static_assert(sizeof(CPickup) == 0x20, "CPickup must be 32 bytes");
 #pragma pack(pop)
+
+// Verified in CPlayerInfo::Process (0x0056F909): CWorld::Players[playerId].m_nPlayerState (+0xD4)
+// 0 = PLAYING, 1 = WASTED, 2 = BUSTED, 3 = FAILED_CRITICAL_MISSION, 4 = LEFT_GAME
+inline uint8_t GetPlayerState(int32_t playerId = 0) {
+    if (playerId < 0 || playerId > 1) playerId = 0;
+    return *reinterpret_cast<const uint8_t*>(0x00B7CD98 + static_cast<uintptr_t>(playerId) * 0x190 + 0xD4);
+}
 
 constexpr int MAX_PICKUPS = 620;
 inline CPickup* GetPickupsArray() {
