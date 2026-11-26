@@ -1,8 +1,27 @@
 # GTA San Andreas — Modular GTA 5 Style Expansion Suite (6 ASI Plugins)
 
-A modular suite of **6 independent C++20 ASI plugins** for **GTA San Andreas 1.0 US (Hoodlum)** that brings core **GTA 5** and **ETS 2** gameplay mechanics into classic GTA SA while staying authentic to the vanilla aesthetic and **100% compatible with SA-COOP (`Karimov-Akbar/sa-coop`)**, **WidescreenFix**, **Proper Shaders**, **Proper Vehicle Damage**, and **MSKL Russificator**.
+A modular suite of **6 independent C++20 ASI plugins** for **GTA San Andreas 1.0 US (Hoodlum)** that brings core **GTA 5** and **ETS 2** gameplay mechanics into classic GTA SA while staying authentic to the vanilla aesthetic — with **zero third-party mod dependencies** beyond **Ultimate ASI Loader**.
 
 Install **only the modules you want** — every plugin automatically discovers and integrates with the others at runtime via the shared C-ABI service bus (`mod_bus.hpp`), with zero load-order dependencies.
+
+---
+
+## Requirements & Compatibility
+
+### Requirements
+- **GTA San Andreas 1.0 US (Hoodlum)**
+- **Ultimate ASI Loader** (and optionally **ModLoader** for easy folder-based installation)
+- **No other mod dependencies** (no CLEO, no MoonLoader, no external SDK runtimes required).
+
+### Supported & Tested Mods
+All plugins are designed to work cleanly alongside:
+- **SilentPatch**
+- **GTA SA COOP (`Karimov-Akbar/sa-coop`)** — both Singleplayer and Co-op supported
+- **Widescreen Fix** (latest version)
+- **Proper Shaders**
+- **Proper Vehicle Damage**
+- **ModelExtras**
+- **MSKL Russificator** (and SanLtd Russian font tables, alongside full English support)
 
 ---
 

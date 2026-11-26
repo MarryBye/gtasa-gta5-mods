@@ -6,7 +6,8 @@
 
 ## 0. Project Vision & Mission
 - Build a fun, creative, experimental suite of **C++20 32-bit ASI plugins** for **GTA San Andreas 1.0 US (Hoodlum)** — porting GTA 5 / ETS 2 mechanics and original gameplay ideas into classic GTA SA.
-- Every feature and mod **MUST** work seamlessly in **BOTH Singleplayer GTA SA** (clean New Game, `GTASAsf1..8` slots, storyline mission safety) **AND GTA SA COOP (`Karimov-Akbar/sa-coop`)**, as well as **WidescreenFix**, **Proper Shaders**, **Proper Vehicle Damage**, **ModelExtras**, and **MSKL Russificator**.
+- **Zero External Mod Dependencies:** The **ONLY** runtime requirement is **Ultimate ASI Loader** (+ our own suite modules when combined). Never depend on CLEO, MoonLoader, or other third-party mods; optional libraries like `bass.dll` must be dynamically loaded with graceful fallback.
+- **Broad Compatibility (Always Documented in `README.md`):** Every feature and mod **MUST** work seamlessly in **BOTH Singleplayer GTA SA** (clean New Game, `GTASAsf1..8` slots, storyline mission safety) **AND GTA SA COOP (`Karimov-Akbar/sa-coop`)**, while maintaining active compatibility with **SilentPatch**, **Widescreen Fix (latest)**, **Proper Shaders**, **Proper Vehicle Damage**, **ModelExtras**, and **MSKL Russificator**. Whenever support/compatibility for another mod is added, document it in `README.md`.
 - **Long-term roadmap (Rule 7):** Currently developed as independent standalone ASI modules (`ModDev_*`), **planned to be merged into ONE unified all-in-one ASI super-mod later**. Every architectural choice must keep that merge effortless.
 
 ---
@@ -111,8 +112,10 @@ Although each module currently builds as a standalone `.asi`, the architecture *
 
 ---
 
-## 4. Golden Rule #8 — Singleplayer + SA-COOP Compatibility & Stability
+## 4. Golden Rule #8 — Zero External Dependencies, Singleplayer + SA-COOP & Compatibility
 
+- **Zero Third-Party Mod Dependencies:** Every plugin MUST run with **only Ultimate ASI Loader** (and optional sibling plugins from this suite). Never require CLEO, MoonLoader, or third-party DLLs at link time; any optional helper (e.g., `bass.dll`) must be loaded dynamically with safe fallback.
+- **Supported Ecosystem (Keep `README.md` Updated):** Maintain compatibility with **SilentPatch**, **SA-COOP (`Karimov-Akbar/sa-coop`)**, **Widescreen Fix (latest)**, **Proper Shaders**, **Proper Vehicle Damage**, **ModelExtras**, and **MSKL Russificator**. Always list newly supported mods in `README.md`.
 - **Full Singleplayer + SA-COOP Support:** Every feature MUST work cleanly in **both Singleplayer GTA SA** (clean New Game with zero stale autosave leakage, save slots `GTASAsf1..8`, storyline mission compatibility) **and GTA SA COOP (`Karimov-Akbar/sa-coop`)**.
 - **Never** use slow-motion / time-scale manipulation (`CTimer::ms_fTimeScale`) in wheels, phones, or menus.
 - **Always** guard custom hotkeys and overlays against unfocused windows (`sa::IsGameWindowFocused()`), active pause menu/cutscenes, and SA-COOP chat/overlays (`F2`, `F4`, `F9`, `T`).
