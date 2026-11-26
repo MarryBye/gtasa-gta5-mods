@@ -1,65 +1,73 @@
 # GTA5GarageAndTuning
 
-**GTA 5-style vehicle tuning, personal garage & mechanic delivery for GTA San Andreas 1.0 US (Hoodlum).**
+**GTA 5-style vehicle tuning, ETS 2-style wear & servicing, dealerships, personal garage & mechanic delivery for GTA San Andreas 1.0 US (Hoodlum).**
 
-ASI-плагин добавляет глубокий тюнинг производительности и внешнего вида во все 5 автомастерских штата (включая реальные интерьеры TransFender, Loco Low Co. и Wheel Arch Angels), систему личного транспорта с сохранением на каждый слот сейва, а также реалистичную доставку машины механиком по дорогам (`F6`).
-
----
-
-## Основные возможности
-
-### 1. Автомастерская в стиле GTA 5 (все 5 мастерских)
-- **Доступ для всех наземных авто и мотоциклов** во всех 5 точках (TransFender LS/SF/LV, Loco Low Co., Wheel Arch Angels) внутри родных интерьеров без вылетов за стены и без ванильных ограничений.
-- **Тюнинг производительности** (изолированная копия `tHandlingData` на каждую машину — трафик не затрагивается!):
-  - **Двигатель (EMS Ур. 1–4)** — ощутимый рост разгона и максимальной скорости, снижение аэродинамического сопротивления (звук двигателя остаётся 100% нативным / полностью совместим с модами на звуки авто).
-  - **Трансмиссия (Уличная / Спортивная / Гоночная)** — добавляет передачи (до 5-ступенчатой КПП для 3- и 4-ступенчатых авто вроде Hermes), растягивает высшие передаточные числа, ускоряет переключения и отображает параметр **«Передачи»** в карточке характеристик.
-  - **Подвеска (Заниженная / Уличная / Спортивная / Гоночная)** — визуально занижает клиренс прямо в мастерской, повышает жёсткость и антиклевок.
-  - **Тормоза (Уличные / Спортивные / Гоночные)** — значительно сокращают тормозной путь.
-  - **Шины** — 3 уровня сцепления + **Пуленепробиваемые шины**.
-  - **Турбонаддув** — дополнительная тяга, мягкий звук раскрутки турбины и пшик блоу-офф при сбросе газа/переключении (автоматически умолкают в воздухе и в меню паузы).
-  - **Кузов / Броня (20% – 100%)** — снижение урона по HP (до −74%), защита навесных панелей и усиление жёсткости/массы кузова (совместимо с *Proper Vehicle Damage v0.3.7* — бронированное авто заметно меньше мнётся в ДТП).
-- **Полный визуальный тюнинг**:
-  - Все 17 комплектов дисков, спойлеры, бамперы, пороги, выхлоп, крыша, капот, доп. фары, гидравлика, нитро, аудиосистема, винилы, основной и дополнительный цвет, ремонт.
-  - **Кастомный номерной знак** — выбор из пресетов или ввод собственного текста до 8 символов прямо в игре с мгновенным обновлением 3D-текстуры на авто.
-  - **Клаксоны** — 4 синтезированных кастомных сигнала (грузовой, спортивный, классический, музыкальный).
-- **Умная камера в мастерской**:
-  - Автофокус на выбранной категории тюнинга (перед, зад/выхлоп/номер, спойлер, профиль сбоку, крыша).
-  - Ручное вращение (`Q`/`E` или `←`/`→`), **зум** (`Колёсико мыши`, `Z`/`X`, `+`/`-`) и возврат фокуса (`C`).
-- **Панель характеристик**: живые числовые значения и шкалы (`Макс. скорость` в MPH или км/ч, `Ускорение`, `Торможение`, `Управление`, `Кузов`) с мгновенным зелёным `+` / красным `−` предпросмотром.
-
-### 2. Личный транспорт и доставка механиком (`F6`)
-- Регистрация до **10 личных машин** (2 страницы по 5 слотов) прямо в мастерской.
-- **Pay 'n' Spray** чинит и снимает розыск, но **не перекрашивает** зарегистрированный личный транспорт.
-- **Меню `F6`** с живой **карточкой характеристик** каждой машины (включая установленный тюнинг, турбо, пулестойкие шины и номер).
-- **Реальная доставка механиком**: если игрок рядом с дорогой (не «в поле» и не в воде), классический механик Сана-Андреас спавнится на дороге в ~100 м, едет по дорожной сети к игроку (с меткой на радаре и защитой от застревания), паркуется и уходит.
-- **Страховка**: если личное авто уничтожено/утоплено, его можно восстановить в меню `F6` за процент от денег игрока (настраивается в INI).
-
-### 3. Сохранения и совместимость
-- Внешнее хранение по слотам сейва `GTASAsf1..8` в `Документы\GTA San Andreas User Files\GTA5GarageSaves\` (сейвы `.b` не модифицируются).
-- **Новая игра** в одиночном режиме стартует с чистого пустого гаража; в **SA-COOP** используется локальный автосейв-слот `0`.
-- Совместим с **Proper Shaders**, **ModelExtras**, **Proper Vehicle Damage**, **Izzy's Lively Vehicle Physics**, **WidescreenFix**, **SA Styled Speedometer**, **Russificator (SanLtd)** и **SA-COOP**.
+This ASI plugin adds deep performance and visual customization across all 5 workshops in San Andreas (inside the native TransFender, Loco Low Co., and Wheel Arch Angels interiors), an ETS 2-style component wear & servicing system, official vehicle dealerships in all 3 cities, a 10-slot personal garage with per-save persistence, and realistic road-network Mechanic delivery (`F6` standalone or integrated into `GTA5Phone`).
 
 ---
 
-## Управление
-| Действие | Клавиши |
+## Key Features
+
+### 1. GTA 5-Style Vehicle Workshop (All 5 Mod Shops)
+- **Open to all land cars and motorcycles** across all 5 locations (TransFender LS/SF/LV, Loco Low Co., Wheel Arch Angels) inside authentic interiors with zero vanilla vehicle restrictions.
+- **Performance Tuning** (per-vehicle isolated `tHandlingData` copy — traffic vehicles are never affected):
+  - **Engine (EMS Lv. 1–4):** Substantial acceleration and top-speed gains with reduced aerodynamic drag (keeps native engine audio 100% compatible with vehicle sound mods).
+  - **Transmission (Street / Sport / Race):** Adds extra gears (up to 5-speed for 3- and 4-speed cars such as the Hermes), extends top gear ratios, speeds up shifts, and displays the **Gears** stat on the stats card.
+  - **Suspension (Lowered / Street / Sport / Race):** Visually lowers ride height live inside the workshop while increasing stiffness and anti-dive stability.
+  - **Brakes (Street / Sport / Race):** Significantly shortens braking distance.
+  - **Tires:** 3 grip tiers + **Bulletproof Tires**.
+  - **Turbo:** Extra torque, subtle turbo spool, and blow-off valve flutter on lift-off/shifts (automatically muted while airborne or paused).
+  - **Armor / Chassis (20%–100%):** Reduces HP damage (up to −74%), protects detachable panels, and reinforces body rigidity/mass (compatible with *Proper Vehicle Damage v0.3.7* — armored cars deform noticeably less in collisions).
+- **Full Visual Customization:**
+  - All 17 wheel sets, spoilers, bumpers, side skirts, exhausts, roofs, hoods, bullbars/lights, hydraulics, nitro, bass boost/stereo, paintjobs, primary & secondary colors, and repairs.
+  - **Custom License Plate:** Choose presets or type up to 8 custom characters in-game with instant 3D texture updates on the vehicle.
+  - **Horns:** 4 synthesized custom horns (truck, sport, classic, musical).
+- **Smart Workshop Camera:**
+  - Auto-focuses on the currently selected tuning category (front, rear/exhaust/plate, spoiler, side profile, roof).
+  - Manual orbit (`Q`/`E` or `←`/`→`), **zoom** (`Mouse Wheel`, `Z`/`X`, `+`/`-`), and focus reset (`C`).
+- **Live Stats Card:** Numeric readouts and progress bars (`Top Speed` in MPH or KM/H, `Acceleration`, `Braking`, `Handling`, `Armor`, `Gears`) with live green `+` / red `−` upgrade previews and red ETS 2 wear-loss indicators.
+
+### 2. ETS 2-Style Component Wear & Servicing
+- Individual component wear tracking for **engine, transmission, brakes, tires, suspension, and chassis**.
+- Accumulated mileage, street-spawn wear, hard collisions, and explosions degrade real vehicle handling and display red wear-loss segments on `StatsCard`; full workshop servicing restores peak performance.
+
+### 3. Official Dealerships (3 Cities)
+- Visit **Coutt & Schutz (LS)**, **Wang Cars (SF)**, and **Auto Bahn (LV)** via classic red entry markers (or order vehicles online through `GTA5Phone`) with live 3D showroom preview and stats comparison.
+
+### 4. Personal Garage & Mechanic Delivery (`F6`)
+- Register up to **10 personal vehicles** (2 pages × 5 slots) directly inside any workshop or upon dealership purchase.
+- **Pay 'n' Spray** repairs and clears wanted stars without repainting registered personal vehicles.
+- **Delivery Menu (`F6` or via `GTA5Phone`)** with a live stats card for every owned car (showing installed upgrades, turbo, bulletproof tires, wear, and license plate).
+- **Realistic Mechanic Delivery:** When near a road (not off-road or in water), a classic San Andreas mechanic spawns ~100 m away, drives along the road network to your position (with radar blip and anti-stuck handling), parks, and walks away.
+- **Insurance:** Destroyed or submerged personal vehicles can be recovered via `F6` / Phone for a configurable fee.
+
+### 5. Saves & Compatibility
+- External per-save storage tied to `GTASAsf1..8` inside `Documents\GTA San Andreas User Files\GTA5GarageSaves\` (vanilla `.b` save files are never modified).
+- **New Game** in singleplayer starts with a clean empty garage; under **SA-COOP**, each player uses an isolated profile (`*_coop_<Nickname>.ini`).
+- Compatible with **Proper Shaders**, **ModelExtras**, **Proper Vehicle Damage**, **Izzy's Lively Vehicle Physics**, **WidescreenFix**, **SA Styled Speedometer**, **MSKL / SanLtd Russificator**, and **SA-COOP**.
+
+---
+
+## Controls
+
+| Action | Keys |
 |---|---|
-| Открыть/закрыть меню доставки | `F6` (настраивается в INI) |
-| Навигация в меню | `Колёсико мыши` / `W`/`S` / `↑`/`↓`, `F`/`Enter`/`ЛКМ` — выбрать, `Backspace`/`Esc`/`ПКМ` — назад |
-| Вращение камеры в мастерской | `Q`/`E` или `←`/`→` |
-| Зум камеры в мастерской | `Колёсико мыши`, `Z`/`X`, `+`/`-` |
-| Вернуть фокус камеры на деталь | `C` |
-| Листать страницы гаража (`F6`) | `←`/`→` |
-| Удалить авто из гаража (`F6`) | `Delete` |
+| Open / close delivery menu (standalone) | `F6` (configurable in INI; integrated into `GTA5Phone` when installed) |
+| Menu navigation | `Mouse Wheel` / `W`/`S` / `↑`/`↓`, `F`/`Enter`/`LMB` — select, `Backspace`/`Esc`/`RMB` — back |
+| Orbit workshop camera | `Q`/`E` or `←`/`→` |
+| Zoom workshop camera | `Mouse Wheel`, `Z`/`X`, `+`/`-` |
+| Reset camera focus to part | `C` |
+| Switch garage pages (`F6`) | `←`/`→` |
+| Remove vehicle from garage (`F6`) | `Delete` |
 
 ---
 
-## Конфигурация (`GTA5GarageAndTuning.ini`)
-Все параметры (язык `rus`/`eng`, единицы скорости `mph`/`kmh`, клавиша `F6`, дистанция доставки, процент страховки, отключение звуков турбо/двигателя, все цены) настраиваются в [`config/GTA5GarageAndTuning.ini`](config/GTA5GarageAndTuning.ini).
+## Configuration (`GTA5GarageAndTuning.ini`)
+All options (language `rus`/`eng`, speed units `mph`/`kmh`, `F6` keybind, delivery distance, insurance rate, wear & servicing multipliers, turbo/engine audio toggles, and all prices) are configurable in [`config/GTA5GarageAndTuning.ini`](config/GTA5GarageAndTuning.ini).
 
-## Сборка из исходников
-Требуется 32-битный MinGW-w64 (`C:\msys64\mingw32\bin\g++.exe`, C++20) и общая папка `../ModDev_Common`:
+## Building from Source
+Requires 32-bit MinGW-w64 (`C:\msys64\mingw32\bin\g++.exe`, C++20) and sibling `../ModDev_Common`:
 ```powershell
-.\build.ps1            # Собрать и установить в ..\modloader\GTA5GarageAndTuning
-.\build.ps1 -NoDeploy  # Только собрать в .\build\GTA5GarageAndTuning.asi
+.\build.ps1            # Build and auto-deploy to <GameDir>\modloader\GTA5GarageAndTuning
+.\build.ps1 -NoDeploy  # Build only to .\build\GTA5GarageAndTuning.asi
 ```

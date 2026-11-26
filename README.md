@@ -1,34 +1,34 @@
 # GTA San Andreas — Modular GTA 5 Style Expansion Suite (6 ASI Plugins)
 
-Модульная линейка из **6 независимых C++20 ASI-плагинов** для **GTA San Andreas 1.0 US (Hoodlum)**, переносящих ключевые геймплейные механики GTA 5 / ETS 2 в аутентичном ванильном стиле GTA SA с полной совместимостью с **SA-COOP**, **WidescreenFix**, **Proper Shaders** и **Proper Vehicle Damage**.
+A modular suite of **6 independent C++20 ASI plugins** for **GTA San Andreas 1.0 US (Hoodlum)** that brings core **GTA 5** and **ETS 2** gameplay mechanics into classic GTA SA while staying authentic to the vanilla aesthetic and **100% compatible with SA-COOP (`Karimov-Akbar/sa-coop`)**, **WidescreenFix**, **Proper Shaders**, **Proper Vehicle Damage**, and **MSKL Russificator**.
 
-Вы можете устанавливать **только нужные модули** — они автоматически обнаруживают друг друга и интегрируются через общую шину `mod_bus.hpp`.
+Install **only the modules you want** — every plugin automatically discovers and integrates with the others at runtime via the shared C-ABI service bus (`mod_bus.hpp`), with zero load-order dependencies.
 
 ---
 
-## Модульная структура / Modules
+## Modular Structure
 
-| Модуль | Папка в `modloader/` | Описание |
+| Module | Folder in `modloader/` | Description |
 |---|---|---|
-| **А. [GTA5UIKit](ModDev_UIKit/README.md)** | `GTA5UIKit/` | Общая 3-уровневая библиотека примитивов и «тупых» компонентов (`ThemeTokens` → `ui::prim::*` → `ListMenu`, `StatsCard`, `PhoneFrame`, `HelpToast`, `ColorGrid`, `TextInputModal`, `RadialWheel`) + общая шина аддонов `mod_bus.hpp` + **полное обновление всех остальных ванильных окон GTA SA**: парикмахерские, тату-салоны, спортзалы, цветовые сетки и **все верхние окна уведомлений / вопросов / сюжетных звонков** (`CHud::DrawHelpText`) в едином стиле без изменения их логики. |
-| **Б. [GTA5AmmuNation](ModDev_GTA5Weapons/README.md)** | `GTA5AmmuNation/` | Кастомизация оружия в Ammu-Nation (глушитель, компенсатор, магазины, оптика с зумом ПКМ, рукоять, ствол, 3D-ЛЦУ), кастомные звуки (`bass.dll`), мульти-инвентарь и 8-секторное колесо выбора оружия (`Колёсико` / `TAB`, без слоу-мо для 100% совместимости с SA-COOP). При наличии `GTA5Inventory` позволяет покупать **запасные бронежилеты** прямо в Ammu-Nation. |
-| **В. [GTA5GarageAndTuning](ModDev_GTA5Garage/README.md)** | `GTA5GarageAndTuning/` | Глубокий тюнинг, 10 личных машин, доставка механиком (`F6` без телефона), **система износа узлов в стиле ETS 2** (двигатель, трансмиссия, тормоза, шины, подвеска, кузов — деградация физики, красная полоса потерь на карточке характеристик, дорогое ТО в автомастерской, сильный износ при ДТП и взрывах) и **официальные автосалоны** в 3 городах с классическими красными маркерами входа (Coutt & Schutz LS, Wang Cars SF, Auto Bahn LV) + покупка авто через Телефон. |
-| **Г. [GTA5Inventory](ModDev_Inventory/README.md)** | `GTA5Inventory/` | Рестораны на вынос (Burger Shot, Cluckin' Bell, Pizza Stack, закусочные): вместо еды на месте игрок покупает снеки и блюда **в карман** до лимита (конфеты P's & Q's, EgoChaser, Meteorite, Sprunk, фирменные блюда, здоровый салат) + запасные бронежилеты (4 класса). Автономное меню на `F7` (автоматически скрывается, если установлен `GTA5Phone`). |
-| **Д. [GTA5Phone](ModDev_Phone/README.md)** | `GTA5Phone/` | Аутентичный кнопочный **Телефон 90-х на `F6`** с архитектурой аддонов, управлением **колёсиком мыши / ЛКМ / ПКМ / WASD / стрелками** (с полной блокировкой движения и стрельбы CJ), нативной анимацией трубки (`0x0729`), автоматическим убиранием при обстреле и **Настройками трубки** (4 ЖК-темы 90-х, 4 синтезированные мелодии звонка, звук кнопок, тихий режим, анимация, авто-одежда). Объединяет **Контакты** (Механик, «Старый знакомый» со снятием до 3-х звёзд раз в 10 мин и общим КД в SA-COOP, Страховая, Скорая), Еду и Броню, **Гардероб CJ** (переодевание по частям + 8 наборов с авто-надеванием + обновлённые магазины одежды), Автосалон и запуск списка игроков **SA-COOP** (`F2`). |
-| **Е. [GTA5EarlyUnlock](ModDev_EarlyUnlock/README.md)** | `GTA5EarlyUnlock/` | Независимое открытие всех автомастерских, Ammu-Nation, магазинов одежды, парикмахерских, тату-салонов, спортзалов и закусочных с самого начала игры. |
+| **A. [GTA5UIKit](ModDev_UIKit/README.md)** | `GTA5UIKit/` | Shared 3-tier React-style dumb-component UI Kit (`ThemeTokens` → `ui::prim::*` → `ListMenu`, `StatsCard`, `PhoneFrame`, `HelpToast`, `ColorGrid`, `TextInputModal`, `RadialWheel`) + inter-mod addon bus (`mod_bus.hpp`) + **complete visual restyling of vanilla GTA SA menus & notifications**: barber shops, tattoo parlors, gyms, betting shops, color grids, and **all top-left notifications, prompts & story phone calls** (`CHud::DrawHelpText`) in one unified style without altering vanilla gameplay logic. |
+| **B. [GTA5AmmuNation](ModDev_GTA5Weapons/README.md)** | `GTA5AmmuNation/` | GTA 5-style weapon customization in Ammu-Nation (silencer, compensator, extended/drum magazines, optics with smooth RMB zoom, tactical grip, heavy barrel, 3D laser sight, optional 3D weapon attachments), custom synthesized audio (`bass.dll`), **multi-weapon storage per category**, and an **8-sector Weapon Wheel** (`Mouse Wheel` / `TAB`, **no slow-motion** for 100% SA-COOP safety). When `GTA5Inventory` is installed, you can also buy **spare body armor** directly inside Ammu-Nation. |
+| **C. [GTA5GarageAndTuning](ModDev_GTA5Garage/README.md)** | `GTA5GarageAndTuning/` | Deep performance & visual tuning across all 5 workshops, **10 personal vehicles**, road-network **Mechanic delivery** (`F6` standalone or via Phone), an **ETS 2-style component wear & servicing system** (engine, transmission, brakes, tires, suspension, chassis degradation with red loss bars on the stats card, expensive workshop servicing, heavy wear from crashes & explosions), and **official dealerships in all 3 cities** with classic red entry markers (Coutt & Schutz LS, Wang Cars SF, Auto Bahn LV) + online car purchasing via Phone. |
+| **D. [GTA5Inventory](ModDev_Inventory/README.md)** | `GTA5Inventory/` | **Takeaway restaurants** (Burger Shot, Cluckin' Bell, Well Stacked Pizza, diners): buy snacks & meals **into your pocket** up to carry limits (P's & Q's, EgoChaser, Meteorite, Sprunk, signature meals, healthy salad) + **spare body armor** (4 classes). Standalone `F7` menu (automatically hidden and embedded inside `GTA5Phone` when installed). |
+| **E. [GTA5Phone](ModDev_Phone/README.md)** | `GTA5Phone/` | Authentic 1990s keypad **Phone (`F6`)** with a modular addon hub architecture, unified **Mouse Wheel / LMB / RMB / WASD / Arrow** controls (with full CJ movement & combat lock), native handset animation (`0x0729`), automatic holstering under gunfire, and **Phone Settings** (4 retro LCD themes, 4 synthesized ringtones, keypad beeps, silent mode, animation toggle, auto-outfit rules). Unifies **Contacts** (Mechanic, "Old Friend" removing up to 3 wanted stars every 10 min with shared SA-COOP cooldown, Insurance, EMS), **Food & Armor**, **CJ Wardrobe** (part-by-part dressing + 8 auto-equip outfits + restyled clothing stores), **Online Dealership**, and quick launch of the **SA-COOP Player List** (`F2`). |
+| **F. [GTA5EarlyUnlock](ModDev_EarlyUnlock/README.md)** | `GTA5EarlyUnlock/` | Standalone early-game unlocker opening all workshops, dealerships, Ammu-Nation stores, clothing stores, barber shops, tattoo parlors, gyms, and diners from the very start of the game, with duplicate-free radar icons. |
 
 ---
 
-## Совместимость с GTA SA COOP (`Karimov-Akbar/sa-coop`)
+## GTA SA COOP Compatibility (`Karimov-Akbar/sa-coop`)
 
-- **Изолированные профили игроков:** в одиночной игре (и у Хоста на сохранении 1..8) данные привязаны к слоту `GTASAsf1..8.b`, а у подключающихся игроков SA-COOP автоматически создаётся личный профиль `*_coop_<НикИзCoopIni>.ini` (или `[Coop] ProfileName=` в `GTA5UIKit.ini`) в `Документы\GTA San Andreas User Files\GTA5*Saves\`. У каждого игрока свои 10 машин, обвесы оружия, карманная еда/броня, купленная одежда и 8 наборов.
-- **Безопасность в кооперативе:** защита от перехвата клавиш при открытых оверлеях/чате SA-COOP (`F9`, `F2`, `F4`, `T`), защита от `DELETE_CAR` под напарником за рулём, защита `CClothes::RebuildPlayer` при нестандартных скинах `F4`, отсутствие слоу-мо в колесе оружия и общий 10-минутный КД «Старого знакомого».
+- **Isolated per-player profiles:** In singleplayer (and for the Host on save slots `1..8`), progress is tied to `GTASAsf1..8.b`. Joining SA-COOP players automatically get an isolated profile `*_coop_<NicknameFromCoopIni>.ini` (or `[Coop] ProfileName=` in `GTA5UIKit.ini`) inside `Documents\GTA San Andreas User Files\GTA5*Saves\`. Every player has their own 10 personal vehicles, weapon attachments, pocket snacks/armor, wardrobe items, and 8 outfits.
+- **Co-op safety guards:** Input protection when SA-COOP overlays/chat (`F9`, `F2`, `F4`, `T`) are open, `DELETE_CAR` guard while another player is driving, `CClothes::RebuildPlayer` guard for custom `F4` skins, zero slow-motion in the weapon wheel, and a shared 10-minute cooldown for the "Old Friend" wanted-level contact.
 
 ---
 
-## Быстрая установка / Quick Install
+## Quick Install
 
-Распакуйте нужные папки модулей напрямую в `Grand Theft Auto San Andreas\modloader\`:
+Extract the desired module folders directly into `Grand Theft Auto San Andreas\modloader\`:
 ```text
 Grand Theft Auto San Andreas/
 └── modloader/
@@ -40,27 +40,31 @@ Grand Theft Auto San Andreas/
     └── GTA5EarlyUnlock/
 ```
 
-Все настройки (язык `rus`/`eng`, масштаб интерфейса, клавиши, цены, множитель износа и ТО, клавиша списка игроков SA-COOP, включение рестайлинга ванильных меню) редактируются в соответствующих `.ini` файлах.
+All settings (language `rus`/`eng` with full **MSKL Russificator** & English support, UI scale, speed units `mph`/`kmh`, keybinds, prices, wear & servicing multipliers, SA-COOP player-list hotkey, vanilla menu restyling toggles) are configurable in each module's `.ini` file.
 
-## Сборка из исходников / Building
+---
 
-Требуется 32-битный MinGW-w64 (`pacman -S mingw-w64-i686-gcc` в MSYS2).
+## Building from Source
 
-1. *(Опционально, для автоустановки в `modloader`)* Скопируйте `local.config.example.ps1` в `local.config.ps1` и укажите путь к вашей папке GTA San Andreas (`$GameDir`). Также можно задать переменную окружения `GTASA_DIR` или передать `-GameDir`.
-2. Соберите все 6 плагинов:
+Requires 32-bit MinGW-w64 (`pacman -S mingw-w64-i686-gcc` in MSYS2).
+
+1. *(Optional, for automatic `modloader` deployment)* Copy `local.config.example.ps1` to `local.config.ps1` and set `$GameDir` to your GTA San Andreas directory. You can also set the `GTASA_DIR` environment variable or pass `-GameDir`.
+2. Build all 6 plugins:
 ```powershell
-# Сборка всех 6 .asi, автодеплой в modloader и упаковка релизных ZIP в dist\
+# Compile all 6 .asi plugins, auto-deploy to modloader, and package release ZIPs in dist\
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-all.ps1
 
-# Быстрая сборка и деплой в modloader без упаковки ZIP
+# Fast compile & deploy to modloader without zipping
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-all.ps1 -SkipZip
 
-# Только сборка и упаковка ZIP без деплоя в игру
+# Compile & package ZIPs only (skip modloader deployment)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-all.ps1 -NoDeploy
 ```
 
-Также доступен скрипт `publish-release.ps1` для единого цикла: сборка → автодеплой в `modloader` → `git push` → публикация GitHub Release.
+For full releases, `publish-release.ps1` automates the entire pipeline in one command: build → auto-deploy to `modloader` → `git push` → publish GitHub Release.
 
-## Лицензия / License
+---
+
+## License
 
 [MIT](LICENSE)

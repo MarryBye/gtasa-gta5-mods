@@ -1,49 +1,49 @@
 # GTA5AmmuNation
 
-**GTA 5-style weapon shop, attachments, custom audio, multi-weapon inventory & vanilla-styled Weapon Wheel for GTA San Andreas 1.0 US (Hoodlum).**
+**GTA 5-style weapon customization, custom audio, multi-weapon arsenal & vanilla-styled Weapon Wheel for GTA San Andreas 1.0 US (Hoodlum).**
 
-ASI-плагин переносит систему кастомизации и выбора оружия из GTA 5 в классический стиль GTA San Andreas с полной совместимостью с кооперативом SA-COOP и графическими модами.
-
----
-
-## Основные возможности
-
-### 1. Обновлённый магазин Ammu-Nation
-- Интерфейс построен на общем «тупом» UI Kit (`ModDev_Common`) в классическом монохромном стиле GTA SA с автоматической подгонкой текста под любые разрешения и WidescreenFix.
-- Категории: **Ближний бой**, **Пистолеты**, **Дробовики**, **Пистолеты-пулемёты**, **Штурмовые винтовки**, **Снайперские винтовки**, **Тяжёлое**, **Метательное**, **Бронежилет**.
-- Купленное оружие отмечается зелёным **`Куплено`**. Повторный вход в купленный ствол открывает меню тюнинга модулей и покупки патронов.
-- **Панель характеристик справа снизу**: Урон, Скорострельность, Точность, Дальность, Обойма — числовые значения, шкалы и мгновенный предпросмотр изменений (`+` зелёный / `−` красный).
-
-### 2. Модули оружия (как в GTA 5)
-- **Надульник**: *Глушитель* (тихий звук выстрела через `bass.dll` + стабильность) / *Компенсатор* (выше точность и плотный дульный удар).
-- **Магазин**: *Увеличенный* (+60% патронов в обойме) / *Барабанный* (+100% патронов в обойме).
-- **Прицел**: *Коллиматор* (+точность, мягкий зум при ПКМ) / *Тактическая оптика* (++точность и дальность, реальный плавный зум камеры при ПКМ).
-- **Рукоять**: *Тактическая рукоять* (выше точность + стрельба в движении).
-- **Ствол и УСМ**: *Усиленный ствол* (+урон, +дальность, +скорострельность).
-- **Тактический ЛЦУ**: *Красный* или *Зелёный* 3D-лазерный луч, точно направленный по лучу прицела (`Find3rdPersonCamTargetVector`), плюс светящаяся точка на цели при прицеливании.
-- **Опциональные 3D-обвесы на модели оружия** (`Enable3DAttachments=0` по умолчанию в INI): при включении (`1`) глушитель, компенсатор, прицелы, рукоять, увеличенный/барабанный магазин и модуль ЛЦУ рендерятся прямо на 3D-модели оружия (включая стрельбу с двух рук Hitman!).
-
-### 3. Несколько стволов одного класса + Ванильное колесо выбора оружия
-- СиДжей может носить **сразу несколько видов оружия в одном классе** (например, одновременно **9mm + Desert Eagle**, **AK-47 + M4**, **Micro-SMG + MP5**) с **общими патронами** на категорию (как в GTA 5 / ванильных слотах).
-- **Колёсико мыши** — открывает компактное колесо и быстро перелистывает всё купленное оружие.
-- **Удерживать `TAB`** — детальное 8-секторное колесо в классическом чёрно-белом стиле GTA SA с родными HUD-иконками оружия:
-  - Движение мыши (или `1–8`, `W`/`S`, `↑`/`↓`) — выбор категории;
-  - `Колёсико мыши` / `Q`/`E` / `←`/`→` — переключение стволов внутри категории;
-  - Отпустить `TAB` — экипировать выбранный ствол.
-- **Без замедления времени** — 100% безопасно для **SA-COOP**!
-
-### 4. Сохранения по слотам сейва
-- Весь купленный арсенал, обвесы и активный выбор внутри каждой категории сохраняются в `Документы\GTA San Andreas User Files\GTA5WeaponSaves\`.
-- **Новая игра** в одиночном режиме всегда начинается с пустого арсенала (не подтягивает старый автосейв).
+This ASI plugin ports GTA 5's weapon attachment shop, multi-weapon slot inventory, and radial Weapon Wheel into classic GTA San Andreas styling while remaining 100% compatible with **SA-COOP** and graphic/interface mods.
 
 ---
 
-## Конфигурация (`GTA5AmmuNation.ini`)
-В [`config/GTA5AmmuNation.ini`](config/GTA5AmmuNation.ini) настраиваются язык (`rus`/`eng`), отображение 3D-обвесов (`Enable3DAttachments=0` по умолчанию), 3D-лазер (`EnableLaserSight`), зум прицела (`EnableScopeZoom`), кастомные звуки (`EnableWeaponAudio`, `AudioVolume`), колесо оружия (`EnableWeaponWheel`, `WheelKey`) и все цены.
+## Key Features
 
-## Сборка из исходников
-Требуется 32-битный MinGW-w64 (`C:\msys64\mingw32\bin\g++.exe`, C++20) и общая папка `../ModDev_Common`:
+### 1. Revamped Ammu-Nation Shop
+- Built entirely on the shared dumb-component UI Kit (`ModDev_Common/ui_kit.hpp`) in GTA SA's classic monochrome aesthetic with automatic text fitting for every resolution and **WidescreenFix**.
+- Categories: **Melee**, **Pistols**, **Shotguns**, **SMGs**, **Assault Rifles**, **Sniper Rifles**, **Heavy**, **Thrown**, and **Body Armor** (plus **spare body armor** purchase integration when `GTA5Inventory` is installed).
+- Owned weapons are marked in green as **`Owned`**. Re-entering an owned weapon opens its attachment customization and ammo purchase screen.
+- **Bottom-Right Stats Card:** Damage, Fire Rate, Accuracy, Range, and Magazine Size — numeric stats, progress bars, and live green `+` / red `−` previews.
+
+### 2. GTA 5-Style Weapon Attachments
+- **Muzzle:** *Silencer* (quiet synthesized shot via `bass.dll` + stability) / *Compensator* (higher accuracy + punchy muzzle blast).
+- **Magazine:** *Extended Mag* (+60% clip capacity) / *Drum Mag* (+100% clip capacity).
+- **Optics:** *Collimator* (+accuracy, light RMB zoom) / *Tactical Scope* (++accuracy & range, smooth RMB camera zoom).
+- **Underbarrel:** *Tactical Grip* (improved accuracy + movement stability).
+- **Barrel & Trigger:** *Heavy Barrel* (+damage, +range, +fire rate).
+- **Tactical Laser Sight:** *Red* or *Green* 3D laser beam aligned to the real aim ray (`Find3rdPersonCamTargetVector`), complete with a glowing dot on target while aiming.
+- **Optional 3D Attachments on Weapon Models** (`Enable3DAttachments=0` by default in INI): when enabled (`1`), silencers, compensators, optics, grips, extended/drum mags, and laser modules render directly on the 3D weapon model (including dual-wield Hitman skill).
+
+### 3. Multi-Weapon Category Storage + 8-Sector Weapon Wheel
+- CJ can carry **multiple weapons within the same weapon slot** (e.g., **9mm + Desert Eagle**, **AK-47 + M4**, **Micro-SMG + MP5** simultaneously) sharing category ammo, and swap between them anytime.
+- **Mouse Wheel:** Opens the compact wheel and quickly cycles through owned weapons.
+- **Hold `TAB`:** Detailed 8-sector monochrome GTA SA Weapon Wheel with native HUD weapon icons:
+  - Mouse movement (or `1–8`, `W`/`S`, `↑`/`↓`) — select weapon category;
+  - `Mouse Wheel` / `Q`/`E` / `←`/`→` — switch weapons within the hovered category;
+  - Release `TAB` — equip the highlighted weapon.
+- **Zero slow-motion** — 100% safe for **SA-COOP**!
+
+### 4. Per-Save & SA-COOP Persistence
+- All owned weapons, attachments, and active per-category selections are stored in `Documents\GTA San Andreas User Files\GTA5WeaponSaves\` (isolated per-player under SA-COOP).
+- **New Game** in singleplayer always starts with a clean arsenal.
+
+---
+
+## Configuration (`GTA5AmmuNation.ini`)
+Configure language (`rus`/`eng`), 3D attachment rendering (`Enable3DAttachments`), 3D laser sight (`EnableLaserSight`), scope zoom (`EnableScopeZoom`), custom weapon audio (`EnableWeaponAudio`, `AudioVolume`), Weapon Wheel (`EnableWeaponWheel`, `WheelKey`), and all prices in [`config/GTA5AmmuNation.ini`](config/GTA5AmmuNation.ini).
+
+## Building from Source
+Requires 32-bit MinGW-w64 (`C:\msys64\mingw32\bin\g++.exe`, C++20) and sibling `../ModDev_Common`:
 ```powershell
-.\build.ps1            # Собрать и установить в ..\modloader\GTA5AmmuNation
-.\build.ps1 -NoDeploy  # Только собрать в .\build\GTA5AmmuNation.asi
+.\build.ps1            # Build and auto-deploy to <GameDir>\modloader\GTA5AmmuNation
+.\build.ps1 -NoDeploy  # Build only to .\build\GTA5AmmuNation.asi
 ```
