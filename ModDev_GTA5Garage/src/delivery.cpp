@@ -195,6 +195,9 @@ bool StartMechanicDelivery(int slotIdx) {
     sa::CVehicle* playerCurVeh = sa::FindPlayerVehicle(0, false);
     bool deleteOld = (garage::GetActivePersonalVehicle() != playerCurVeh);
     garage::DismissCurrentPersonalVehicle(deleteOld);
+    // If this personal vehicle was previously stored in a safehouse garage (e.g. CJ's Grove St garage),
+    // clear its CStoredCar slot so delivering it via Mechanic frees the garage space & prevents duplicates!
+    garage::RemovePersonalSlotFromSafehouses(slotIdx, true);
 
     // Stream vehicle & mechanic ped models safely
     sa::ScriptCmd(0x0247).Int(slot.modelId).Run();    // REQUEST_MODEL

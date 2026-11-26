@@ -41,6 +41,12 @@ void SetActivePersonalVehicle(sa::CVehicle* veh, int slotIdx, int32_t blipHandle
 void ClearDeliveryBlip();
 void DismissCurrentPersonalVehicle(bool deleteEntity);
 
+// Install native safehouse garage hooks (fixes GTA SA x87 NaN ghost-car trap in IsPointInsideGarage)
+void InstallSafehouseHooks();
+
+// Remove a personal vehicle's stale safehouse tracking & CStoredCar slot (e.g. on Mechanic delivery, exit, destroy, or unregister)
+void RemovePersonalSlotFromSafehouses(int slotIdx, bool alsoClearStoredCar = true);
+
 // Per-frame tick: monitors destruction, player entry (clears blip), and live sync
 void Tick();
 

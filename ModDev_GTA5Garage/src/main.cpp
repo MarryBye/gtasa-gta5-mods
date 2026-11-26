@@ -198,6 +198,7 @@ void InstallAllHooks() {
         mem::HookCall(0x0053C70B, reinterpret_cast<uintptr_t>(&HookedGenericLoad)));
 
     workshop::InstallHooks();
+    garage::InstallSafehouseHooks();
     RegisterWithBus();
 
     modlog::Info("[Init] GTA5GarageAndTuning v2.0 hooks & Bus registered (Tuning + Wear + Dealership + Mechanic)!");

@@ -1,8 +1,10 @@
 #include "garage.hpp"
+#include <cmath>
 #include <cstring>
 #include "config.hpp"
 #include "delivery.hpp"
 #include "log.hpp"
+#include "memory.hpp"
 #include "storage.hpp"
 #include "tuning_physics.hpp"
 #include "ui_menu.hpp"
@@ -22,6 +24,57 @@ int           g_activeSlot       = -1;
 int32_t       g_deliveryBlip     = 0;
 uint32_t      g_lastSafehouseScanMs = 0;
 bool          g_safehouseDirtySave  = false;
+bool          g_safehouseHooksInstalled = false;
+
+// Fix GTA SA's x87 FPU NaN bug in CGarage::IsPointInsideGarage (0x00448740):
+// Because 0x00448740 uses fcomp + test ah,0x05/0x41 without NaN checks, ANY vehicle with (NaN,NaN,NaN)
+// coordinates returns TRUE and gets permanently vacuumed into aCarsInSafeHouse, eating a garage slot forever!
+bool __fastcall HookedGarageIsPointInside(const void* garage, int /*edx*/, float x, float y, float z) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return false;
+    if (std::fabs(x) > 5000.0f || std::fabs(y) > 5000.0f || std::fabs(z) > 2000.0f) return false;
+    using Fn = bool(__thiscall*)(const void*, float, float, float);
+    return reinterpret_cast<Fn>(0x00448740)(garage, x, y, z);
+}
+
+// Purge corrupted NaN / out-of-world ghost cars from all 20 safehouse garages (heals existing saves too!)
+// and remove any orphaned driverless NaN vehicles from CVehiclePool so they can never block garage capacity.
+void SanitizeSafehouseStoredCars() {
+    for (int h = 0; h < sa::MAX_SAFEHOUSE_HIDEOUTS; ++h) {
+        sa::CStoredCar* arr = sa::GetSafehouseStoredCars(h);
+        if (!arr) continue;
+        for (int s = 0; s < sa::MAX_CARS_PER_SAFEHOUSE; ++s) {
+            auto& sc = arr[s];
+            if (sc.m_nModelIndex == 0) continue;
+            bool badPos = (!std::isfinite(sc.x) || !std::isfinite(sc.y) || !std::isfinite(sc.z) ||
+                           std::fabs(sc.x) > 5000.0f || std::fabs(sc.y) > 5000.0f || std::fabs(sc.z) > 2000.0f);
+            bool badModel = (sc.m_nModelIndex < 400 || sc.m_nModelIndex > 611);
+            if (badPos || badModel) {
+                uint16_t oldMid = sc.m_nModelIndex;
+                sc.m_nModelIndex = 0;
+                modlog::Info("[Garage] Purged corrupted NaN/OOB ghost car (model=%u) from safehouse hideout #%d slot #%d.",
+                             static_cast<unsigned>(oldMid), h, s);
+            }
+        }
+    }
+
+    auto* pool = sa::GetVehiclePool();
+    if (!pool || !pool->objects || !pool->byteMap || pool->size <= 0 || pool->size > 2000) return;
+    sa::CVehicle* playerVeh = sa::FindPlayerVehicle(0, false);
+    for (int i = 0; i < pool->size; ++i) {
+        if ((pool->byteMap[i] & 0x80) != 0) continue;
+        auto* v = reinterpret_cast<sa::CVehicle*>(pool->objects + static_cast<size_t>(i) * sa::VEHICLE_POOL_STRIDE);
+        if (!sa::IsVehicleValid(v) || v == playerVeh || v->GetDriver() != nullptr) continue;
+        sa::CVector p = v->GetPosition();
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+            int32_t handle = sa::GetVehicleHandle(v);
+            if (handle > 0) {
+                modlog::Info("[Garage] Deleting orphaned live NaN ghost vehicle (model=%d, handle=%d).",
+                             v->GetModelIndex(), handle);
+                sa::ScriptCmd(0x00A6).Int(handle).Run(); // DELETE_CAR
+            }
+        }
+    }
+}
 
 mod::VisualAppearance CaptureVisuals(sa::CVehicle* veh) {
     mod::VisualAppearance vis{};
@@ -189,17 +242,44 @@ void TickSafehousePersistence() {
     uint32_t nowMs = sa::GetTimeMs();
     sa::CPed* localPed = sa::FindPlayerPed(0);
     sa::CVehicle* playerVeh = sa::FindPlayerVehicle(0, false);
+    const bool delivering = delivery::IsDeliveryInProgress();
+
+    // Fast per-frame (zero-delay!) release of our active personal vehicle the instant CJ exits it inside
+    // a safehouse garage so StoreAndRemoveCarsForThisHideout ALWAYS accepts, stores, and repairs it!
+    if (g_activeVeh && g_activeSlot >= 0 && !delivering &&
+        sa::IsVehicleValid(g_activeVeh) && sa::GetVehicleHandle(g_activeVeh) == g_activeVehHandle &&
+        g_activeVeh->GetDriver() == nullptr && g_activeVeh->CreatedBy() == 2) {
+        int activeGarage = sa::FindHideoutGarageIndexAt(g_activeVeh->GetPosition());
+        if (activeGarage >= 0) {
+            int32_t h = sa::GetVehicleHandle(g_activeVeh);
+            if (h > 0) {
+                sa::ScriptCmd(0x01C3).Int(h).Run(); // MARK_CAR_AS_NO_LONGER_NEEDED
+            }
+            g_activeVeh->CreatedBy() = 1; // RANDOM_VEHICLE -> stored & repaired cleanly when door closes!
+            mod::PerformanceTuning tun = tuning::GetLiveTuning(g_activeVeh)
+                ? *tuning::GetLiveTuning(g_activeVeh)
+                : g_slots[g_activeSlot].tuning;
+            mod::VehicleWear wear = tuning::GetLiveWear(g_activeVeh);
+            UpsertSafehouseRecord(activeGarage, g_activeVeh, g_activeSlot, tun, wear);
+            SnapshotVehicleToSlot(g_activeVeh, g_activeSlot);
+            g_safehouseDirtySave = true;
+            modlog::Info("[Garage] Released personal vehicle (slot=%d, model=%d) to safehouse garage #%d for vanilla storage & repair.",
+                         g_activeSlot, g_activeVeh->GetModelIndex(), activeGarage);
+        }
+    }
+
     bool urgentPlayerCheck = (playerVeh != nullptr && tuning::GetLiveTuning(playerVeh) == nullptr);
-    // Keep scan interval tight (180ms) so parked personal vehicles are released to RANDOM_VEHICLE
-    // BEFORE the safehouse garage door finishes closing!
+    // Keep scan interval tight (180ms) so parked/restored vehicles sync promptly!
     if (!urgentPlayerCheck && (nowMs - g_lastSafehouseScanMs < 180)) return;
     g_lastSafehouseScanMs = nowMs;
+
+    // Continuously guard against NaN/OOB ghost vehicles corrupting safehouse garage slots
+    SanitizeSafehouseStoredCars();
 
     auto* pool = sa::GetVehiclePool();
     if (!pool || !pool->objects || !pool->byteMap || pool->size <= 0 || pool->size > 2000) return;
 
     const bool coopActive = sa::IsCoopModLoaded();
-    const bool delivering = delivery::IsDeliveryInProgress();
 
     for (int i = 0; i < pool->size; ++i) {
         if ((pool->byteMap[i] & 0x80) != 0) continue;
@@ -319,6 +399,56 @@ void OnGameSave(int slot1to8) {
     SaveNow();
 }
 
+void InstallSafehouseHooks() {
+    if (g_safehouseHooksInstalled) return;
+    // Guard all 3 hideout garage vehicle-inside checks against GTA SA's x87 NaN comparison bug:
+    //   0x0044998C (StoreAndRemoveCarsForThisHideout #1)
+    //   0x00449ADC (StoreAndRemoveCarsForThisHideout #2)
+    //   0x0156146F (CountCarsWithCenterPointWithinGarage)
+    mem::HookCall(0x0044998C, reinterpret_cast<uintptr_t>(&HookedGarageIsPointInside));
+    mem::HookCall(0x00449ADC, reinterpret_cast<uintptr_t>(&HookedGarageIsPointInside));
+    mem::HookCall(0x0156146F, reinterpret_cast<uintptr_t>(&HookedGarageIsPointInside));
+    g_safehouseHooksInstalled = true;
+    modlog::Info("[Garage] Installed safehouse NaN-ghost guard hooks (0x0044998C, 0x00449ADC, 0x0156146F).");
+}
+
+void RemovePersonalSlotFromSafehouses(int slotIdx, bool alsoClearStoredCar) {
+    if (slotIdx < 0 || slotIdx >= mod::MAX_OWNED_VEHICLES) return;
+    const auto& sl = g_slots[slotIdx];
+    bool dirty = false;
+
+    for (int i = 0; i < mod::MAX_SAFEHOUSE_CARS; ++i) {
+        auto& r = g_safehouseCars[i];
+        if (!r.occupied || r.personalSlotIdx != slotIdx) continue;
+
+        if (alsoClearStoredCar) {
+            int hid = sa::GetHideoutIndexForGarageIndex(r.hideoutGarageId);
+            sa::CStoredCar* arr = sa::GetSafehouseStoredCars(hid);
+            if (arr) {
+                for (int s = 0; s < sa::MAX_CARS_PER_SAFEHOUSE; ++s) {
+                    auto& sc = arr[s];
+                    if (sc.m_nModelIndex == 0) continue;
+                    bool modelMatch = (static_cast<int32_t>(sc.m_nModelIndex) == r.modelId ||
+                                       (sl.occupied && static_cast<int32_t>(sc.m_nModelIndex) == sl.modelId));
+                    bool colorMatch = (sc.m_nPrimaryColor == r.visuals.primaryColor &&
+                                       sc.m_nSecondaryColor == r.visuals.secondaryColor);
+                    if (modelMatch && colorMatch) {
+                        sc.m_nModelIndex = 0;
+                        modlog::Info("[Garage] Cleared CStoredCar (model=%d) from hideout #%d slot #%d for personal slot %d.",
+                                     r.modelId, hid, s, slotIdx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        r = mod::SafehouseCarRecord{};
+        dirty = true;
+    }
+
+    if (dirty) g_safehouseDirtySave = true;
+}
+
 void OnGameLoad(int slot1to8) {
     ClearDeliveryBlip();
     g_activeVeh = nullptr;
@@ -329,6 +459,8 @@ void OnGameLoad(int slot1to8) {
     g_activeSaveSlot = (slot1to8 >= 1 && slot1to8 <= 8) ? slot1to8 : 0;
     storage::LoadGarageFromSlot(g_activeSaveSlot, g_slots, &g_safehouseCars);
     g_safehouseDirtySave = false;
+    // Immediately purge any NaN ghost cars loaded from an existing GTASAsfN.b save file!
+    SanitizeSafehouseStoredCars();
 }
 
 void OnNewGame() {
@@ -473,6 +605,7 @@ bool UnregisterSlot(int slotIdx) {
         g_activeSlot      = -1;
     }
 
+    RemovePersonalSlotFromSafehouses(slotIdx, true);
     g_slots[slotIdx] = mod::OwnedVehicle{};
     SaveNow();
     modlog::Info("[Garage] Unregistered slot %d", slotIdx);
@@ -637,6 +770,7 @@ void Tick() {
                 slot.wear.ApplyExplosionPenalty();
             }
             ClearDeliveryBlip();
+            RemovePersonalSlotFromSafehouses(g_activeSlot, true);
             SaveNow();
             ui::ShowHelp(
                 "~r~Ваш личный транспорт уничтожен!~w~ Вы можете восстановить его в меню ~y~F6~w~ (износ сильно вырос!).",
@@ -668,13 +802,16 @@ void Tick() {
     }
 
     // Outside safehouse garages, keep our active personal vehicle marked as MISSION_VEHICLE (2)
-    // so GTA SA never despawns it when parked outside shops/interiors!
-    // (When parked back inside a hideout garage and exited, TickSafehousePersistence releases it back to 1!)
+    // so GTA SA never despawns it when parked outside shops/interiors, and clear any stale safehouse record
+    // once the player drives the car out of the safehouse garage!
     if (!workshop::IsWorkshopActive() && !delivery::IsDeliveryInProgress() && sa::GetActiveInterior() == 0) {
         sa::CPed* drv = g_activeVeh->GetDriver();
-        if (drv == sa::FindPlayerPed(0) && g_activeVeh->CreatedBy() != 2 &&
+        if (drv == sa::FindPlayerPed(0) &&
             sa::FindHideoutGarageIndexAt(g_activeVeh->GetPosition()) < 0) {
-            g_activeVeh->CreatedBy() = 2;
+            if (g_activeVeh->CreatedBy() != 2) {
+                g_activeVeh->CreatedBy() = 2;
+            }
+            RemovePersonalSlotFromSafehouses(g_activeSlot, true);
         }
     }
 

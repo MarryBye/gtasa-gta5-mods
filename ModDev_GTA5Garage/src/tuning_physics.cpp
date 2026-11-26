@@ -185,17 +185,18 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
                         sa::tHandlingData& out) {
     std::memcpy(&out, &base, sizeof(sa::tHandlingData));
 
-    // 1. Engine (0..4): balanced, noticeably stronger acceleration + higher top speed + lower aero drag!
-    static constexpr float kEngAccel[5] = {1.00f, 1.18f, 1.38f, 1.60f, 1.85f};
-    static constexpr float kEngTop[5]   = {1.00f, 1.11f, 1.23f, 1.36f, 1.50f};
-    static constexpr float kEngDrag[5]  = {1.00f, 0.92f, 0.84f, 0.75f, 0.66f};
+    // 1. Engine (0..4): realistic percentage-based gains that preserve class hierarchy!
+    // Slow sedans become brisk & pleasant (+22% accel / +12% top), while real supercars become monsters.
+    static constexpr float kEngAccel[5] = {1.00f, 1.05f, 1.10f, 1.16f, 1.22f};
+    static constexpr float kEngTop[5]   = {1.00f, 1.02f, 1.05f, 1.08f, 1.12f};
+    static constexpr float kEngDrag[5]  = {1.00f, 0.98f, 0.95f, 0.92f, 0.89f};
     int eIdx = std::clamp<int>(c.engineLevel, 0, 4);
 
     // 2. Transmission (0..3): adds extra forward gears (up to GTA SA's 5-speed max, e.g. Hermes 4 -> 5!)
-    // + taller overdrive gear ratios (higher top-end breathing room) + snappier shift response!
-    static constexpr float kTransAccel[4]   = {1.00f, 1.08f, 1.18f, 1.30f};
-    static constexpr float kTransTop[4]     = {1.00f, 1.05f, 1.11f, 1.18f};
-    static constexpr float kTransInertia[4] = {1.00f, 0.80f, 0.60f, 0.42f};
+    // + modest percentage acceleration/top speed bump + snappier shift response!
+    static constexpr float kTransAccel[4]   = {1.00f, 1.03f, 1.07f, 1.11f};
+    static constexpr float kTransTop[4]     = {1.00f, 1.02f, 1.04f, 1.06f};
+    static constexpr float kTransInertia[4] = {1.00f, 0.88f, 0.76f, 0.64f};
     int tIdx = std::clamp<int>(c.transmissionLevel, 0, 3);
 
     int baseGears = std::clamp<int>(base.m_transmissionData.m_nNumberOfGears, 1, 5);
@@ -204,10 +205,10 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
     else if (tIdx == 2 && baseGears < 5) newGears = std::min(5, baseGears + 2);
     else if (tIdx >= 3 && baseGears >= 2) newGears = 5;
 
-    // Turbo: strong power boost + subtle top speed bump
-    float turboAccel = c.turbo ? 1.16f : 1.00f;
-    float turboTop   = c.turbo ? 1.08f : 1.00f;
-    float turboDrag  = c.turbo ? 0.92f : 1.00f;
+    // Turbo: clean percentage power boost (+9% accel, +4% top speed, -4% drag; maxed combo = ~1.48x accel / ~1.24x top!)
+    float turboAccel = c.turbo ? 1.09f : 1.00f;
+    float turboTop   = c.turbo ? 1.04f : 1.00f;
+    float turboDrag  = c.turbo ? 0.96f : 1.00f;
 
     float accelMult = kEngAccel[eIdx] * kTransAccel[tIdx] * turboAccel;
     float topMult   = kEngTop[eIdx] * kTransTop[tIdx] * turboTop;
@@ -248,14 +249,14 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
         out.m_fSuspensionAntiDiveMultiplier *= kAntiDive[sIdx];
     }
 
-    // 4. Brakes (0..3)
-    static constexpr float kBrakes[4] = {1.00f, 1.26f, 1.54f, 1.85f};
+    // 4. Brakes (0..3): proportional stopping power upgrade (+12% / +25% / +40%)
+    static constexpr float kBrakes[4] = {1.00f, 1.12f, 1.25f, 1.40f};
     int bIdx = std::clamp<int>(c.brakesLevel, 0, 3);
     out.m_fBrakeDeceleration *= kBrakes[bIdx];
 
-    // 5. Tires Grip (0..3)
-    static constexpr float kTraction[4] = {1.00f, 1.10f, 1.20f, 1.32f};
-    static constexpr float kTracLoss[4] = {1.00f, 1.08f, 1.16f, 1.24f};
+    // 5. Tires Grip (0..3): realistic grip scaling (+6% / +12% / +18%)
+    static constexpr float kTraction[4] = {1.00f, 1.06f, 1.12f, 1.18f};
+    static constexpr float kTracLoss[4] = {1.00f, 1.05f, 1.10f, 1.15f};
     int gIdx = std::clamp<int>(c.tiresGripLevel, 0, 3);
     out.m_fTractionMultiplier *= kTraction[gIdx];
     out.m_fTractionLoss       *= kTracLoss[gIdx];
@@ -351,8 +352,9 @@ VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, bool isFour
     }
     float safeDrag = std::clamp(std::isfinite(sim.m_fDragMult) ? sim.m_fDragMult : 2.0f, 0.5f, 8.0f);
     float dragFactor = 1.0f / (1.0f + std::max(0.0f, safeDrag - 0.85f) * 0.085f);
+    float wE = std::clamp(wear.engine, 0.0f, 100.0f) * 0.01f;
     float kmh = rawMax * 180.0f * dragFactor;
-    if (cfg.turbo) kmh += 9.0f * (1.0f - 0.40f * std::clamp(wear.engine, 0.0f, 100.0f) * 0.01f);
+    if (cfg.turbo) kmh *= (1.0f + 0.025f * (1.0f - 0.40f * wE));
     st.topSpeedKmh = std::clamp(static_cast<int>(std::round(kmh)), 25, 380);
     st.topSpeedMph = std::clamp(static_cast<int>(std::round(kmh * 0.621371f)), 16, 240);
 
@@ -361,7 +363,7 @@ VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, bool isFour
         ? (base.m_transmissionData.m_fEngineInertia / std::max(1.0f, sim.m_transmissionData.m_fEngineInertia))
         : 1.0f;
     float accelScore = rawAccel * 185.0f * (0.75f + 0.25f * inertiaBonus);
-    if (cfg.turbo) accelScore += 9.0f * (1.0f - 0.45f * std::clamp(wear.engine, 0.0f, 100.0f) * 0.01f);
+    if (cfg.turbo) accelScore *= (1.0f + 0.045f * (1.0f - 0.45f * wE));
     st.accelRating = std::clamp(static_cast<int>(std::round(accelScore)), 6, 150);
 
     float brakeScore = sim.m_fBrakeDeceleration * 11500.0f;
@@ -552,7 +554,7 @@ void EnsureStreetVehicleWear(sa::CVehicle* veh) {
     // Don't artificially slow down scripted mission-spawned vehicles during active story missions
     if (sa::IsOnMission() && veh->CreatedBy() == 2) return;
 
-    // Deterministic per-vehicle wear roll strictly averaging 25%..75% across all 6 subsystems
+    // Deterministic per-vehicle wear roll strictly averaging 35%..85% across all 6 subsystems
     uint32_t seed = static_cast<uint32_t>(sa::GetVehicleHandle(veh)) * 2654435761u ^
                     static_cast<uint32_t>(veh->GetModelIndex()) * 2246822519u ^
                     (sa::GetTimeMs() / 4000u) * 3266489917u;
@@ -561,22 +563,22 @@ void EnsureStreetVehicleWear(sa::CVehicle* veh) {
         return static_cast<float>((seed >> 8) & 0xFFFF) / 65535.0f;
     };
 
-    float targetAvg = 25.0f + nextF() * 50.0f; // 25%..75% average mechanical wear!
+    float targetAvg = 35.0f + nextF() * 50.0f; // 35%..85% average mechanical wear!
     float raw[6];
     float sum = 0.0f;
     for (int i = 0; i < 6; ++i) {
-        raw[i] = std::clamp(targetAvg + (nextF() - 0.5f) * 30.0f, 12.0f, 92.0f);
+        raw[i] = std::clamp(targetAvg + (nextF() - 0.5f) * 28.0f, 18.0f, 96.0f);
         sum += raw[i];
     }
     float shift = targetAvg - (sum / 6.0f);
 
     mod::VehicleWear w{};
-    w.engine       = std::clamp(raw[0] + shift, 10.0f, 95.0f);
-    w.transmission = std::clamp(raw[1] + shift, 10.0f, 95.0f);
-    w.brakes       = std::clamp(raw[2] + shift, 10.0f, 95.0f);
-    w.tires        = std::clamp(raw[3] + shift, 10.0f, 95.0f);
-    w.suspension   = std::clamp(raw[4] + shift, 10.0f, 95.0f);
-    w.chassis      = std::clamp(raw[5] + shift, 10.0f, 95.0f);
+    w.engine       = std::clamp(raw[0] + shift, 15.0f, 97.0f);
+    w.transmission = std::clamp(raw[1] + shift, 15.0f, 97.0f);
+    w.brakes       = std::clamp(raw[2] + shift, 15.0f, 97.0f);
+    w.tires        = std::clamp(raw[3] + shift, 15.0f, 97.0f);
+    w.suspension   = std::clamp(raw[4] + shift, 15.0f, 97.0f);
+    w.chassis      = std::clamp(raw[5] + shift, 15.0f, 97.0f);
     w.ClampAll();
 
     ApplyTuning(veh, mod::PerformanceTuning{}, &w);
@@ -594,7 +596,7 @@ void TickAll() {
     sa::CPed* playerPed = sa::FindPlayerPed(0);
     bool playerDriving = (playerVeh != nullptr && playerPed != nullptr && playerVeh->GetDriver() == playerPed);
 
-    // Street-picked vehicles start with 25%-75% mechanical wear so Dealership 0%-wear purchases stay valuable!
+    // Street-picked vehicles start with 35%-85% mechanical wear so Dealership 0%-wear purchases stay valuable!
     if (playerDriving && playerVeh->IsLandVehicle()) {
         EnsureStreetVehicleWear(playerVeh);
     }
@@ -726,15 +728,22 @@ void TickAll() {
                 }
             }
 
-            // Transmission crisp upshift punch (grounded only!)
+            // Scale live transmission & turbo feel proportionally to the vehicle's own base acceleration
+            // so slow city cars stay realistic while high-power sports/supercars accelerate fiercely!
+            const float baseAccNorm = std::clamp(tv.baseHandling.m_transmissionData.m_fEngineAcceleration * 500.0f, 0.35f, 1.80f);
+            const float engWearFactor = mod::Config().enableWearSystem
+                ? std::max(0.45f, 1.0f - 0.50f * (tv.wear.engine * 0.01f))
+                : 1.0f;
+
+            // Transmission crisp upshift punch (grounded only, proportional to car power!)
             if (!inAir && c.transmissionLevel > 0 && gear > tv.prevGear && gas > 0.3f && speed > 0.10f) {
                 sa::CVector fwd = v->GetForward();
-                float kick = 0.013f * static_cast<float>(c.transmissionLevel);
+                float kick = 0.0045f * static_cast<float>(c.transmissionLevel) * baseAccNorm * engWearFactor;
                 v->MoveSpeed().x += fwd.x * kick;
                 v->MoveSpeed().y += fwd.y * kick;
             }
 
-            // Turbocharger boost thrust + soft subtle spool & gentle BOV on gear shifts / throttle lift
+            // Turbocharger boost thrust (proportional to car power!) + spool & BOV on gear shifts / throttle lift
             if (c.turbo) {
                 bool onGas = (!inAir && v->GasPedal() > 0.22f && v->IsEngineOn());
                 if (onGas && speed > 0.03f) {
@@ -743,9 +752,9 @@ void TickAll() {
 
                     if (tv.turboBoost > 0.30f) {
                         sa::CVector fwd = v->GetForward();
-                        float maxCap = tv.customHandling.m_transmissionData.m_fMaxGearVelocity * 1.06f;
+                        float maxCap = tv.customHandling.m_transmissionData.m_fMaxGearVelocity * 1.02f;
                         if (speed < maxCap) {
-                            float thrust = (tv.turboBoost - 0.30f) * 0.19f * dt;
+                            float thrust = (tv.turboBoost - 0.30f) * 0.075f * baseAccNorm * engWearFactor * dt;
                             v->MoveSpeed().x += fwd.x * thrust;
                             v->MoveSpeed().y += fwd.y * thrust;
                         }

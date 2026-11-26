@@ -42,22 +42,22 @@ struct ModConfig {
     bool    enableTurboAudio  = true;
     bool    enableEngineTone  = true;
 
-    // Prices
-    int     priceRegister     = 2000;
-    int     priceRepair       = 400;
-    int     pricePaint        = 300;
-    int     priceEngine[4]    = {3000, 6500, 11000, 17500};
-    int     priceTrans[3]     = {2500, 5500, 10000};
-    int     priceBrakes[3]    = {2000, 4500, 8000};
-    int     priceTiresGrip[3] = {1800, 4000, 7200};
-    int     priceSusp[4]      = {1500, 3000, 5500, 8500};
-    int     priceBulletproof  = 7500;
-    int     priceTurbo        = 12500;
-    int     priceArmor[5]     = {2500, 5000, 8500, 13000, 20000};
-    int     priceXenon        = 2000;
-    int     priceNeon         = 4500;
-    int     pricePlate        = 1000;
-    int     priceHorn         = 1200;
+    // Prices (rebalanced ~3.5x-4x so upgrades genuinely impact progression!)
+    int     priceRegister     = 7000;
+    int     priceRepair       = 1200;
+    int     pricePaint        = 1200;
+    int     priceEngine[4]    = {11000, 24000, 42000, 68000};
+    int     priceTrans[3]     = {9000, 20000, 38000};
+    int     priceBrakes[3]    = {7500, 16500, 30000};
+    int     priceTiresGrip[3] = {6500, 15000, 27000};
+    int     priceSusp[4]      = {5500, 11000, 20000, 32000};
+    int     priceBulletproof  = 28000;
+    int     priceTurbo        = 48000;
+    int     priceArmor[5]     = {9000, 18000, 32000, 48000, 75000};
+    int     priceXenon        = 7000;
+    int     priceNeon         = 16000;
+    int     pricePlate        = 3500;
+    int     priceHorn         = 4500;
 
     std::string gameDir;
     std::string modDir;
@@ -133,37 +133,37 @@ inline void LoadConfig(HMODULE selfModule) {
     c.enableTurboAudio = GetPrivateProfileIntA("Effects", "EnableTurboAudio", 1, p) != 0;
     c.enableEngineTone = GetPrivateProfileIntA("Effects", "EnableEngineTone", 1, p) != 0;
 
-    c.priceRegister    = GetPrivateProfileIntA("Prices", "RegisterVehicle", 2000, p);
-    c.priceRepair      = GetPrivateProfileIntA("Prices", "Repair", 400, p);
-    c.pricePaint       = GetPrivateProfileIntA("Prices", "Paint", 300, p);
-    c.priceEngine[0]   = GetPrivateProfileIntA("Prices", "Engine1", 3000, p);
-    c.priceEngine[1]   = GetPrivateProfileIntA("Prices", "Engine2", 6500, p);
-    c.priceEngine[2]   = GetPrivateProfileIntA("Prices", "Engine3", 11000, p);
-    c.priceEngine[3]   = GetPrivateProfileIntA("Prices", "Engine4", 17500, p);
-    c.priceTrans[0]    = GetPrivateProfileIntA("Prices", "Transmission1", 2500, p);
-    c.priceTrans[1]    = GetPrivateProfileIntA("Prices", "Transmission2", 5500, p);
-    c.priceTrans[2]    = GetPrivateProfileIntA("Prices", "Transmission3", 10000, p);
-    c.priceBrakes[0]   = GetPrivateProfileIntA("Prices", "Brakes1", 2000, p);
-    c.priceBrakes[1]   = GetPrivateProfileIntA("Prices", "Brakes2", 4500, p);
-    c.priceBrakes[2]   = GetPrivateProfileIntA("Prices", "Brakes3", 8000, p);
-    c.priceTiresGrip[0]= GetPrivateProfileIntA("Prices", "TiresGrip1", 1800, p);
-    c.priceTiresGrip[1]= GetPrivateProfileIntA("Prices", "TiresGrip2", 4000, p);
-    c.priceTiresGrip[2]= GetPrivateProfileIntA("Prices", "TiresGrip3", 7200, p);
-    c.priceSusp[0]     = GetPrivateProfileIntA("Prices", "Suspension1", 1500, p);
-    c.priceSusp[1]     = GetPrivateProfileIntA("Prices", "Suspension2", 3000, p);
-    c.priceSusp[2]     = GetPrivateProfileIntA("Prices", "Suspension3", 5500, p);
-    c.priceSusp[3]     = GetPrivateProfileIntA("Prices", "Suspension4", 8500, p);
-    c.priceBulletproof = GetPrivateProfileIntA("Prices", "BulletproofTires", 7500, p);
-    c.priceTurbo       = GetPrivateProfileIntA("Prices", "Turbo", 12500, p);
-    c.priceArmor[0]    = GetPrivateProfileIntA("Prices", "Armor1", 2500, p);
-    c.priceArmor[1]    = GetPrivateProfileIntA("Prices", "Armor2", 5000, p);
-    c.priceArmor[2]    = GetPrivateProfileIntA("Prices", "Armor3", 8500, p);
-    c.priceArmor[3]    = GetPrivateProfileIntA("Prices", "Armor4", 13000, p);
-    c.priceArmor[4]    = GetPrivateProfileIntA("Prices", "Armor5", 20000, p);
-    c.priceXenon       = GetPrivateProfileIntA("Prices", "XenonLights", 2000, p);
-    c.priceNeon        = GetPrivateProfileIntA("Prices", "NeonKit", 4500, p);
-    c.pricePlate       = GetPrivateProfileIntA("Prices", "CustomPlate", 1000, p);
-    c.priceHorn        = GetPrivateProfileIntA("Prices", "Horn", 1200, p);
+    c.priceRegister    = GetPrivateProfileIntA("Prices", "RegisterVehicle", 7000, p);
+    c.priceRepair      = GetPrivateProfileIntA("Prices", "Repair", 1200, p);
+    c.pricePaint       = GetPrivateProfileIntA("Prices", "Paint", 1200, p);
+    c.priceEngine[0]   = GetPrivateProfileIntA("Prices", "Engine1", 11000, p);
+    c.priceEngine[1]   = GetPrivateProfileIntA("Prices", "Engine2", 24000, p);
+    c.priceEngine[2]   = GetPrivateProfileIntA("Prices", "Engine3", 42000, p);
+    c.priceEngine[3]   = GetPrivateProfileIntA("Prices", "Engine4", 68000, p);
+    c.priceTrans[0]    = GetPrivateProfileIntA("Prices", "Transmission1", 9000, p);
+    c.priceTrans[1]    = GetPrivateProfileIntA("Prices", "Transmission2", 20000, p);
+    c.priceTrans[2]    = GetPrivateProfileIntA("Prices", "Transmission3", 38000, p);
+    c.priceBrakes[0]   = GetPrivateProfileIntA("Prices", "Brakes1", 7500, p);
+    c.priceBrakes[1]   = GetPrivateProfileIntA("Prices", "Brakes2", 16500, p);
+    c.priceBrakes[2]   = GetPrivateProfileIntA("Prices", "Brakes3", 30000, p);
+    c.priceTiresGrip[0]= GetPrivateProfileIntA("Prices", "TiresGrip1", 6500, p);
+    c.priceTiresGrip[1]= GetPrivateProfileIntA("Prices", "TiresGrip2", 15000, p);
+    c.priceTiresGrip[2]= GetPrivateProfileIntA("Prices", "TiresGrip3", 27000, p);
+    c.priceSusp[0]     = GetPrivateProfileIntA("Prices", "Suspension1", 5500, p);
+    c.priceSusp[1]     = GetPrivateProfileIntA("Prices", "Suspension2", 11000, p);
+    c.priceSusp[2]     = GetPrivateProfileIntA("Prices", "Suspension3", 20000, p);
+    c.priceSusp[3]     = GetPrivateProfileIntA("Prices", "Suspension4", 32000, p);
+    c.priceBulletproof = GetPrivateProfileIntA("Prices", "BulletproofTires", 28000, p);
+    c.priceTurbo       = GetPrivateProfileIntA("Prices", "Turbo", 48000, p);
+    c.priceArmor[0]    = GetPrivateProfileIntA("Prices", "Armor1", 9000, p);
+    c.priceArmor[1]    = GetPrivateProfileIntA("Prices", "Armor2", 18000, p);
+    c.priceArmor[2]    = GetPrivateProfileIntA("Prices", "Armor3", 32000, p);
+    c.priceArmor[3]    = GetPrivateProfileIntA("Prices", "Armor4", 48000, p);
+    c.priceArmor[4]    = GetPrivateProfileIntA("Prices", "Armor5", 75000, p);
+    c.priceXenon       = GetPrivateProfileIntA("Prices", "XenonLights", 7000, p);
+    c.priceNeon        = GetPrivateProfileIntA("Prices", "NeonKit", 16000, p);
+    c.pricePlate       = GetPrivateProfileIntA("Prices", "CustomPlate", 3500, p);
+    c.priceHorn        = GetPrivateProfileIntA("Prices", "Horn", 4500, p);
 }
 
 inline int ComputeRestoreCost(int32_t playerMoney) {

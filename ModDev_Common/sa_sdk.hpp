@@ -1433,15 +1433,67 @@ inline uint8_t GetPlayerState(int32_t playerId = 0) {
 }
 
 // Verified against gta_sa.exe 1.0 US:
+//   CGarages::aCarsInSafeHouse @ 0x0096ABD8 (20 hideouts x 4 CStoredCar slots, sizeof(CStoredCar) == 0x40)
+//   CStoredCar::StoreCar @ 0x00449760, CGarages::Load @ 0x005D3270
 //   CGarages::NumGarages @ 0x0096C024, CGarages::aGarages @ 0x0096C048 (stride 0xD8, m_nType @ +0x4C)
 //   CGarages::GetSafeHouseIndexForType @ 0x004489F0
 //   CGarage::IsPointInsideGarage(CVector) @ 0x00448740
+#pragma pack(push, 1)
+struct CStoredCar {
+    float    x;                  // +0x00
+    float    y;                  // +0x04
+    float    z;                  // +0x08
+    uint32_t m_nHandlingFlags;   // +0x0C
+    uint16_t m_nFlags;           // +0x10
+    uint16_t m_nModelIndex;      // +0x12 (0 = empty slot)
+    int16_t  m_anUpgrades[15];   // +0x14
+    uint8_t  m_nPrimaryColor;    // +0x32
+    uint8_t  m_nSecondaryColor;  // +0x33
+    uint8_t  m_nTertiaryColor;   // +0x34
+    uint8_t  m_nQuaternaryColor; // +0x35
+    uint8_t  m_nRadioStation;    // +0x36
+    uint8_t  m_nVariationA;      // +0x37
+    uint8_t  m_nVariationB;      // +0x38
+    uint8_t  m_nBombType;        // +0x39
+    uint8_t  m_nPaintjob;        // +0x3A
+    uint8_t  m_nNitroCount;      // +0x3B
+    int8_t   m_nAngleX;          // +0x3C
+    int8_t   m_nAngleY;          // +0x3D
+    int8_t   m_nAngleZ;          // +0x3E
+    uint8_t  _pad3F;             // +0x3F
+};
+static_assert(sizeof(CStoredCar) == 0x40, "CStoredCar must be 64 bytes");
+#pragma pack(pop)
+
+constexpr int MAX_SAFEHOUSE_HIDEOUTS = 20;
+constexpr int MAX_CARS_PER_SAFEHOUSE = 4;
+
+inline CStoredCar* GetSafehouseStoredCars(int hideoutIndex) {
+    if (hideoutIndex < 0 || hideoutIndex >= MAX_SAFEHOUSE_HIDEOUTS) return nullptr;
+    return reinterpret_cast<CStoredCar*>(0x0096ABD8 + static_cast<uintptr_t>(hideoutIndex) * 0x100);
+}
+
 inline bool IsHideoutGarageType(uint8_t garageType) {
     if (garageType == 16) return true; // GARAGE_HIDEOUT_ONE (index 0)
     return reinterpret_cast<int32_t(__cdecl*)(int32_t)>(0x004489F0)(static_cast<int32_t>(garageType)) > 0;
 }
 
+inline int GetHideoutIndexForGarageIndex(int garageIdx) {
+    int32_t count = *reinterpret_cast<const int32_t*>(0x0096C024);
+    if (count > 50) count = 50;
+    if (garageIdx < 0 || garageIdx >= count) return -1;
+    const uint8_t* g = reinterpret_cast<const uint8_t*>(0x0096C048) + static_cast<size_t>(garageIdx) * 0xD8;
+    uint8_t gType = g[0x4C];
+    if (!IsHideoutGarageType(gType)) return -1;
+    int32_t hid = reinterpret_cast<int32_t(__cdecl*)(int32_t)>(0x004489F0)(static_cast<int32_t>(gType));
+    if (hid < 0 || hid >= MAX_SAFEHOUSE_HIDEOUTS) return -1;
+    return static_cast<int>(hid);
+}
+
 inline int FindHideoutGarageIndexAt(const CVector& pos) {
+    // Guard against x87 NaN comparison bug in CGarage::IsPointInsideGarage (0x00448740)!
+    if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z)) return -1;
+    if (std::fabs(pos.x) > 5000.0f || std::fabs(pos.y) > 5000.0f || std::fabs(pos.z) > 2000.0f) return -1;
     int32_t count = *reinterpret_cast<const int32_t*>(0x0096C024);
     if (count <= 0) return -1;
     if (count > 50) count = 50;
