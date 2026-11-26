@@ -435,8 +435,11 @@ void CloseDealership(bool returnToPhone) {
 
     if (goPhone) {
         if (auto* b = modbus::GetBus(); b && b->phoneInstalled && b->phoneReturnToMain) {
+            ui::LockMenuInputBriefly(180);
             b->phoneReturnToMain();
         }
+    } else {
+        ui::TriggerPostCloseShield(160);
     }
 }
 
@@ -453,6 +456,7 @@ void OpenShowroomAt(int siteIdx) {
     g_camAngle        = 0.75f;
     g_camDist         = 5.8f;
 
+    ui::LockMenuInputBriefly(200);
     sa::ScriptCmd(0x01B4).Int(0).Int(0).Run(); // Freeze player during showroom browse
     sa::PlayFrontendSound(sa::SFX_SELECT);
 }
@@ -612,15 +616,13 @@ void UpdateShowroomCamera() {
 }
 
 void HandleMenuInput() {
-    const auto& k = ui::Keys();
-    const bool up     = k.Repeated(VK_UP) || k.Repeated('W');
-    const bool down   = k.Repeated(VK_DOWN) || k.Repeated('S');
-    const bool left   = k.JustPressed(VK_LEFT) || k.JustPressed('A');
-    const bool right  = k.JustPressed(VK_RIGHT) || k.JustPressed('D');
-    const bool accept = k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE);
-    const bool back   = k.JustPressed(VK_BACK) || k.JustPressed(VK_ESCAPE) || k.JustPressed('F');
-
-    sa::ClearPadMenuInputs();
+    auto in = ui::PollMenuInput(!g_remoteMode, true, true);
+    const bool up     = in.up;
+    const bool down   = in.down;
+    const bool left   = in.left;
+    const bool right  = in.right;
+    const bool accept = in.accept;
+    const bool back   = in.back;
 
     if (g_screen == Screen::Categories) {
         const int n = static_cast<int>(VehClass::Count);
@@ -694,6 +696,19 @@ void HandleMenuInput() {
 
 } // namespace
 
+void PreScriptsTick() {
+    if (!mod::Config().enableDealership || sa::GetGameState() != 9) return;
+    if (sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) {
+        if (g_screen != Screen::Closed) CloseDealership(false);
+        return;
+    }
+    if (g_screen != Screen::Closed) {
+        HandleMenuInput();
+    } else {
+        ui::SyncIdleMouseEdges();
+    }
+}
+
 void Tick() {
     if (!mod::Config().enableDealership || sa::GetGameState() != 9) return;
     if (sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) {
@@ -718,7 +733,6 @@ void Tick() {
             }
         }
         UpdateShowroomCamera();
-        HandleMenuInput();
         return;
     }
 
@@ -801,7 +815,7 @@ void Render2D() {
         char gbuf[32];
         std::snprintf(gbuf, sizeof(gbuf), "%s %d/%d", ui::Loc("Гараж", "Garage").c_str(), occupied, maxVeh);
         spec.colRightGame  = gbuf;
-        spec.footerGame    = ui::Loc("Enter - Открыть | Backspace - Выход", "Enter - Open | Backspace - Exit");
+        spec.footerGame    = ui::StandardFooter("Открыть", "Open", "Выход", "Exit");
         spec.selectedIndex = g_catCursor;
 
         for (int i = 0; i < static_cast<int>(VehClass::Count); ++i) {
@@ -822,8 +836,8 @@ void Render2D() {
         spec.colLeftGame   = ui::Loc("МОДЕЛЬ", "MODEL");
         spec.colRightGame  = ui::Loc(pc.rus, pc.eng);
         spec.footerGame    = g_remoteMode
-            ? ui::Loc("Enter - Купить | <-/-> Цвет | Backspace - Назад", "Enter - Buy | <-/-> Color | Backspace - Back")
-            : ui::Loc("Enter - Купить | <-/-> Цвет | Q/E Кам. | F - Назад", "Enter - Buy | <-/-> Color | Q/E Cam | F - Back");
+            ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет", "A/D Color")
+            : ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет | Q/E Кам.", "A/D Color | Q/E Cam");
         spec.selectedIndex = g_vehCursor;
 
         for (const auto* cv : g_catList) {
@@ -876,6 +890,7 @@ void OpenRemote(bool fromPhone) {
     g_catCursor       = 0;
     g_vehCursor       = 0;
     g_colorIdx        = 0;
+    ui::LockMenuInputBriefly(200);
     sa::PlayFrontendSound(sa::SFX_SELECT);
 }
 

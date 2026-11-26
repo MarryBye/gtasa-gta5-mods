@@ -42,6 +42,7 @@ void RegisterWithBus() {
         b->phoneReturnToMain = &BusReturnToPhone;
     }
     modbus::RegisterPanelClaim("CLOT", &BusIsClothesClaimed);
+    modbus::RegisterPanelClaim("HAIR", &BusIsClothesClaimed);
 }
 
 void __cdecl HookedMakeValidSaveName(int32_t slot0to7) {

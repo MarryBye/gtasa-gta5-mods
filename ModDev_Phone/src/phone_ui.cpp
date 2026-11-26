@@ -54,11 +54,6 @@ int         g_pendingCallAction  = 0;
 int         g_pendingCallArg     = 0;
 uint32_t    g_callFinishTickMs   = 0;
 
-// Mouse button edge tracking + brief post-close input shield so LMB/RMB close doesn't punch/aim!
-bool        g_prevLmb                = false;
-bool        g_prevRmb                = false;
-uint32_t    g_postCloseShieldUntilMs = 0;
-
 // Combat / Damage auto-put-away tracking
 float       g_trackHp                = 100.0f;
 float       g_trackArmor             = 0.0f;
@@ -221,9 +216,7 @@ void ClosePhone(bool immediateCombatInterrupt) {
     // Brief input shield after normal close prevents releasing LMB/RMB from punching/aiming;
     // skip shield during combat interrupt so CJ can fight back immediately!
     if (!immediateCombatInterrupt) {
-        g_postCloseShieldUntilMs = GetTickCount() + 160;
-    } else {
-        g_postCloseShieldUntilMs = 0;
+        ui::TriggerPostCloseShield(160);
     }
 }
 
@@ -235,6 +228,8 @@ void OpenPhoneToHome() {
     }
     g_screen = Screen::Home;
     g_cursor = 0;
+    ui::LockMenuInputBriefly(180);
+    ui::SyncIdleMouseEdges();
     StartPhoneAnimIfOnFoot();
     PlayKeySound();
 }
@@ -433,6 +428,7 @@ void FinishPendingCall() {
     int act   = g_pendingCallAction;
     int arg   = g_pendingCallArg;
     ClosePhone(false);
+    ui::LockMenuInputBriefly(200);
 
     switch (act) {
         case 1: // Mechanic
@@ -696,13 +692,14 @@ void HandleSelect() {
     if (g_screen == Screen::Home) {
         switch (item.actionId) {
             case 10: g_screen = Screen::Contacts;     g_cursor = 0; PlayKeySound(); break;
-            case 12: ClosePhone(false); if (bus && bus->garageOpenDealership) bus->garageOpenDealership(true); break;
-            case 13: ClosePhone(false); if (bus && bus->inventoryOpenMenu)    bus->inventoryOpenMenu(true, 0); break;
+            case 12: ClosePhone(false); ui::LockMenuInputBriefly(200); if (bus && bus->garageOpenDealership) bus->garageOpenDealership(true); break;
+            case 13: ClosePhone(false); ui::LockMenuInputBriefly(200); if (bus && bus->inventoryOpenMenu)    bus->inventoryOpenMenu(true, 0); break;
             case 14: g_screen = Screen::WardrobeMenu; g_cursor = 0; PlayKeySound(); break;
             case 15: TriggerCoopPlayerList(); break;
             case 17: g_screen = Screen::Settings;     g_cursor = 0; PlayKeySound(); break;
             case 98:
                 ClosePhone(false);
+                ui::LockMenuInputBriefly(200);
                 if (bus && item.arg >= 0 && item.arg < bus->phoneAddonCount && bus->phoneAddons[item.arg].onActivate) {
                     bus->phoneAddons[item.arg].onActivate(true);
                 }
@@ -854,30 +851,17 @@ std::string GetCooldownSavePath(int slot, bool forLoading = false) {
 void PreScriptsTick() {
     if (sa::GetGameState() != 9) return;
 
-    auto* ms      = sa::GetNewMouseState();
-    const bool lmbNow = ms && (ms->lmb != 0);
-    const bool rmbNow = ms && (ms->rmb != 0);
-    const bool lmbJust = lmbNow && !g_prevLmb;
-    const bool rmbJust = rmbNow && !g_prevRmb;
-    const bool wheelUp = ms && (ms->wheelUp != 0);
-    const bool wheelDn = ms && (ms->wheelDown != 0);
-    g_prevLmb = lmbNow;
-    g_prevRmb = rmbNow;
-
-    if (sa::IsPauseMenuActive() || sa::IsCutsceneRunning() || clothesshop::IsShopActive()) {
+    // Priority 1: Native GTA SA story phone calls ALWAYS win over custom Phone (F6)!
+    auto* bus = modbus::GetBus();
+    bool storyPhone = sa::IsStoryPhoneRinging() || (bus && bus->storyPhonePriority);
+    if (storyPhone) {
         if (g_screen != Screen::Closed) ClosePhone(true);
         return;
     }
 
-    // Brief post-close shield so releasing LMB/RMB after selecting/closing doesn't fire or punch!
-    if (g_screen == Screen::Closed) {
-        if (g_postCloseShieldUntilMs != 0) {
-            if (GetTickCount() < g_postCloseShieldUntilMs) {
-                sa::ClearPadPhoneInputs();
-            } else {
-                g_postCloseShieldUntilMs = 0;
-            }
-        }
+    if (sa::IsPauseMenuActive() || sa::IsCutsceneRunning() || clothesshop::IsShopActive()) {
+        if (g_screen != Screen::Closed) ClosePhone(true);
+        return;
     }
 
     const auto& k = ui::Keys();
@@ -900,7 +884,11 @@ void PreScriptsTick() {
         }
     }
 
-    if (g_screen == Screen::Closed) return;
+    if (g_screen == Screen::Closed) {
+        ui::UpdatePostCloseShield();
+        ui::SyncIdleMouseEdges();
+        return;
+    }
 
     // Auto-close immediately if another modal opens, CJ dies/enters water, or CJ takes damage (shot/hit)!
     if (modbus::IsAnyModalMenuOpen("phone") || sa::GetNumMenusInUse() > 0) {
@@ -930,44 +918,36 @@ void PreScriptsTick() {
         StopPhoneAnim();
     }
 
+    auto in = ui::PollMenuInput(false, true, true);
+
     // Calling animation screen: allow Backspace/Esc/RMB to hang up early, block all player inputs
     if (g_screen == Screen::CallingAnimation) {
-        if (k.JustPressed(VK_BACK) || k.JustPressed(VK_ESCAPE) || rmbJust) {
+        if (in.back) {
             HandleBack();
         } else if (GetTickCount() >= g_callFinishTickMs) {
             FinishPendingCall();
         }
-        sa::ClearPadPhoneInputs();
         return;
     }
 
     RebuildCurrentItems();
     const int n = static_cast<int>(g_items.size());
     if (n > 0) {
-        const bool up     = wheelUp || k.Repeated(VK_UP)   || k.Repeated('W');
-        const bool down   = wheelDn || k.Repeated(VK_DOWN) || k.Repeated('S');
-        const bool left   = k.JustPressed(VK_LEFT)  || k.JustPressed('A');
-        const bool right  = k.JustPressed(VK_RIGHT) || k.JustPressed('D');
-        const bool accept = lmbJust || k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE);
-
-        if (up) {
+        if (in.up) {
             g_cursor = (g_cursor - 1 + n) % n;
             PlayKeySound();
-        } else if (down) {
+        } else if (in.down) {
             g_cursor = (g_cursor + 1) % n;
             PlayKeySound();
-        } else if (g_screen == Screen::Settings && (left || right)) {
-            AdjustSetting(g_items[g_cursor].actionId, right ? +1 : -1);
-        } else if (accept) {
+        } else if (g_screen == Screen::Settings && (in.left || in.right)) {
+            AdjustSetting(g_items[g_cursor].actionId, in.right ? +1 : -1);
+        } else if (in.accept) {
             HandleSelect();
         }
     }
-    if (rmbJust || k.JustPressed(VK_BACK) || k.JustPressed(VK_ESCAPE)) {
+    if (in.back) {
         HandleBack();
     }
-
-    // Block ALL GTA SA movement (WASD), camera mouse look, weapon wheel, aiming, firing & car entry!
-    sa::ClearPadPhoneInputs();
 }
 
 void PostScriptsTick() {
@@ -1093,11 +1073,8 @@ void OnNewGame() {
 
 void Reset() {
     StopPhoneAnim();
-    g_screen                 = Screen::Closed;
-    g_prevWantedStars        = 0;
-    g_prevLmb                = false;
-    g_prevRmb                = false;
-    g_postCloseShieldUntilMs = 0;
+    g_screen          = Screen::Closed;
+    g_prevWantedStars = 0;
 }
 
 } // namespace phoneui

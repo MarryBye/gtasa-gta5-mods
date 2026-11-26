@@ -1291,28 +1291,25 @@ void ProcessMenuInput(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
         return;
     }
 
-    const auto& k = ui::Keys();
-    bool up     = k.Repeated(VK_UP)    || k.Repeated('W');
-    bool down   = k.Repeated(VK_DOWN)  || k.Repeated('S');
-    bool accept = k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE);
-    bool back   = k.JustPressed(VK_BACK)   || k.JustPressed('F') || k.JustPressed(VK_ESCAPE);
+    // Unified controls: Wheel (when not zooming standalone 3D camera), Arrows, WASD, LMB/Enter/Space = Select, RMB/Back/Esc/F = Back
+    auto in = ui::PollMenuInput(true, !g_standaloneMode, false);
 
     if (g_inSubmenu) {
         int n = static_cast<int>(g_subOptions.size());
         if (n > 0) {
-            if (up) {
+            if (in.up) {
                 g_subCursor = (g_subCursor - 1 + n) % n;
                 sa::PlayFrontendSound(sa::SFX_SCROLL);
                 ApplySubPreview(veh);
-            } else if (down) {
+            } else if (in.down) {
                 g_subCursor = (g_subCursor + 1) % n;
                 sa::PlayFrontendSound(sa::SFX_SCROLL);
                 ApplySubPreview(veh);
-            } else if (accept) {
+            } else if (in.accept) {
                 PurchaseSubOption(veh);
             }
         }
-        if (back) {
+        if (in.back) {
             RevertSubPreview(veh);
             g_inSubmenu = false;
             if (g_standaloneMode) {
@@ -1326,13 +1323,13 @@ void ProcessMenuInput(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
     int n = static_cast<int>(g_mainEntries.size());
     if (n <= 0) return;
 
-    if (up) {
+    if (in.up) {
         g_mainCursor = (g_mainCursor - 1 + n) % n;
         sa::PlayFrontendSound(sa::SFX_SCROLL);
-    } else if (down) {
+    } else if (in.down) {
         g_mainCursor = (g_mainCursor + 1) % n;
         sa::PlayFrontendSound(sa::SFX_SCROLL);
-    } else if (accept) {
+    } else if (in.accept) {
         const auto& e = g_mainEntries[g_mainCursor];
         if (e.cat == CategoryId::VanillaItem && vanillaPanel) {
             g_forwardVanillaAccept = true;
@@ -1341,7 +1338,7 @@ void ProcessMenuInput(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
         } else {
             EnterSubmenu(e.cat, veh);
         }
-    } else if (back) {
+    } else if (in.back) {
         if (g_standaloneMode) {
             ExitStandaloneWorkshop();
         } else if (vanillaPanel) {
@@ -1570,12 +1567,16 @@ void PostScriptsTick() {
         float dCenter = std::sqrt((p.x - s.cx) * (p.x - s.cx) + (p.y - s.cy) * (p.y - s.cy));
         float dz      = std::fabs(p.z - s.cz);
 
-        // Clean single-trigger hysteresis: open ONCE when pulling right up to the door, close ONCE after leaving!
-        if (i != g_doorBlockedShopIdx && !g_doorOpened[i] && dCenter < 13.0f && dz < 5.0f) {
-            sa::ScriptCmd(0x0360).Str8(s.name).Run(); // OPEN_GARAGE
+        // Keep door cleanly OPEN while approaching (idempotent OPEN_GARAGE overrides vanilla CGarage::Update
+        // trying to slam the door on non-vanilla-moddable cars!). After exiting, g_doorBlockedShopIdx keeps
+        // the door shut until the player drives > 22m away!
+        if (i != g_doorBlockedShopIdx && dCenter < 15.0f && dz < 5.0f) {
+            if (!sa::ScriptCmd(0x03B0).Str8(s.name).Run()) { // !IS_GARAGE_OPEN
+                sa::ScriptCmd(0x0360).Str8(s.name).Run();   // OPEN_GARAGE (idempotent while OPENING/OPEN!)
+            }
             g_doorOpened[i] = true;
-        } else if (g_doorOpened[i] && (dCenter > 17.5f || dz > 6.5f)) {
-            sa::ScriptCmd(0x0361).Str8(s.name).Run(); // CLOSE_GARAGE
+        } else if (g_doorOpened[i] && (dCenter > 18.5f || dz > 6.5f)) {
+            sa::ScriptCmd(0x0361).Str8(s.name).Run(); // CLOSE_GARAGE once when leaving
             g_doorOpened[i] = false;
         }
 
@@ -1592,7 +1593,7 @@ void PostScriptsTick() {
         return;
     }
 
-    if (g_waitLeaveBox || sa::GetTimeMs() < g_standaloneCooldownUntilMs) {
+    if (g_waitLeaveBox || sa::GetTimeMs() < g_standaloneCooldownUntilMs || sa::IsOnMission()) {
         return;
     }
 
@@ -1652,8 +1653,8 @@ void Render2D() {
         spec.colLeftGame  = ui::Loc("КАТЕГОРИЯ", "CATEGORY");
         spec.colRightGame = ui::Loc("СТАТУС", "STATUS");
         spec.footerGame   = g_standaloneMode
-            ? ui::Loc("Enter-Выбр. | Q/E-Кам. | Колесо-Зум | F-Вых.", "Enter-Sel | Q/E-Cam | Wheel-Zoom | F-Exit")
-            : ui::Loc("Enter-Выбр. | F-Выход", "Enter-Select | F-Exit");
+            ? ui::StandardFooter("Выбр.", "Sel", "Выход", "Exit", "Q/E Кам. | Зум", "Q/E Cam | Zoom")
+            : ui::StandardFooter("Выбрать", "Select", "Выход", "Exit");
         spec.selectedIndex = g_mainCursor;
 
         for (const auto& e : g_mainEntries) {
@@ -1674,8 +1675,8 @@ void Render2D() {
         spec.colLeftGame  = ui::Loc("УЛУЧШЕНИЕ", "UPGRADE");
         spec.colRightGame = ui::Loc("ЦЕНА", "PRICE");
         spec.footerGame   = g_standaloneMode
-            ? ui::Loc("Enter-Куп. | Q/E-Кам. | Колесо-Зум | F-Наз.", "Enter-Buy | Q/E-Cam | Wheel-Zoom | F-Back")
-            : ui::Loc("Enter-Купить | F-Назад", "Enter-Buy | F-Back");
+            ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "Q/E Кам. | Зум", "Q/E Cam | Zoom")
+            : ui::StandardFooter("Купить", "Buy", "Назад", "Back");
         spec.selectedIndex = g_subCursor;
 
         for (const auto& opt : g_subOptions) {

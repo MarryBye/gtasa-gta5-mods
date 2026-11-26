@@ -40,27 +40,43 @@ int __cdecl BusGetArmorCount(int tier) {
 }
 int __cdecl BusGetArmorMax(int tier) {
     if (tier < 0 || tier >= inv::ARMOR_COUNT) return 0;
-    return inv::Cfg().armorMax[tier];
+    const auto& st = inv::Store();
+    return st.armor[tier] + st.GetMaxBuyableArmor(tier);
 }
 bool __cdecl BusAddArmor(int tier, int delta) {
     if (tier < 0 || tier >= inv::ARMOR_COUNT) return false;
     auto& st = inv::Store();
-    int mx   = inv::Cfg().armorMax[tier];
-    if (delta > 0 && st.armor[tier] >= mx) return false;
-    st.armor[tier] = std::clamp(st.armor[tier] + delta, 0, mx);
+    if (delta > 0) {
+        if (!st.CanAddArmor(tier, delta)) return false;
+        st.armor[tier] += delta;
+    } else if (delta < 0) {
+        st.armor[tier] = std::max(0, st.armor[tier] + delta);
+    }
     st.SaveNow();
     return true;
+}
+int __cdecl BusGetArmorUsedCap() { return inv::Store().GetUsedArmorCapacity(); }
+int __cdecl BusGetArmorMaxCap()  { return inv::Cfg().maxArmorCapacity; }
+int __cdecl BusGetArmorWeight(int tier) {
+    return (tier >= 0 && tier < inv::ARMOR_COUNT) ? inv::Cfg().armorWeight[tier] : 2;
+}
+int __cdecl BusGetArmorPrice(int tier) {
+    return (tier >= 0 && tier < inv::ARMOR_COUNT) ? inv::Cfg().armorPrice[tier] : 350;
 }
 
 void RegisterWithBus() {
     if (auto* b = modbus::GetBus()) {
-        b->inventoryInstalled     = true;
-        b->inventoryOpenMenu      = &BusOpenInventory;
-        b->inventoryIsMenuOpen    = &BusIsInventoryOpen;
-        b->inventoryGetArmorCount = &BusGetArmorCount;
-        b->inventoryGetArmorMax   = &BusGetArmorMax;
-        b->inventoryAddArmor      = &BusAddArmor;
-        b->inventoryGetTotalFood  = &BusGetTotalFood;
+        b->inventoryInstalled       = true;
+        b->inventoryOpenMenu        = &BusOpenInventory;
+        b->inventoryIsMenuOpen      = &BusIsInventoryOpen;
+        b->inventoryGetArmorCount   = &BusGetArmorCount;
+        b->inventoryGetArmorMax     = &BusGetArmorMax;
+        b->inventoryAddArmor        = &BusAddArmor;
+        b->inventoryGetTotalFood    = &BusGetTotalFood;
+        b->inventoryGetArmorUsedCap = &BusGetArmorUsedCap;
+        b->inventoryGetArmorMaxCap  = &BusGetArmorMaxCap;
+        b->inventoryGetArmorWeight  = &BusGetArmorWeight;
+        b->inventoryGetArmorPrice   = &BusGetArmorPrice;
     }
     modbus::RegisterPanelClaim("FOOD", &BusIsFoodShopClaimed);
 }
@@ -115,6 +131,7 @@ void __cdecl HookedScriptsProcess() {
         }
         ui::Keys().Update();
         foodshop::PreScriptsTick();
+        invmenu::PreScriptsTick();
     } else if (g_lastGameState == 9 && gs != 9) {
         foodshop::Reset();
         invmenu::Reset();
@@ -124,10 +141,6 @@ void __cdecl HookedScriptsProcess() {
     g_lastGameState = gs;
 
     if (g_origScriptsProcess) g_origScriptsProcess();
-
-    if (gs == 9) {
-        invmenu::Tick();
-    }
 }
 
 void __cdecl HookedDrawAfterFade() {

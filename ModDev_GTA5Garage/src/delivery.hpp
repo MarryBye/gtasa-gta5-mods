@@ -2,6 +2,7 @@
 
 namespace delivery {
 
+void PreScriptsTick();
 void Tick();
 void Render2D();
 bool IsMenuOpen();

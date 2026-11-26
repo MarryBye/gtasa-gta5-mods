@@ -20,6 +20,8 @@ namespace {
 bool                        g_catalogLoaded = false;
 std::vector<ClothItemDef>   g_catalog;
 std::vector<ShopCatalog>    g_shops;
+std::vector<ClothItemDef>   g_hairCatalog;
+std::vector<ShopCatalog>    g_barberShops;
 std::unordered_set<uint32_t> g_ownedHashes;
 std::array<OutfitPreset, MAX_OUTFIT_PRESETS> g_presets{};
 
@@ -53,7 +55,9 @@ void SafeRebuildPlayer(sa::CPed* ped, bool forceNow) {
         g_pendingRebuild = false;
         return;
     }
-    if (!forceNow && (ped->IsInVehicle() || sa::IsCutsceneRunning())) {
+    // Verified at 0x005A82C0: CClothes::RebuildPlayer preserves seated vehicle anim associations cleanly!
+    // Only defer during cutscenes so CJ can change clothes IMMEDIATELY even while driving/sitting in a car!
+    if (!forceNow && sa::IsCutsceneRunning()) {
         g_pendingRebuild = true;
         return;
     }
@@ -96,12 +100,8 @@ void ApplyPresetInternal(sa::CPed* ped, const OutfitPreset& pr, bool showNotify)
         }
     }
 
-    if (ped->IsInVehicle() || sa::IsCutsceneRunning()) {
+    if (sa::IsCutsceneRunning()) {
         g_pendingRebuild = true;
-        if (showNotify) {
-            ui::ShowHelp("~y~Набор применится сразу при выходе из транспорта!",
-                         "~y~Outfit will apply as soon as you exit the vehicle!");
-        }
     } else {
         SafeRebuildPlayer(ped, true);
         if (showNotify) {
@@ -117,6 +117,8 @@ void EnsureCatalogLoaded() {
     g_catalogLoaded = true;
     g_catalog.clear();
     g_shops.clear();
+    g_hairCatalog.clear();
+    g_barberShops.clear();
 
     const std::string path = pcfg::Get().gameDir + "\\data\\shopping.dat";
     std::ifstream f(path);
@@ -134,9 +136,16 @@ void EnsureCatalogLoaded() {
         {"Csdesgn", "VICTIM",       "VICTIM"},
         {"Csexl",   "DIDIER SACHS", "DIDIER SACHS"},
     };
+    static constexpr ShopMeta kBarberMetas[] = {
+        {"barbers", "ПАРИКМАХЕРСКАЯ (LS)", "BARBER SHOP (LS)"},
+        {"barber2", "ПАРИКМАХЕРСКАЯ (SF)", "BARBER SHOP (SF)"},
+        {"barber3", "ПАРИКМАХЕРСКАЯ (LV)", "BARBER SHOP (LV)"},
+    };
 
     bool inClothesPrices = false;
+    bool inHairPrices    = false;
     int  activeShopIdx   = -1;
+    int  activeBarberIdx = -1;
 
     std::string line;
     while (std::getline(f, line)) {
@@ -150,12 +159,16 @@ void EnsureCatalogLoaded() {
         if (_stricmp(tok.c_str(), "section") == 0) {
             std::string secName;
             if (iss >> secName) {
+                inClothesPrices = false;
+                inHairPrices    = false;
+                activeShopIdx   = -1;
+                activeBarberIdx = -1;
+
                 if (_stricmp(secName.c_str(), "Clothes") == 0) {
                     inClothesPrices = true;
-                    activeShopIdx   = -1;
+                } else if (_stricmp(secName.c_str(), "Haircuts") == 0) {
+                    inHairPrices = true;
                 } else {
-                    inClothesPrices = false;
-                    activeShopIdx   = -1;
                     for (const auto& sm : kShopMetas) {
                         if (_stricmp(secName.c_str(), sm.key) == 0) {
                             ShopCatalog sc;
@@ -167,6 +180,19 @@ void EnsureCatalogLoaded() {
                             break;
                         }
                     }
+                    if (activeShopIdx < 0) {
+                        for (const auto& bm : kBarberMetas) {
+                            if (_stricmp(secName.c_str(), bm.key) == 0) {
+                                ShopCatalog sc;
+                                sc.shopKey = bm.key;
+                                sc.nameRus = bm.rus;
+                                sc.nameEng = bm.eng;
+                                activeBarberIdx = static_cast<int>(g_barberShops.size());
+                                g_barberShops.push_back(std::move(sc));
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             continue;
@@ -174,12 +200,13 @@ void EnsureCatalogLoaded() {
 
         if (_stricmp(tok.c_str(), "end") == 0) {
             inClothesPrices = false;
+            inHairPrices    = false;
             activeShopIdx   = -1;
+            activeBarberIdx = -1;
             continue;
         }
 
         if (inClothesPrices) {
-            // format: texturename  nametag  modelname  type  stat1 val1 stat2 val2 price
             std::string tex = tok;
             std::string tag, modName, s1, s2;
             int typeVal = -1, v1 = 0, v2 = 0, price = 0;
@@ -198,6 +225,25 @@ void EnsureCatalogLoaded() {
                     g_catalog.push_back(std::move(def));
                 }
             }
+        } else if (inHairPrices) {
+            std::string tex = tok;
+            std::string tag, modName, s1, s2;
+            int typeVal = -1, v1 = 0, v2 = 0, price = 0;
+            if (iss >> tag >> modName >> typeVal >> s1 >> v1 >> s2 >> v2 >> price) {
+                if (typeVal == 1) {
+                    ClothItemDef def;
+                    def.texName   = tex;
+                    def.gxtTag    = tag;
+                    def.modelName = modName;
+                    def.bodyPart  = 1;
+                    def.texHash   = sa::GetUppercaseKey(tex.c_str());
+                    def.modHash   = sa::GetUppercaseKey(modName.c_str());
+                    if (_stricmp(s1.c_str(), "respect") == 0) def.respect = v1;
+                    if (_stricmp(s2.c_str(), "sexy")    == 0) def.sexy    = v2;
+                    def.price     = price;
+                    g_hairCatalog.push_back(std::move(def));
+                }
+            }
         } else if (activeShopIdx >= 0 && _stricmp(tok.c_str(), "item") == 0) {
             std::string itemTex;
             if (iss >> itemTex) {
@@ -209,11 +255,22 @@ void EnsureCatalogLoaded() {
                     }
                 }
             }
+        } else if (activeBarberIdx >= 0 && _stricmp(tok.c_str(), "item") == 0) {
+            std::string itemTex;
+            if (iss >> itemTex) {
+                uint32_t h = sa::GetUppercaseKey(itemTex.c_str());
+                for (size_t i = 0; i < g_hairCatalog.size(); ++i) {
+                    if (g_hairCatalog[i].texHash == h) {
+                        g_barberShops[activeBarberIdx].itemIndices.push_back(static_cast<int>(i));
+                        break;
+                    }
+                }
+            }
         }
     }
 
-    modlog::Info("[Wardrobe] Parsed %zu clothing items across %zu clothing store chains from shopping.dat.",
-                 g_catalog.size(), g_shops.size());
+    modlog::Info("[Wardrobe] Parsed %zu clothing items (%zu stores) & %zu haircuts (%zu barbers) from shopping.dat.",
+                 g_catalog.size(), g_shops.size(), g_hairCatalog.size(), g_barberShops.size());
 }
 
 const std::vector<ClothItemDef>& Catalog() {
@@ -228,6 +285,39 @@ const ShopCatalog* FindShopCatalog(const char* loadedShopName) {
         if (_stricmp(s.shopKey.c_str(), loadedShopName) == 0) return &s;
     }
     return nullptr;
+}
+
+const std::vector<ClothItemDef>& HairCatalog() {
+    EnsureCatalogLoaded();
+    return g_hairCatalog;
+}
+
+const ShopCatalog* FindBarberCatalog(const char* loadedShopName) {
+    EnsureCatalogLoaded();
+    if (!loadedShopName || !loadedShopName[0]) return nullptr;
+    for (const auto& s : g_barberShops) {
+        if (_stricmp(s.shopKey.c_str(), loadedShopName) == 0) return &s;
+    }
+    return nullptr;
+}
+
+bool IsHaircutWorn(const sa::CPed* ped, int hairIdx) {
+    EnsureCatalogLoaded();
+    if (hairIdx < 0 || hairIdx >= static_cast<int>(g_hairCatalog.size())) return false;
+    auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
+    if (!desc) return false;
+    return desc->m_anTextureKeys[1] == g_hairCatalog[hairIdx].texHash;
+}
+
+void ApplyHaircutItem(sa::CPed* ped, int hairIdx) {
+    EnsureCatalogLoaded();
+    if (!sa::IsPedValid(ped) || hairIdx < 0 || hairIdx >= static_cast<int>(g_hairCatalog.size())) return;
+    if (ped->GetModelIndex() != 0) return;
+    auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
+    if (!desc) return;
+    const auto& it = g_hairCatalog[hairIdx];
+    sa::clothes::SetTextureAndModel(desc, it.texName.c_str(), it.modelName.c_str(), 1);
+    SafeRebuildPlayer(ped, true);
 }
 
 std::string GetClothDisplayNameGame(const ClothItemDef& item) {
@@ -511,8 +601,8 @@ void Tick() {
     sa::CPed* ped = sa::FindPlayerPed(0);
     if (!sa::IsPedValid(ped) || ped->GetHealth() <= 0.0f) return;
 
-    // 1. Complete any queued outfit rebuild the moment CJ steps out of a vehicle!
-    if (g_pendingRebuild && !ped->IsInVehicle()) {
+    // 1. Complete any queued outfit rebuild as soon as cutscene finishes!
+    if (g_pendingRebuild && !sa::IsCutsceneRunning()) {
         SafeRebuildPlayer(ped, true);
     }
 

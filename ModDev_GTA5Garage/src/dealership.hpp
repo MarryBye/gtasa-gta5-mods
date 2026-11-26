@@ -2,6 +2,7 @@
 
 namespace dealership {
 
+void PreScriptsTick();
 void Tick();
 void Render2D();
 bool IsActive();

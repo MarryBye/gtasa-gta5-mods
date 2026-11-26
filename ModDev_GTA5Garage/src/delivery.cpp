@@ -415,8 +415,10 @@ void CloseMenuAndMaybeReturn() {
     bool backToPhone = g_openedFromPhone;
     g_menuMode = MenuMode::Closed;
     g_openedFromPhone = false;
+    ui::TriggerPostCloseShield(160);
     if (backToPhone) {
         if (auto* b = modbus::GetBus(); b && b->phoneInstalled && b->phoneReturnToMain) {
+            ui::LockMenuInputBriefly(180);
             b->phoneReturnToMain();
         }
     }
@@ -432,6 +434,7 @@ void HandleMenuInput() {
         if (g_menuMode != MenuMode::Closed) {
             g_menuMode = MenuMode::Closed;
             g_openedFromPhone = false;
+            ui::TriggerPostCloseShield(160);
             sa::PlayFrontendSound(sa::SFX_BACK);
             return;
         }
@@ -441,12 +444,17 @@ void HandleMenuInput() {
             g_menuMode        = MenuMode::VehicleList;
             g_openedFromPhone = false;
             g_rowInPage       = std::clamp(g_rowInPage, 0, mod::VEHICLES_PER_PAGE - 1);
+            ui::LockMenuInputBriefly(180);
             sa::PlayFrontendSound(sa::SFX_SELECT);
+            sa::ClearPadPhoneInputs();
             return;
         }
     }
 
-    if (g_menuMode == MenuMode::Closed) return;
+    if (g_menuMode == MenuMode::Closed) {
+        ui::SyncIdleMouseEdges();
+        return;
+    }
 
     // Close menu automatically if workshop/dealership/pause/cutscene opens
     if (workshop::IsWorkshopActive() || dealership::IsActive() || sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) {
@@ -455,13 +463,15 @@ void HandleMenuInput() {
         return;
     }
 
-    const bool up     = k.Repeated(VK_UP) || k.Repeated('W');
-    const bool down   = k.Repeated(VK_DOWN) || k.Repeated('S');
-    const bool left   = k.JustPressed(VK_LEFT) || k.JustPressed('A');
-    const bool right  = k.JustPressed(VK_RIGHT) || k.JustPressed('D');
-    const bool accept = k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE);
-    const bool back   = k.JustPressed(VK_BACK)   || k.JustPressed(VK_ESCAPE) || (phoneOwnsF6 && k.JustPressed(VK_F6));
-    const bool delKey = k.JustPressed(VK_DELETE);
+    // Unified controls + full player movement/attack/camera lock (fixes CJ walking while choosing a car!)
+    auto in = ui::PollMenuInput(false, true, true);
+    const bool up     = in.up;
+    const bool down   = in.down;
+    const bool left   = in.left;
+    const bool right  = in.right;
+    const bool accept = in.accept;
+    const bool back   = in.back || (phoneOwnsF6 && k.JustPressed(VK_F6));
+    const bool delKey = in.del;
 
     const int maxVeh   = std::min(mod::Config().maxVehicles, mod::MAX_OWNED_VEHICLES);
     const int numPages = (maxVeh + mod::VEHICLES_PER_PAGE - 1) / mod::VEHICLES_PER_PAGE;
@@ -603,9 +613,13 @@ void HandleMenuInput() {
 
 } // namespace
 
-void Tick() {
+void PreScriptsTick() {
     if (sa::GetGameState() != 9) return;
     HandleMenuInput();
+}
+
+void Tick() {
+    if (sa::GetGameState() != 9) return;
     if (!sa::IsPauseMenuActive() && !sa::IsCutsceneRunning()) {
         UpdateDeliveryStateMachine();
     }
@@ -631,8 +645,7 @@ void Render2D() {
         std::snprintf(pageBuf, sizeof(pageBuf), "%s %d/%d",
                       ui::Loc("СТР.", "PAGE").c_str(), g_page + 1, numPages);
         spec.colRightGame = pageBuf;
-        spec.footerGame   = ui::Loc("Enter - Вызвать | <-/-> Стр. | Del - Удал. | F6 - Закр.",
-                                    "Enter - Request | <-/-> Page | Del - Remove | F6 - Close");
+        spec.footerGame   = ui::StandardFooter("Вызвать", "Request", "Назад", "Back", "A/D Стр. | Del", "A/D Page | Del");
         spec.selectedIndex = g_rowInPage;
 
         const auto& slots = garage::Slots();
@@ -785,6 +798,7 @@ void OpenMechanicMenu(bool fromPhone) {
     g_menuMode        = MenuMode::VehicleList;
     g_openedFromPhone = fromPhone;
     g_rowInPage       = std::clamp(g_rowInPage, 0, mod::VEHICLES_PER_PAGE - 1);
+    ui::LockMenuInputBriefly(200);
     sa::PlayFrontendSound(sa::SFX_SELECT);
 }
 
@@ -793,6 +807,7 @@ void OpenInsuranceMenu(bool fromPhone) {
     g_menuMode        = MenuMode::InsuranceList;
     g_openedFromPhone = fromPhone;
     g_insCursor       = 0;
+    ui::LockMenuInputBriefly(200);
     sa::PlayFrontendSound(sa::SFX_SELECT);
 }
 

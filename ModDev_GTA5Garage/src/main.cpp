@@ -133,6 +133,8 @@ void __cdecl HookedScriptsProcess() {
 
         ui::Keys().Update();
         workshop::PreScriptsTick();
+        dealership::PreScriptsTick();
+        delivery::PreScriptsTick();
     } else if (g_lastGameState == 9 && gs != 9) {
         workshop::Reset();
         delivery::Reset();

@@ -275,7 +275,27 @@ void CloseShopCleanly() {
     EndInspectCam();
     wdata::WeaponLoadout empty{};
     wvis::SetPreviewOverride(false, 0, empty);
+    ui::TriggerPostCloseShield(160);
     sa::PlayFrontendSound(sa::SFX_BACK);
+}
+
+int GetBusArmorUsedCap(modbus::SharedBus* bus) {
+    if (bus && bus->inventoryGetArmorUsedCap) return bus->inventoryGetArmorUsedCap();
+    return 0;
+}
+int GetBusArmorMaxCap(modbus::SharedBus* bus) {
+    if (bus && bus->inventoryGetArmorMaxCap) return bus->inventoryGetArmorMaxCap();
+    return 10;
+}
+int GetBusArmorWeight(modbus::SharedBus* bus, int tier) {
+    static constexpr int kFallbackW[4] = {2, 4, 7, 10};
+    if (bus && bus->inventoryGetArmorWeight) return bus->inventoryGetArmorWeight(tier);
+    return (tier >= 0 && tier < 4) ? kFallbackW[tier] : 2;
+}
+int GetBusArmorPrice(modbus::SharedBus* bus, int tier) {
+    static constexpr int kFallbackP[4] = {350, 700, 1200, 1800};
+    if (bus && bus->inventoryGetArmorPrice) return bus->inventoryGetArmorPrice(tier);
+    return (tier >= 0 && tier < 4) ? kFallbackP[tier] : 350;
 }
 
 void HandleSelect() {
@@ -299,7 +319,7 @@ void HandleSelect() {
 
     if (g_screen == Screen::ArmorShop) {
         if (g_armorCursor < 2) {
-            int price = (g_armorCursor == 0) ? 250 : 500;
+            int price = (g_armorCursor == 0) ? 400 : 800;
             float tgt = (g_armorCursor == 0) ? 50.0f : 100.0f;
             if (ped->GetArmor() >= tgt - 0.5f) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
@@ -316,26 +336,31 @@ void HandleSelect() {
             sa::PlayFrontendSound(sa::SFX_BUY);
             return;
         }
-        // Spare Body Armor purchase straight into GTA5Inventory pocket!
+        // Spare Body Armor purchase straight into GTA5Inventory pocket (capacity-budget system)!
         auto* bus = modbus::GetBus();
         int tier = g_armorCursor - 2; // 0..3
-        if (bus && bus->inventoryInstalled && bus->inventoryAddArmor && bus->inventoryGetArmorCount && bus->inventoryGetArmorMax &&
-            tier >= 0 && tier < 4) {
-            static constexpr int kSparePrices[4] = {200, 350, 500, 650};
-            int cur = bus->inventoryGetArmorCount(tier);
-            int mx  = bus->inventoryGetArmorMax(tier);
-            if (cur >= mx) {
+        if (bus && bus->inventoryInstalled && bus->inventoryAddArmor && tier >= 0 && tier < 4) {
+            int usedCap = GetBusArmorUsedCap(bus);
+            int maxCap  = GetBusArmorMaxCap(bus);
+            int weight  = GetBusArmorWeight(bus, tier);
+            int price   = GetBusArmorPrice(bus, tier);
+            int freeCap = std::max(0, maxCap - usedCap);
+
+            if (weight > freeCap) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
-                ui::ShowHelp("Достигнут лимит запасных бронежилетов этого типа!", "Max spare armor of this tier reached!");
+                char rb[128], eb[128];
+                std::snprintf(rb, sizeof(rb), "~r~Не хватает места в запасе брони (нужно %d, свободно %d)!", weight, freeCap);
+                std::snprintf(eb, sizeof(eb), "~r~Not enough spare armor space (needs %d, free %d)!", weight, freeCap);
+                ui::ShowHelp(rb, eb);
                 return;
             }
-            if (sa::GetPlayerMoney() < kSparePrices[tier]) {
+            if (sa::GetPlayerMoney() < price) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
-                ui::ShowHelp("Недостаточно денег!", "Not enough money!");
+                ui::ShowHelp("~r~Недостаточно денег!", "~r~Not enough money!");
                 return;
             }
             if (bus->inventoryAddArmor(tier, +1)) {
-                sa::AddPlayerMoney(-kSparePrices[tier]);
+                sa::AddPlayerMoney(-price);
                 sa::PlayFrontendSound(sa::SFX_BUY);
                 ui::ShowHelp("~g~Запасной бронежилет добавлен в инвентарь!", "~g~Spare body armor added to inventory!");
             }
@@ -492,7 +517,7 @@ void HandleBack() {
 }
 
 void ProcessMenuInput() {
-    const auto& k = ui::Keys();
+    auto in = ui::PollMenuInput(true, true, true);
 
     int* curPtr = nullptr;
     int  count  = 0;
@@ -511,20 +536,20 @@ void ProcessMenuInput() {
     }
 
     if (curPtr && count > 0) {
-        if (k.Repeated(VK_UP) || k.Repeated('W')) {
+        if (in.up) {
             *curPtr = (*curPtr - 1 + count) % count;
             sa::PlayFrontendSound(sa::SFX_SCROLL);
             if (g_screen == Screen::ModSlotOptions) UpdateVisualPreview();
-        } else if (k.Repeated(VK_DOWN) || k.Repeated('S')) {
+        } else if (in.down) {
             *curPtr = (*curPtr + 1) % count;
             sa::PlayFrontendSound(sa::SFX_SCROLL);
             if (g_screen == Screen::ModSlotOptions) UpdateVisualPreview();
         }
     }
 
-    if (k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE)) {
+    if (in.accept) {
         HandleSelect();
-    } else if (k.JustPressed(VK_BACK) || k.JustPressed(VK_ESCAPE) || k.JustPressed('F')) {
+    } else if (in.back) {
         HandleBack();
     }
 }
@@ -576,14 +601,29 @@ void DrawBottomRightWeaponStats(const sa::CPed* ped) {
         int prevArm = std::max(curArm, kPreviewVals[idx]);
         ui::StatsPanelSpec sp;
         sp.titleGame         = ui::Loc("БРОНЯ", "ARMOR");
-        sp.subtitleGame      = (idx >= 2) ? ui::Loc("В КАРМАН", "SPARE") : ui::Loc("НА СЕБЯ", "EQUIP");
+        sp.subtitleGame      = (idx >= 2) ? ui::Loc("В ЗАПАС", "SPARE") : ui::Loc("НА СЕБЯ", "EQUIP");
         sp.anchorBottomRight = true;
-        sp.w640              = 152.0f;
+        sp.w640              = 156.0f;
         sp.rightMargin640    = 18.0f;
         sp.bottomMargin448   = 18.0f;
         sp.rows = {
             {ui::Loc("Защита", "Armor"), curArm, prevArm, 100, "%"},
         };
+        if (auto* bus = modbus::GetBus(); bus && bus->inventoryInstalled && bus->inventoryAddArmor) {
+            int usedCap = GetBusArmorUsedCap(bus);
+            int maxCap  = GetBusArmorMaxCap(bus);
+            int prevCap = usedCap;
+            if (idx >= 2) {
+                int w = GetBusArmorWeight(bus, idx - 2);
+                prevCap = std::min(maxCap, usedCap + w);
+                char nb[64];
+                std::snprintf(nb, sizeof(nb), "%s: %d | %s: %d",
+                              ui::Loc("Объём", "Size").c_str(), w,
+                              ui::Loc("Свободно", "Free").c_str(), std::max(0, maxCap - usedCap));
+                sp.footerNoteGame = nb;
+            }
+            sp.rows.push_back({ui::Loc("Запас", "Carry"), usedCap, prevCap, maxCap, ""});
+        }
         ui::DrawStatsPanel(sp);
         return;
     }
@@ -695,6 +735,8 @@ void PreScriptsTick() {
         EndInspectCam();
         wstore::Store().SyncFromPlayerInventory(sa::FindPlayerPed(0));
         wmods::EnsureStockCaptured();
+        ui::LockMenuInputBriefly(180);
+        ui::SyncIdleMouseEdges();
         sa::PlayFrontendSound(sa::SFX_SELECT);
         modlog::Info("[Ammu] Opened GTA 5 Ammu-Nation UI (panel title='%s').", ammuPanel->m_acTitle);
     } else if (!ammuPanel && g_shopActive) {
@@ -708,6 +750,9 @@ void PreScriptsTick() {
     if (g_shopActive) {
         ProcessMenuInput();
         sa::ClearPadMenuInputs();
+    } else {
+        ui::UpdatePostCloseShield();
+        ui::SyncIdleMouseEdges();
     }
 }
 
@@ -750,7 +795,7 @@ void Render2D() {
         spec.titleGame     = ui::Loc("АММУ-НАЦИЯ", "AMMU-NATION");
         spec.colLeftGame   = ui::Loc("КАТЕГОРИЯ", "CATEGORY");
         spec.colRightGame  = ui::Loc("АРСЕНАЛ", "OWNED");
-        spec.footerGame    = ui::Loc("Enter - Выбр. | F - Выход", "Enter - Select | F - Exit");
+        spec.footerGame    = ui::StandardFooter("Выбр.", "Select", "Выход", "Exit");
         spec.selectedIndex = g_catCursor;
 
         for (int i = 0; i < kCategoryCount; ++i) {
@@ -778,17 +823,27 @@ void Render2D() {
             spec.rows.push_back(std::move(r));
         }
     } else if (g_screen == Screen::ArmorShop) {
+        auto* bus = modbus::GetBus();
+        bool hasInv = (bus && bus->inventoryInstalled && bus->inventoryAddArmor);
         spec.titleGame     = ui::Loc("БРОНЕЖИЛЕТ", "ARMOR");
         spec.colLeftGame   = ui::Loc("ТИП", "TYPE");
-        spec.colRightGame  = ui::Loc("ЦЕНА", "PRICE");
-        spec.footerGame    = ui::Loc("Enter - Купить | F - Назад", "Enter - Buy | F - Back");
+        if (hasInv) {
+            char ch[32];
+            std::snprintf(ch, sizeof(ch), "%s %d/%d",
+                          ui::Loc("ЗАПАС", "SPACE").c_str(),
+                          GetBusArmorUsedCap(bus), GetBusArmorMaxCap(bus));
+            spec.colRightGame = ch;
+        } else {
+            spec.colRightGame = ui::Loc("ЦЕНА", "PRICE");
+        }
+        spec.footerGame    = ui::StandardFooter("Купить", "Buy", "Назад", "Back");
         spec.selectedIndex = g_armorCursor;
 
         float curArm = sa::IsPedValid(ped) ? ped->GetArmor() : 0.0f;
         struct ArmOpt { const char* rus; const char* eng; float val; int price; };
         const ArmOpt opts[2] = {
-            {"Лёгкий (50%)",  "Light (50%)",  50.0f,  250},
-            {"Тяжёлый (100%)", "Heavy (100%)", 100.0f, 500},
+            {"Надеть: Лёгкий (50%)",  "Equip: Light (50%)",  50.0f,  400},
+            {"Надеть: Тяжёлый (100%)", "Equip: Heavy (100%)", 100.0f, 800},
         };
         for (int i = 0; i < 2; ++i) {
             ui::MenuRow r;
@@ -803,27 +858,34 @@ void Render2D() {
             spec.rows.push_back(std::move(r));
         }
 
-        // If GTA5Inventory.asi is installed, also offer GTA 5 Online Spare Body Armor straight in Ammu-Nation!
-        if (auto* bus = modbus::GetBus(); bus && bus->inventoryInstalled && bus->inventoryGetArmorCount && bus->inventoryGetArmorMax) {
-            struct SpareOpt { const char* rus; const char* eng; int price; };
+        // If GTA5Inventory.asi is installed, offer GTA 5 Online Spare Body Armor ONLY here in Ammu-Nation!
+        if (hasInv && bus->inventoryGetArmorCount) {
+            struct SpareOpt { const char* rus; const char* eng; };
             static constexpr SpareOpt kSpares[4] = {
-                {"В запас: Лёгкий (25%)",       "Spare: Light (25%)",       200},
-                {"В запас: Средний (50%)",      "Spare: Standard (50%)",    350},
-                {"В запас: Тяжёлый (75%)",      "Spare: Heavy (75%)",       500},
-                {"В запас: Сверхтяжёлый (100%)","Spare: Super Heavy (100%)",650},
+                {"Запас: Лёгкий 25%",       "Spare: Light 25%"},
+                {"Запас: Средний 50%",      "Spare: Standard 50%"},
+                {"Запас: Тяжёлый 75%",      "Spare: Heavy 75%"},
+                {"Запас: Сверхтяж. 100%",   "Spare: Super Heavy 100%"},
             };
+            int usedCap = GetBusArmorUsedCap(bus);
+            int maxCap  = GetBusArmorMaxCap(bus);
+            int freeCap = std::max(0, maxCap - usedCap);
             for (int t = 0; t < 4; ++t) {
-                int cur = bus->inventoryGetArmorCount(t);
-                int mx  = bus->inventoryGetArmorMax(t);
+                int cur    = bus->inventoryGetArmorCount(t);
+                int weight = GetBusArmorWeight(bus, t);
+                int price  = GetBusArmorPrice(bus, t);
+                bool fits  = (weight <= freeCap);
                 ui::MenuRow r;
                 r.leftGame = ui::Loc(kSpares[t].rus, kSpares[t].eng);
                 char rb[40];
-                if (cur >= mx) {
-                    std::snprintf(rb, sizeof(rb), "%d/%d", cur, mx);
-                    r.rightColor = {115, 225, 125, 255};
+                if (!fits) {
+                    if (cur > 0) std::snprintf(rb, sizeof(rb), "x%d (%s)", cur, ui::Loc("Полно", "Full").c_str());
+                    else         std::snprintf(rb, sizeof(rb), "%s", ui::Loc("Нет места", "Full").c_str());
+                    r.rightColor = (cur > 0) ? sa::CRGBA{115, 225, 125, 255} : sa::CRGBA{140, 140, 140, 255};
                 } else {
-                    std::snprintf(rb, sizeof(rb), "%d/%d $%d", cur, mx, kSpares[t].price);
-                    r.rightColor = (money >= kSpares[t].price) ? sa::CRGBA{140, 200, 255, 255} : sa::CRGBA{230, 90, 90, 255};
+                    if (cur > 0) std::snprintf(rb, sizeof(rb), "x%d  $%d", cur, price);
+                    else         std::snprintf(rb, sizeof(rb), "$%d", price);
+                    r.rightColor = (money >= price) ? sa::CRGBA{140, 200, 255, 255} : sa::CRGBA{230, 90, 90, 255};
                 }
                 r.rightGame = rb;
                 spec.rows.push_back(std::move(r));
@@ -834,7 +896,7 @@ void Render2D() {
         spec.titleGame     = ui::Loc(cinfo.rus, cinfo.eng);
         spec.colLeftGame   = ui::Loc("ОРУЖИЕ", "WEAPON");
         spec.colRightGame  = ui::Loc("ЦЕНА", "STATUS");
-        spec.footerGame    = ui::Loc("Enter - Купить/Тюнинг | F - Назад", "Enter - Buy/Mod | F - Back");
+        spec.footerGame    = ui::StandardFooter("Куп./Тюн.", "Buy/Mod", "Назад", "Back");
         spec.selectedIndex = g_weapCursor;
 
         for (const auto* def : g_catWeapons) {
@@ -855,7 +917,7 @@ void Render2D() {
         spec.titleGame     = def ? ui::Loc(def->nameRus, def->nameEng) : ui::Loc("ОРУЖИЕ", "WEAPON");
         spec.colLeftGame   = ui::Loc("МОДУЛИ И ПАТРОНЫ", "MODS & AMMO");
         spec.colRightGame  = ui::Loc("СТАТУС", "STATUS");
-        spec.footerGame    = ui::Loc("Enter - Выбр. | Q/E - Осм. | F - Назад", "Enter - Pick | Q/E - Cam | F - Back");
+        spec.footerGame    = ui::StandardFooter("Выбр.", "Pick", "Назад", "Back", "Q/E - Осм.", "Q/E - Cam");
         spec.selectedIndex = g_modCursor;
 
         int curAmmo = def ? wstore::Store().GetWeaponAmmo(ped, def) : 0;
@@ -895,7 +957,7 @@ void Render2D() {
         spec.titleGame     = ModSlotTitle(g_activeModSlot);
         spec.colLeftGame   = ui::Loc("ВАРИАНТ", "PART");
         spec.colRightGame  = ui::Loc("ЦЕНА", "PRICE");
-        spec.footerGame    = ui::Loc("Enter - Уст. | Q/E - Осм. | F - Назад", "Enter - Equip | Q/E - Cam | F - Back");
+        spec.footerGame    = ui::StandardFooter("Уст.", "Equip", "Назад", "Back", "Q/E - Осм.", "Q/E - Cam");
         spec.selectedIndex = g_optCursor;
 
         for (const auto& opt : g_slotOptions) {

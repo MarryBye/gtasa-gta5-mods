@@ -111,6 +111,120 @@ inline KeyTracker& Keys() {
 }
 
 // ============================================================================
+// UNIFIED MENU INPUT CONTROLLER (Shared Across ALL 6 Modules + Vanilla Restyler!)
+// Guarantees ONE identical control scheme everywhere:
+//   - Scroll: Mouse Wheel Up/Down, Up/Down Arrows, W/S
+//   - Pages/Tabs/Colors/Settings: Left/Right Arrows, A/D
+//   - Select/Buy: LMB, Enter, Space
+//   - Back/Exit:  RMB, Backspace, Esc (and F inside shops/vanilla menus)
+// Includes cross-DLL open debounce & post-close punch/aim shield via ModBus!
+// ============================================================================
+struct MenuInput {
+    bool up     = false;
+    bool down   = false;
+    bool left   = false;
+    bool right  = false;
+    bool accept = false;
+    bool back   = false;
+    bool del    = false;
+};
+
+struct MouseEdgeState {
+    bool prevLmb = false;
+    bool prevRmb = false;
+};
+
+inline MouseEdgeState& MouseEdges() {
+    static MouseEdgeState s;
+    return s;
+}
+
+inline void LockMenuInputBriefly(uint32_t ms = 200) {
+    if (auto* b = modbus::GetBus()) {
+        uint32_t tgt = GetTickCount() + ms;
+        if (tgt > b->menuInputUnlockMs) b->menuInputUnlockMs = tgt;
+    }
+}
+
+inline void TriggerPostCloseShield(uint32_t ms = 160) {
+    if (auto* b = modbus::GetBus()) {
+        uint32_t tgt = GetTickCount() + ms;
+        if (tgt > b->postCloseShieldMs) b->postCloseShieldMs = tgt;
+    }
+}
+
+inline void UpdatePostCloseShield() {
+    if (auto* b = modbus::GetBus(); b && b->postCloseShieldMs != 0) {
+        if (static_cast<int32_t>(GetTickCount() - b->postCloseShieldMs) < 0) {
+            sa::ClearPadPhoneInputs();
+        } else {
+            b->postCloseShieldMs = 0;
+        }
+    }
+}
+
+// Must be called once per frame while a menu is open (in PreScriptsTick BEFORE CTheScripts::Process!).
+// Consumes mouse/keyboard input and immediately blocks ALL CJ movement/combat/camera via ClearPadPhoneInputs()!
+inline MenuInput PollMenuInput(bool allowFBack = false, bool allowWheelScroll = true, bool blockPad = true) {
+    MenuInput out{};
+    auto* ms = sa::GetNewMouseState();
+    auto& me = MouseEdges();
+    const bool lmbNow  = ms && (ms->lmb != 0);
+    const bool rmbNow  = ms && (ms->rmb != 0);
+    const bool lmbJust = lmbNow && !me.prevLmb;
+    const bool rmbJust = rmbNow && !me.prevRmb;
+    const bool whUp    = allowWheelScroll && ms && (ms->wheelUp != 0);
+    const bool whDn    = allowWheelScroll && ms && (ms->wheelDown != 0);
+    me.prevLmb = lmbNow;
+    me.prevRmb = rmbNow;
+
+    bool debounced = false;
+    if (auto* b = modbus::GetBus(); b && b->menuInputUnlockMs != 0) {
+        if (static_cast<int32_t>(GetTickCount() - b->menuInputUnlockMs) < 0) {
+            debounced = true;
+        } else {
+            b->menuInputUnlockMs = 0;
+        }
+    }
+
+    if (!debounced) {
+        const auto& k = Keys();
+        out.up     = whUp || k.Repeated(VK_UP)   || k.Repeated('W');
+        out.down   = whDn || k.Repeated(VK_DOWN) || k.Repeated('S');
+        out.left   = k.JustPressed(VK_LEFT)  || k.JustPressed('A');
+        out.right  = k.JustPressed(VK_RIGHT) || k.JustPressed('D');
+        out.accept = lmbJust || k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE);
+        out.back   = rmbJust || k.JustPressed(VK_BACK)   || k.JustPressed(VK_ESCAPE) || (allowFBack && k.JustPressed('F'));
+        out.del    = k.JustPressed(VK_DELETE);
+    }
+
+    if (blockPad) {
+        sa::ClearPadPhoneInputs();
+    }
+    return out;
+}
+
+// Keep mouse edges synced even when a module's menu is closed so opening a menu while LMB is held won't false-fire!
+inline void SyncIdleMouseEdges() {
+    auto* ms = sa::GetNewMouseState();
+    auto& me = MouseEdges();
+    me.prevLmb = ms && (ms->lmb != 0);
+    me.prevRmb = ms && (ms->rmb != 0);
+}
+
+inline std::string StandardFooter(const char* acceptRus = "Выбрать", const char* acceptEng = "Select",
+                                  const char* backRus   = "Назад",   const char* backEng   = "Back",
+                                  const char* extraRus  = nullptr,   const char* extraEng  = nullptr)
+{
+    std::string s = Loc("ЛКМ/Enter - ", "LMB/Enter - ") + Loc(acceptRus, acceptEng);
+    if (extraRus && extraRus[0]) {
+        s += " | " + Loc(extraRus, extraEng ? extraEng : extraRus);
+    }
+    s += " | " + Loc("ПКМ/Back - ", "RMB/Back - ") + Loc(backRus, backEng);
+    return s;
+}
+
+// ============================================================================
 // TIER 0: Root Theme Tokens & WidescreenFix-Matched Scale Engine
 // ============================================================================
 struct ThemeTokens {

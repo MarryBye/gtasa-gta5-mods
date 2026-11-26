@@ -21,9 +21,9 @@ struct FoodDef {
     const char* eng;
     int         healHp;
     float       fatGain;
-    int         defaultMax;
+    int         defaultWeight; // Pocket carry capacity units (total pocket capacity = 20)
     int         defaultPrice;
-    uint8_t     shopMask; // Bit0=All, Bit1=BurgerShot, Bit2=Pizza, Bit3=CluckinBell
+    uint8_t     shopMask;      // Bit0=All, Bit1=BurgerShot, Bit2=Pizza, Bit3=CluckinBell
 };
 
 constexpr uint8_t SHOP_ALL    = 0x01;
@@ -31,15 +31,17 @@ constexpr uint8_t SHOP_BURGER = 0x02;
 constexpr uint8_t SHOP_PIZZA  = 0x04;
 constexpr uint8_t SHOP_CLUCK  = 0x08;
 
+// Rebalanced GTA 5 / realistic economy:
+// Cheap light snacks = small HP & small space (1-2); hot restaurant meals = large HP, expensive, take more space (3-4).
 constexpr FoodDef kFoodDefs[FOOD_COUNT] = {
-    {"PsQs",      "Конфеты P's & Q's",   "P's & Q's",        15, 1.5f, 30,  5, SHOP_ALL},
-    {"EgoChaser", "Шоколад EgoChaser",   "EgoChaser",        28, 3.0f, 15, 12, SHOP_ALL},
-    {"Meteorite", "Батончик Meteorite",  "Meteorite Bar",    22, 2.0f, 15, 10, SHOP_ALL},
-    {"Sprunk",    "Напиток Sprunk",      "Sprunk Can",       20, 1.0f, 10,  8, SHOP_ALL},
-    {"Burger",    "Бургер (на вынос)",   "Bleeder Burger",   45, 7.0f,  5, 25, SHOP_BURGER},
-    {"Pizza",     "Пицца (на вынос)",    "Pizza Box",        45, 7.0f,  5, 25, SHOP_PIZZA},
-    {"Chicken",   "Курица (на вынос)",   "Cluckin' Meal",    45, 6.0f,  5, 25, SHOP_CLUCK},
-    {"Salad",     "Здоровый салат",      "Healthy Salad",    40, 0.0f,  5, 30, SHOP_ALL},
+    {"PsQs",      "Конфеты P's & Q's",   "P's & Q's",        8,  1.0f, 1,  15, SHOP_ALL},
+    {"Sprunk",    "Напиток Sprunk",      "Sprunk Can",      10,  0.5f, 1,  20, SHOP_ALL},
+    {"Meteorite", "Батончик Meteorite",  "Meteorite Bar",   15,  1.5f, 2,  30, SHOP_ALL},
+    {"EgoChaser", "Шоколад EgoChaser",   "EgoChaser",       22,  2.5f, 2,  45, SHOP_ALL},
+    {"Salad",     "Здоровый салат",      "Healthy Salad",   55,  0.0f, 3, 180, SHOP_ALL},
+    {"Burger",    "Бургер (на вынос)",   "Bleeder Burger",  45,  6.0f, 4, 120, SHOP_BURGER},
+    {"Chicken",   "Курица (на вынос)",   "Cluckin' Meal",   48,  5.5f, 4, 130, SHOP_CLUCK},
+    {"Pizza",     "Пицца (на вынос)",    "Pizza Box",       50,  6.5f, 4, 140, SHOP_PIZZA},
 };
 
 struct ArmorDef {
@@ -47,26 +49,30 @@ struct ArmorDef {
     const char* rus;
     const char* eng;
     float       armorValue;
-    int         defaultMax;
+    int         defaultWeight; // Spare armor carry capacity units (total armor capacity = 10)
     int         defaultPrice;
 };
 
+// Rebalanced spare armor economy (bought ONLY in Ammu-Nation by default!):
+// Capacity = 10 -> up to 5x Light (2), or 2x Standard (4) + 1x Light (2), or 1x Heavy (7) + 1x Light (2), or 1x Super Heavy (10).
 constexpr ArmorDef kArmorDefs[ARMOR_COUNT] = {
-    {"LightArmor",      "Лёгкий броник (25%)",       "Light Armor (25%)",       25.0f, 5, 200},
-    {"StandardArmor",   "Средний броник (50%)",      "Standard Armor (50%)",    50.0f, 5, 350},
-    {"HeavyArmor",      "Тяжёлый броник (75%)",      "Heavy Armor (75%)",       75.0f, 5, 500},
-    {"SuperHeavyArmor", "Сверхтяжёлый броник (100%)","Super Heavy Armor (100%)",100.0f, 5, 650},
+    {"LightArmor",      "Лёгкий броник (25%)",       "Light Armor (25%)",       25.0f,  2,  350},
+    {"StandardArmor",   "Средний броник (50%)",      "Standard Armor (50%)",    50.0f,  4,  700},
+    {"HeavyArmor",      "Тяжёлый броник (75%)",      "Heavy Armor (75%)",       75.0f,  7, 1200},
+    {"SuperHeavyArmor", "Сверхтяжёлый броник (100%)","Super Heavy Armor (100%)",100.0f, 10, 1800},
 };
 
 struct InvConfig {
-    bool useRussian             = true;
-    int  openKey                = VK_F7; // 118 (auto-disabled when GTA5Phone.asi is present!)
-    bool allowArmorInFoodShops  = true;
-    bool enableLog              = true;
-    int  foodMax[FOOD_COUNT]    = {30, 15, 15, 10, 5, 5, 5, 5};
-    int  foodPrice[FOOD_COUNT]  = {5, 12, 10, 8, 25, 25, 25, 30};
-    int  armorMax[ARMOR_COUNT]  = {5, 5, 5, 5};
-    int  armorPrice[ARMOR_COUNT]= {200, 350, 500, 650};
+    bool useRussian                = true;
+    int  openKey                   = VK_F7; // 118 (auto-disabled when GTA5Phone.asi is present!)
+    bool allowArmorInFoodShops     = false; // Armor is sold ONLY in Ammu-Nation by default!
+    bool enableLog                 = true;
+    int  maxFoodCapacity           = 20;
+    int  maxArmorCapacity          = 10;
+    int  foodWeight[FOOD_COUNT]    = {1, 1, 2, 2, 3, 4, 4, 4};
+    int  foodPrice[FOOD_COUNT]     = {15, 20, 30, 45, 180, 120, 130, 140};
+    int  armorWeight[ARMOR_COUNT]  = {2, 4, 7, 10};
+    int  armorPrice[ARMOR_COUNT]   = {350, 700, 1200, 1800};
     std::string modDir;
 };
 
@@ -91,16 +97,18 @@ inline void LoadConfig(HMODULE hModule) {
     GetPrivateProfileStringA("General", "Language", "rus", lang, sizeof(lang), p);
     c.useRussian            = (_stricmp(lang, "eng") != 0);
     c.openKey               = GetPrivateProfileIntA("General", "OpenKey", VK_F7, p);
-    c.allowArmorInFoodShops = GetPrivateProfileIntA("General", "AllowArmorInFoodShops", 1, p) != 0;
+    c.allowArmorInFoodShops = GetPrivateProfileIntA("General", "AllowArmorInFoodShops", 0, p) != 0;
     c.enableLog             = GetPrivateProfileIntA("General", "EnableLog", 1, p) != 0;
+    c.maxFoodCapacity       = std::clamp<int>(GetPrivateProfileIntA("General", "MaxFoodCapacity", 20, p), 5, 200);
+    c.maxArmorCapacity      = std::clamp<int>(GetPrivateProfileIntA("General", "MaxArmorCapacity", 10, p), 4, 100);
 
     for (int i = 0; i < FOOD_COUNT; ++i) {
-        c.foodMax[i]   = std::clamp<int>(GetPrivateProfileIntA("FoodLimits", kFoodDefs[i].key, kFoodDefs[i].defaultMax, p), 1, 99);
-        c.foodPrice[i] = std::max<int>(1, GetPrivateProfileIntA("FoodPrices", kFoodDefs[i].key, kFoodDefs[i].defaultPrice, p));
+        c.foodWeight[i] = std::clamp<int>(GetPrivateProfileIntA("FoodWeights", kFoodDefs[i].key, kFoodDefs[i].defaultWeight, p), 1, c.maxFoodCapacity);
+        c.foodPrice[i]  = std::max<int>(1, GetPrivateProfileIntA("FoodPrices", kFoodDefs[i].key, kFoodDefs[i].defaultPrice, p));
     }
     for (int i = 0; i < ARMOR_COUNT; ++i) {
-        c.armorMax[i]   = std::clamp<int>(GetPrivateProfileIntA("ArmorLimits", kArmorDefs[i].key, kArmorDefs[i].defaultMax, p), 1, 50);
-        c.armorPrice[i] = std::max<int>(50, GetPrivateProfileIntA("ArmorPrices", kArmorDefs[i].key, kArmorDefs[i].defaultPrice, p));
+        c.armorWeight[i] = std::clamp<int>(GetPrivateProfileIntA("ArmorWeights", kArmorDefs[i].key, kArmorDefs[i].defaultWeight, p), 1, c.maxArmorCapacity);
+        c.armorPrice[i]  = std::max<int>(50, GetPrivateProfileIntA("ArmorPrices", kArmorDefs[i].key, kArmorDefs[i].defaultPrice, p));
     }
 }
 
@@ -123,6 +131,48 @@ public:
         return s;
     }
 
+    int GetUsedFoodCapacity() const {
+        int used = 0;
+        for (int i = 0; i < FOOD_COUNT; ++i) used += food[i] * Cfg().foodWeight[i];
+        return used;
+    }
+
+    int GetFreeFoodCapacity() const {
+        return std::max(0, Cfg().maxFoodCapacity - GetUsedFoodCapacity());
+    }
+
+    bool CanAddFood(int idx, int count = 1) const {
+        if (idx < 0 || idx >= FOOD_COUNT || count <= 0) return false;
+        return (count * Cfg().foodWeight[idx]) <= GetFreeFoodCapacity();
+    }
+
+    int GetMaxBuyableFood(int idx) const {
+        if (idx < 0 || idx >= FOOD_COUNT) return 0;
+        int w = std::max(1, Cfg().foodWeight[idx]);
+        return GetFreeFoodCapacity() / w;
+    }
+
+    int GetUsedArmorCapacity() const {
+        int used = 0;
+        for (int i = 0; i < ARMOR_COUNT; ++i) used += armor[i] * Cfg().armorWeight[i];
+        return used;
+    }
+
+    int GetFreeArmorCapacity() const {
+        return std::max(0, Cfg().maxArmorCapacity - GetUsedArmorCapacity());
+    }
+
+    bool CanAddArmor(int tier, int count = 1) const {
+        if (tier < 0 || tier >= ARMOR_COUNT || count <= 0) return false;
+        return (count * Cfg().armorWeight[tier]) <= GetFreeArmorCapacity();
+    }
+
+    int GetMaxBuyableArmor(int tier) const {
+        if (tier < 0 || tier >= ARMOR_COUNT) return 0;
+        int w = std::max(1, Cfg().armorWeight[tier]);
+        return GetFreeArmorCapacity() / w;
+    }
+
     void ClearAll() {
         for (int i = 0; i < FOOD_COUNT; ++i)  food[i] = 0;
         for (int i = 0; i < ARMOR_COUNT; ++i) armor[i] = 0;
@@ -143,13 +193,26 @@ public:
             return;
         }
         const char* p = path.c_str();
-        for (int i = 0; i < FOOD_COUNT; ++i) {
-            food[i] = std::clamp<int>(GetPrivateProfileIntA("Food", kFoodDefs[i].key, 0, p), 0, Cfg().foodMax[i]);
+        // Clamp loaded items cleanly into current capacity budget (safe migration from older saves!)
+        int foodCapLeft = Cfg().maxFoodCapacity;
+        for (int i = FOOD_COUNT - 1; i >= 0; --i) {
+            int raw = std::max<int>(0, static_cast<int>(GetPrivateProfileIntA("Food", kFoodDefs[i].key, 0, p)));
+            int w   = std::max(1, Cfg().foodWeight[i]);
+            int fit = std::min(raw, foodCapLeft / w);
+            food[i] = fit;
+            foodCapLeft -= fit * w;
         }
-        for (int i = 0; i < ARMOR_COUNT; ++i) {
-            armor[i] = std::clamp<int>(GetPrivateProfileIntA("Armor", kArmorDefs[i].key, 0, p), 0, Cfg().armorMax[i]);
+        int armorCapLeft = Cfg().maxArmorCapacity;
+        for (int i = ARMOR_COUNT - 1; i >= 0; --i) {
+            int raw = std::max<int>(0, static_cast<int>(GetPrivateProfileIntA("Armor", kArmorDefs[i].key, 0, p)));
+            int w   = std::max(1, Cfg().armorWeight[i]);
+            int fit = std::min(raw, armorCapLeft / w);
+            armor[i] = fit;
+            armorCapLeft -= fit * w;
         }
-        modlog::Info("[Inv] Loaded inventory slot %d (food=%d, armor=%d).", m_slot, GetTotalFood(), GetTotalArmor());
+        modlog::Info("[Inv] Loaded inventory slot %d (food=%d [%d/%d], armor=%d [%d/%d]).",
+                     m_slot, GetTotalFood(), GetUsedFoodCapacity(), Cfg().maxFoodCapacity,
+                     GetTotalArmor(), GetUsedArmorCapacity(), Cfg().maxArmorCapacity);
     }
 
     void SaveToSlot(int slot1to8) {

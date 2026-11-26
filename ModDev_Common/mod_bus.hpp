@@ -19,7 +19,7 @@
 namespace modbus {
 
 constexpr uint32_t BUS_MAGIC   = 0x47544135u; // 'GTA5'
-constexpr uint32_t BUS_VERSION = 2;
+constexpr uint32_t BUS_VERSION = 3;
 constexpr int      MAX_PANEL_CLAIMS = 16;
 constexpr int      MAX_PHONE_ADDONS = 24;
 
@@ -62,6 +62,9 @@ struct SharedBus {
     bool     restyleHelpBoxes;
     float    uiScale;
     char     coopProfileName[48]; // Optional profile override for SA-COOP per-player storage
+    uint32_t menuInputUnlockMs;   // Cross-DLL debounce after switching between menus (e.g. Phone -> Inventory)
+    uint32_t postCloseShieldMs;   // Brief shield after closing a menu so LMB/RMB doesn't punch/aim
+    bool     storyPhonePriority;  // True while GTA SA story phone call is ringing/active (Priority 1!)
 
     // --- 2. Panel Claim Table (Prevents vanilla restyler from overlapping custom shops) ---
     int        panelClaimCount;
@@ -84,12 +87,16 @@ struct SharedBus {
 
     // --- 5. Food & Spare Armor Inventory Registration ---
     bool          inventoryInstalled;
-    FnVoidBoolInt inventoryOpenMenu;     // (bool fromPhone, int tab: 0=All, 1=Food, 2=Armor)
+    FnVoidBoolInt inventoryOpenMenu;         // (bool fromPhone, int tab: 0=All, 1=Food, 2=Armor)
     FnBoolNoArgs  inventoryIsMenuOpen;
-    FnIntInt      inventoryGetArmorCount;// (int tier: 0..3)
-    FnIntInt      inventoryGetArmorMax;  // (int tier: 0..3)
-    FnBoolIntInt  inventoryAddArmor;     // (int tier: 0..3, int delta)
+    FnIntInt      inventoryGetArmorCount;    // (int tier: 0..3)
+    FnIntInt      inventoryGetArmorMax;      // (int tier: 0..3) -> max possible at current free space
+    FnBoolIntInt  inventoryAddArmor;         // (int tier: 0..3, int delta)
     FnIntNoArgs   inventoryGetTotalFood;
+    FnIntNoArgs   inventoryGetArmorUsedCap;  // Used armor carry capacity (e.g. 0..10)
+    FnIntNoArgs   inventoryGetArmorMaxCap;   // Total armor carry capacity (default 10)
+    FnIntInt      inventoryGetArmorWeight;   // Weight of armor tier 0..3 (2, 4, 7, 10)
+    FnIntInt      inventoryGetArmorPrice;    // Price of armor tier 0..3
 
     // --- 6. Weapons / Ammu-Nation Registration ---
     bool          weaponsInstalled;
@@ -108,7 +115,7 @@ inline SharedBus* GetBus() {
     if (s_bus) return s_bus;
 
     char mapName[96];
-    std::snprintf(mapName, sizeof(mapName), "Local\\GTASA_GTA5ModSuite_Bus_v2_%lu",
+    std::snprintf(mapName, sizeof(mapName), "Local\\GTASA_GTA5ModSuite_Bus_v3_%lu",
                   static_cast<unsigned long>(GetCurrentProcessId()));
 
     HANDLE hMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,

@@ -53,6 +53,104 @@ uint32_t      g_lastSyncMs        = 0;
 uint32_t      g_quickCloseAtMs    = 0;
 uint32_t      g_quickEquipAtMs    = 0;
 bool          g_quickPendingEquip = false;
+uint32_t      g_tabDownSinceMs    = 0;
+uint32_t      g_lastPickupCollectMs = 0;
+
+// Auto-collect ground weapon pickups into our multi-weapon arsenal when CJ holds a DIFFERENT weapon
+// in the same GTA SA weapon slot (fixes vanilla swap-sound loop when walking over e.g. 9mm while holding Deagle!).
+void ProcessGroundWeaponPickups(sa::CPed* ped) {
+    if (!sa::IsPedValid(ped) || ped->GetHealth() <= 0.0f || ped->IsInVehicle()) return;
+    uint32_t nowMs = sa::GetTimeMs();
+    if (nowMs - g_lastPickupCollectMs < 120) return;
+
+    int32_t pedH = sa::GetPedHandle(ped);
+    if (pedH <= 0) return;
+
+    sa::CVector ppos = ped->GetPosition();
+    sa::CPickup* pickups = sa::GetPickupsArray();
+    if (!pickups) return;
+
+    for (int i = 0; i < sa::MAX_PICKUPS; ++i) {
+        auto& pk = pickups[i];
+        // Collect street spawns & dead-ped drops (3=ON_STREET, 4=ONCE, 5=ONCE_TIMEOUT, 15=ON_STREET_SLOW).
+        // Skip type 2 (IN_SHOP) and type 8 (ONCE_FOR_MISSION) so mission HAS_PICKUP_BEEN_COLLECTED scripts stay 100% vanilla!
+        uint8_t ptype = pk.m_nPickupType;
+        if (ptype != 3 && ptype != 4 && ptype != 5 && ptype != 15) continue;
+        if (!pk.m_pObject || (pk.m_nFlags & 1) != 0) continue;
+        if (pk.m_nModelIndex <= 0) continue;
+
+        sa::CVector pos = pk.GetPos();
+        float dx = pos.x - ppos.x;
+        float dy = pos.y - ppos.y;
+        float dz = std::fabs(pos.z - ppos.z);
+        if (dz > 1.65f || (dx * dx + dy * dy) > (1.45f * 1.45f)) continue;
+
+        // Match pickup model ID against our weapon catalog
+        const wdata::WeaponDef* def = nullptr;
+        for (size_t w = 0; w < wdata::kWeaponCount; ++w) {
+            if (wdata::kWeapons[w].id != 0 && wdata::kWeapons[w].modelId == pk.m_nModelIndex) {
+                def = &wdata::kWeapons[w];
+                break;
+            }
+        }
+        if (!def) continue;
+
+        // Only step in when CJ already holds a DIFFERENT weapon in def->gtaSlot
+        // (vanilla GTA SA already auto-picks up empty slots & identical weapons cleanly!)
+        const sa::CWeapon& slotW = ped->Weapons()[def->gtaSlot];
+        if (slotW.m_nType == 0 || slotW.m_nType == def->id) continue;
+
+        bool alreadyOwned = wstore::Store().PlayerHasWeaponOrOwned(ped, def->id);
+        int  pickupAmmo   = (pk.m_nAmmo > 0) ? static_cast<int>(pk.m_nAmmo) : def->initAmmo;
+        int  addedAmmo    = 0;
+
+        if (def->category == wdata::WeaponCategory::Melee) {
+            if (alreadyOwned) continue; // Already in arsenal; leave pickup on floor
+            wstore::Store().Get(def->id).owned = true;
+        } else if (def->sharesSlotAmmo) {
+            int curAmmo = static_cast<int>(slotW.m_nTotalAmmo);
+            int newAmmo = std::min(def->maxAmmo, curAmmo + pickupAmmo);
+            addedAmmo   = newAmmo - curAmmo;
+            if (alreadyOwned && addedAmmo <= 0) continue; // Already owned & full ammo
+            wstore::Store().Get(def->id).owned = true;
+            if (addedAmmo > 0) {
+                sa::ScriptCmd(0x017B).Int(pedH).Int(static_cast<int32_t>(slotW.m_nType)).Int(newAmmo).Run();
+            }
+        } else {
+            // Heavy / Thrown individual ammo stored cleanly in arsenal!
+            auto& L   = wstore::Store().Get(def->id);
+            int curA  = std::max(0, L.storedAmmo);
+            int newA  = std::min(def->maxAmmo, curA + pickupAmmo);
+            addedAmmo = newA - curA;
+            if (alreadyOwned && addedAmmo <= 0) continue;
+            L.owned      = true;
+            L.storedAmmo = newA;
+        }
+
+        // Remove pickup cleanly using GTA SA's own CPickup::GetRidOfObjects()
+        pk.GetRidOfObjects();
+        if (ptype == 3)       pk.m_nRegenerationTime = nowMs + 30000;
+        else if (ptype == 15) pk.m_nRegenerationTime = nowMs + 360000;
+        else                  pk.m_nPickupType = 0;
+
+        wstore::Store().SaveToDisk();
+        sa::PlayFrontendSound(sa::SFX_SELECT);
+        g_lastPickupCollectMs = nowMs;
+
+        char rbuf[128], ebuf[128];
+        if (addedAmmo > 0) {
+            std::snprintf(rbuf, sizeof(rbuf), "~g~Подобрано:~w~ %s (+%d патр.)", def->nameRus, addedAmmo);
+            std::snprintf(ebuf, sizeof(ebuf), "~g~Picked up:~w~ %s (+%d ammo)", def->nameEng, addedAmmo);
+        } else {
+            std::snprintf(rbuf, sizeof(rbuf), "~g~Подобрано в арсенал:~w~ %s", def->nameRus);
+            std::snprintf(ebuf, sizeof(ebuf), "~g~Added to arsenal:~w~ %s", def->nameEng);
+        }
+        ui::ShowHelp(rbuf, ebuf);
+        modlog::Info("[Pickup] Collected ground weapon '%s' (id=%u, +%d ammo, slot held id=%u).",
+                     def->nameEng, def->id, addedAmmo, slotW.m_nType);
+        break;
+    }
+}
 
 int FindSectorForCategory(wdata::WeaponCategory cat) {
     for (int i = 0; i < 8; ++i) {
@@ -196,9 +294,24 @@ std::string BuildAttachmentSummary(uint32_t weaponId) {
 } // namespace
 
 void PreScriptsTick() {
+    sa::CPed* ped = sa::FindPlayerPed(0);
+    if (sa::GetGameState() == 9 && !sa::IsPauseMenuActive() && !sa::IsCutsceneRunning() &&
+        !ammu::IsShopActive() && !modbus::IsAnyModalMenuOpen("weapons") && sa::GetNumMenusInUse() == 0) {
+        ProcessGroundWeaponPickups(ped);
+    }
+
     if (!wcfg::Get().enableWeaponWheel) return;
 
-    sa::CPed* ped = sa::FindPlayerPed(0);
+    // Priority 1: Native GTA SA story phone calls ALWAYS win over Weapon Wheel TAB!
+    auto* bus = modbus::GetBus();
+    bool storyPhone = sa::IsStoryPhoneRinging() || (bus && bus->storyPhonePriority);
+    if (storyPhone) {
+        g_mode              = WheelMode::Closed;
+        g_quickPendingEquip = false;
+        g_tabDownSinceMs    = 0;
+        return;
+    }
+
     bool canOpen = (sa::GetGameState() == 9) &&
                    !sa::IsPauseMenuActive() &&
                    !sa::IsCutsceneRunning() &&
@@ -211,8 +324,9 @@ void PreScriptsTick() {
                    !ped->IsInVehicle();
 
     if (!canOpen) {
-        g_mode = WheelMode::Closed;
+        g_mode              = WheelMode::Closed;
         g_quickPendingEquip = false;
+        g_tabDownSinceMs    = 0;
         return;
     }
 
@@ -222,8 +336,17 @@ void PreScriptsTick() {
     const bool tabHeld   = ui::Keys().IsDown(wcfg::Get().wheelKey);
     const uint32_t now   = sa::GetTimeMs();
 
-    // 1. Hold TAB -> Detailed radial wheel (NO slow-mo, 100% SA-COOP safe!)
+    // 1. Hold TAB (>= 220ms) -> Detailed radial wheel!
+    // Quick TAB tap (< 220ms) passes straight through to GTA SA so player can answer story calls / view stats!
     if (tabHeld) {
+        uint32_t tickNow = GetTickCount();
+        if (g_tabDownSinceMs == 0) {
+            g_tabDownSinceMs = tickNow;
+        }
+        if (g_mode != WheelMode::HoldTab && (tickNow - g_tabDownSinceMs) < 220) {
+            return; // Let short TAB tap pass natively to GTA SA (Answer Phone / Stats)!
+        }
+
         if (g_mode != WheelMode::HoldTab) {
             if (g_mode == WheelMode::Closed) {
                 PopulateWheelFromArsenal(ped);
@@ -285,6 +408,8 @@ void PreScriptsTick() {
         sa::ClearPadWheelInputs();
         return;
     }
+
+    g_tabDownSinceMs = 0;
 
     if (g_mode == WheelMode::HoldTab) {
         CommitWheelSelection(true);
@@ -414,8 +539,9 @@ bool IsWheelOpen() {
 }
 
 void Reset() {
-    g_mode = WheelMode::Closed;
+    g_mode              = WheelMode::Closed;
     g_quickPendingEquip = false;
+    g_tabDownSinceMs    = 0;
 }
 
 } // namespace wheel

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 #include <windows.h>
 #include "bass_audio.hpp"
 #include "food_shop.hpp"
@@ -24,6 +25,7 @@ enum class Screen : uint8_t {
 
 Screen   g_screen          = Screen::Closed;
 bool     g_openedFromPhone = false;
+bool     g_openedDirectTab = false;
 int      g_catCursor       = 0;
 int      g_snackCursor     = 0;
 int      g_armorCursor     = 0;
@@ -39,7 +41,6 @@ void EnsureAudioLoaded() {
     s_inited = true;
     if (!bass::EnsureLoaded()) return;
 
-    // Short crunchy snack sound (0.16s filtered burst)
     std::vector<int16_t> eatPcm(22050 * 16 / 100);
     uint32_t seed = 0x13579BDFu;
     for (size_t i = 0; i < eatPcm.size(); ++i) {
@@ -52,7 +53,6 @@ void EnsureAudioLoaded() {
     auto eatWav = bass::BuildWav16Mono(eatPcm, 22050);
     g_sndEat = bass::LoadSample("", eatWav, 2);
 
-    // Crisp vest zip/velcro click (0.22s mid-low thump + zip)
     std::vector<int16_t> armPcm(22050 * 22 / 100);
     for (size_t i = 0; i < armPcm.size(); ++i) {
         float t = static_cast<float>(i) / 22050.0f;
@@ -70,10 +70,14 @@ void CloseAndMaybeReturn() {
     bool backToPhone = g_openedFromPhone;
     g_screen          = Screen::Closed;
     g_openedFromPhone = false;
+    g_openedDirectTab = false;
     if (backToPhone) {
+        ui::LockMenuInputBriefly(180);
         if (auto* b = modbus::GetBus(); b && b->phoneInstalled && b->phoneReturnToMain) {
             b->phoneReturnToMain();
         }
+    } else {
+        ui::TriggerPostCloseShield(160);
     }
 }
 
@@ -124,8 +128,8 @@ void EquipSpareArmor(int idx) {
     auto& st = inv::Store();
     if (st.armor[idx] <= 0) {
         sa::PlayFrontendSound(sa::SFX_ERROR);
-        ui::ShowHelp("~r~Нет запасных броников этого типа!~w~ Купите в Амму-Нации или ресторане.",
-                     "~r~No spare armor of this type!~w~ Buy more at Ammu-Nation or a shop.");
+        ui::ShowHelp("~r~Нет запасных броников этого типа!~w~ Купите их в Амму-Нации.",
+                     "~r~No spare armor of this type!~w~ Buy more at Ammu-Nation.");
         return;
     }
 
@@ -156,16 +160,24 @@ void EquipSpareArmor(int idx) {
 void Open(bool fromPhone, int tab) {
     if (foodshop::IsShopActive() || sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) return;
     g_openedFromPhone = fromPhone;
+    g_openedDirectTab = (tab == 1 || tab == 2);
     if (tab == 1)      g_screen = Screen::Snacks;
     else if (tab == 2) g_screen = Screen::Armor;
     else               g_screen = Screen::Categories;
+    ui::LockMenuInputBriefly(200);
+    ui::SyncIdleMouseEdges();
     sa::PlayFrontendSound(sa::SFX_SELECT);
 }
 
-void Tick() {
+// Runs BEFORE CTheScripts::Process so CJ NEVER walks, punches, or turns camera while navigating Inventory!
+void PreScriptsTick() {
     if (sa::GetGameState() != 9) return;
     if (sa::IsPauseMenuActive() || sa::IsCutsceneRunning() || foodshop::IsShopActive()) {
-        if (g_screen != Screen::Closed) { g_screen = Screen::Closed; g_openedFromPhone = false; }
+        if (g_screen != Screen::Closed) {
+            g_screen          = Screen::Closed;
+            g_openedFromPhone = false;
+            g_openedDirectTab = false;
+        }
         return;
     }
 
@@ -176,63 +188,80 @@ void Tick() {
     // Standalone F7 hotkey — AUTOMATICALLY SUPPRESSED when GTA5Phone.asi or SA-COOP overlay is active!
     if (!phoneInstalled && !sa::IsExternalOverlayActive() && k.JustPressed(inv::Cfg().openKey)) {
         if (g_screen != Screen::Closed) {
-            g_screen = Screen::Closed;
+            g_screen          = Screen::Closed;
             g_openedFromPhone = false;
+            g_openedDirectTab = false;
+            ui::TriggerPostCloseShield(160);
             sa::PlayFrontendSound(sa::SFX_BACK);
             return;
         }
         if (!modbus::IsAnyModalMenuOpen("inventory") && sa::GetNumMenusInUse() == 0) {
             g_screen          = Screen::Categories;
             g_openedFromPhone = false;
+            g_openedDirectTab = false;
+            ui::LockMenuInputBriefly(180);
+            ui::SyncIdleMouseEdges();
             sa::PlayFrontendSound(sa::SFX_SELECT);
             return;
         }
     }
 
-    if (g_screen == Screen::Closed) return;
+    if (g_screen == Screen::Closed) {
+        ui::UpdatePostCloseShield();
+        ui::SyncIdleMouseEdges();
+        return;
+    }
 
-    const bool up     = k.Repeated(VK_UP) || k.Repeated('W');
-    const bool down   = k.Repeated(VK_DOWN) || k.Repeated('S');
-    const bool accept = k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE);
-    const bool back   = k.JustPressed(VK_BACK) || k.JustPressed(VK_ESCAPE) || (phoneInstalled && k.JustPressed(VK_F6));
+    auto in = ui::PollMenuInput(false, true, true);
+    bool f6Close = (phoneInstalled && k.JustPressed(VK_F6));
 
     if (g_screen == Screen::Categories) {
-        if (up || down) {
+        if (in.up || in.down) {
             g_catCursor = 1 - g_catCursor;
             sa::PlayFrontendSound(sa::SFX_SCROLL);
-        } else if (accept) {
+        } else if (in.accept) {
             g_screen = (g_catCursor == 0) ? Screen::Snacks : Screen::Armor;
             sa::PlayFrontendSound(sa::SFX_SELECT);
-        } else if (back) {
+        } else if (in.back || f6Close) {
             sa::PlayFrontendSound(sa::SFX_BACK);
             CloseAndMaybeReturn();
         }
     } else if (g_screen == Screen::Snacks) {
-        if (up) {
+        if (in.up) {
             g_snackCursor = (g_snackCursor - 1 + inv::FOOD_COUNT) % inv::FOOD_COUNT;
             sa::PlayFrontendSound(sa::SFX_SCROLL);
-        } else if (down) {
+        } else if (in.down) {
             g_snackCursor = (g_snackCursor + 1) % inv::FOOD_COUNT;
             sa::PlayFrontendSound(sa::SFX_SCROLL);
-        } else if (accept) {
+        } else if (in.left || in.right) {
+            // Instant tab switch between Food & Spare Armor!
+            g_screen    = Screen::Armor;
+            g_catCursor = 1;
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        } else if (in.accept) {
             ConsumeSnack(g_snackCursor);
-        } else if (back) {
+        } else if (in.back || f6Close) {
             sa::PlayFrontendSound(sa::SFX_BACK);
-            if (g_openedFromPhone) CloseAndMaybeReturn();
+            if (f6Close || g_openedDirectTab) CloseAndMaybeReturn();
             else g_screen = Screen::Categories;
         }
     } else if (g_screen == Screen::Armor) {
-        if (up) {
+        if (in.up) {
             g_armorCursor = (g_armorCursor - 1 + inv::ARMOR_COUNT) % inv::ARMOR_COUNT;
             sa::PlayFrontendSound(sa::SFX_SCROLL);
-        } else if (down) {
+        } else if (in.down) {
             g_armorCursor = (g_armorCursor + 1) % inv::ARMOR_COUNT;
             sa::PlayFrontendSound(sa::SFX_SCROLL);
-        } else if (accept) {
+        } else if (in.left || in.right) {
+            // Instant tab switch between Spare Armor & Food!
+            g_screen    = Screen::Snacks;
+            g_catCursor = 0;
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        } else if (in.accept) {
             EquipSpareArmor(g_armorCursor);
-        } else if (back) {
+        } else if (in.back || f6Close) {
             sa::PlayFrontendSound(sa::SFX_BACK);
-            if (g_openedFromPhone) CloseAndMaybeReturn();
+            if (f6Close || g_openedDirectTab) CloseAndMaybeReturn();
             else g_screen = Screen::Categories;
         }
     }
@@ -246,43 +275,49 @@ void Render2D() {
     sa::CPed* ped   = sa::FindPlayerPed(0);
 
     ui::ListMenu menu;
-    menu.SetPosition(24.0f, 106.0f, 202.0f).SetMaxVisible(10);
+    menu.SetPosition(24.0f, 106.0f, 206.0f).SetMaxVisible(10);
 
     if (g_screen == Screen::Categories) {
-        menu.SetTitle(ui::Loc("ИНВЕНТАРЬ (КАРМАН)", "POCKET INVENTORY"))
-            .SetColumns(ui::Loc("РАЗДЕЛ", "SECTION"), ui::Loc("ЗАПАС", "STOCK"))
+        menu.SetTitle(ui::Loc("ЕДА И БРОНЯ (КАРМАН)", "FOOD & ARMOR (POCKET)"))
+            .SetColumns(ui::Loc("РАЗДЕЛ", "SECTION"), ui::Loc("ЗАПОЛНЕНО", "CAPACITY"))
             .SetFooter(g_openedFromPhone
-                ? ui::Loc("Enter - Открыть | Backspace - Телефон", "Enter - Open | Backspace - Phone")
-                : ui::Loc("Enter - Открыть | F7 / Esc - Закрыть", "Enter - Open | F7 / Esc - Close"));
+                ? ui::StandardFooter("Открыть", "Open", "Телефон", "Phone")
+                : ui::StandardFooter("Открыть", "Open", "Закрыть", "Close"));
 
         char fb[32], ab[32];
-        std::snprintf(fb, sizeof(fb), "%d %s", st.GetTotalFood(),  ui::Loc("шт.", "pcs").c_str());
-        std::snprintf(ab, sizeof(ab), "%d %s", st.GetTotalArmor(), ui::Loc("шт.", "pcs").c_str());
+        std::snprintf(fb, sizeof(fb), "%d/%d", st.GetUsedFoodCapacity(),  cfg.maxFoodCapacity);
+        std::snprintf(ab, sizeof(ab), "%d/%d", st.GetUsedArmorCapacity(), cfg.maxArmorCapacity);
         menu.AddItem(ui::Loc("Еда и Закуски", "Snacks & Food"), fb, {135, 230, 145, 255}, true);
         menu.AddItem(ui::Loc("Запасные бронежилеты", "Spare Body Armor"), ab, {140, 200, 255, 255}, true);
         menu.SetSelected(g_catCursor);
     } else if (g_screen == Screen::Snacks) {
+        char colR[32];
+        std::snprintf(colR, sizeof(colR), "%s %d/%d", ui::Loc("КАРМАН", "POCKET").c_str(),
+                      st.GetUsedFoodCapacity(), cfg.maxFoodCapacity);
         menu.SetTitle(ui::Loc("ЕДА И ЗАКУСКИ", "SNACKS & FOOD"))
-            .SetColumns(ui::Loc("ПРОДУКТ", "SNACK"), ui::Loc("ОСТАТОК", "QTY"))
-            .SetFooter(ui::Loc("Enter - Съесть (+HP) | Backspace - Назад", "Enter - Eat (+HP) | Backspace - Back"));
+            .SetColumns(ui::Loc("ПРОДУКТ", "SNACK"), colR)
+            .SetFooter(ui::StandardFooter("Съесть", "Eat", "Назад", "Back", "A/D - Броня", "A/D - Armor"));
         for (int i = 0; i < inv::FOOD_COUNT; ++i) {
             const auto& d = inv::kFoodDefs[i];
-            int qty = st.food[i], mx = cfg.foodMax[i];
+            int qty = st.food[i];
             char qb[32];
-            std::snprintf(qb, sizeof(qb), "%d/%d (+%dHP)", qty, mx, d.healHp);
+            std::snprintf(qb, sizeof(qb), "x%d (+%d HP)", qty, d.healHp);
             sa::CRGBA col = (qty > 0) ? sa::CRGBA{135, 230, 145, 255} : sa::CRGBA{115, 115, 115, 255};
             menu.AddItem(ui::Loc(d.rus, d.eng), qb, col, qty > 0);
         }
         menu.SetSelected(g_snackCursor);
     } else if (g_screen == Screen::Armor) {
-        menu.SetTitle(ui::Loc("БРОНЕЖИЛЕТЫ", "SPARE ARMOR"))
-            .SetColumns(ui::Loc("ТИП БРОНИ", "ARMOR TIER"), ui::Loc("ОСТАТОК", "QTY"))
-            .SetFooter(ui::Loc("Enter - Надеть | Backspace - Назад", "Enter - Equip | Backspace - Back"));
+        char colR[32];
+        std::snprintf(colR, sizeof(colR), "%s %d/%d", ui::Loc("ЗАПАС", "SPACE").c_str(),
+                      st.GetUsedArmorCapacity(), cfg.maxArmorCapacity);
+        menu.SetTitle(ui::Loc("ЗАПАСНЫЕ БРОНЕЖИЛЕТЫ", "SPARE BODY ARMOR"))
+            .SetColumns(ui::Loc("ТИП БРОНИ", "ARMOR TIER"), colR)
+            .SetFooter(ui::StandardFooter("Надеть", "Equip", "Назад", "Back", "A/D - Еда", "A/D - Food"));
         for (int i = 0; i < inv::ARMOR_COUNT; ++i) {
             const auto& d = inv::kArmorDefs[i];
-            int qty = st.armor[i], mx = cfg.armorMax[i];
+            int qty = st.armor[i];
             char qb[24];
-            std::snprintf(qb, sizeof(qb), "%d/%d", qty, mx);
+            std::snprintf(qb, sizeof(qb), "x%d", qty);
             sa::CRGBA col = (qty > 0) ? sa::CRGBA{140, 200, 255, 255} : sa::CRGBA{115, 115, 115, 255};
             menu.AddItem(ui::Loc(d.rus, d.eng), qb, col, qty > 0);
         }
@@ -290,22 +325,44 @@ void Render2D() {
     }
     menu.Render();
 
-    // Live Vitals Card (bottom-right) previewing exact HP / Armor recovery!
+    // Live Vitals Card (bottom-right) previewing exact HP / Armor recovery & pocket capacity!
     int hp    = sa::IsPedValid(ped) ? static_cast<int>(std::round(ped->GetHealth())) : 100;
     int maxHp = sa::IsPedValid(ped) ? std::max(100, static_cast<int>(std::round(ped->GetMaxHealth()))) : 100;
     int arm   = sa::IsPedValid(ped) ? static_cast<int>(std::round(ped->GetArmor())) : 0;
     int prevHp  = hp;
     int prevArm = arm;
 
-    if (g_screen == Screen::Snacks && st.food[g_snackCursor] > 0) {
-        prevHp = std::min(maxHp, hp + inv::kFoodDefs[g_snackCursor].healHp);
-    } else if (g_screen == Screen::Armor && st.armor[g_armorCursor] > 0) {
-        prevArm = std::max(arm, static_cast<int>(std::round(inv::kArmorDefs[g_armorCursor].armorValue)));
+    std::string note;
+    if (g_screen == Screen::Snacks) {
+        if (st.food[g_snackCursor] > 0) {
+            prevHp = std::min(maxHp, hp + inv::kFoodDefs[g_snackCursor].healHp);
+        }
+        char nb[64];
+        std::snprintf(nb, sizeof(nb), "%s: %d/%d | %s: %d",
+                      ui::Loc("Карман", "Pocket").c_str(), st.GetUsedFoodCapacity(), cfg.maxFoodCapacity,
+                      ui::Loc("Объём", "Size").c_str(), cfg.foodWeight[g_snackCursor]);
+        note = nb;
+    } else if (g_screen == Screen::Armor) {
+        if (st.armor[g_armorCursor] > 0) {
+            prevArm = std::max(arm, static_cast<int>(std::round(inv::kArmorDefs[g_armorCursor].armorValue)));
+        }
+        char nb[64];
+        std::snprintf(nb, sizeof(nb), "%s: %d/%d (%s)",
+                      ui::Loc("Запас брони", "Armor Space").c_str(), st.GetUsedArmorCapacity(), cfg.maxArmorCapacity,
+                      ui::Loc("Амму-Нация", "Ammu-Nation").c_str());
+        note = nb;
+    } else {
+        char nb[64];
+        std::snprintf(nb, sizeof(nb), "%s: %d/%d | %s: %d/%d",
+                      ui::Loc("Еда", "Food").c_str(), st.GetUsedFoodCapacity(), cfg.maxFoodCapacity,
+                      ui::Loc("Броня", "Armor").c_str(), st.GetUsedArmorCapacity(), cfg.maxArmorCapacity);
+        note = nb;
     }
 
     ui::StatsCard card;
     card.SetTitle(ui::Loc("СОСТОЯНИЕ CJ", "CJ VITALS"))
-        .SetAnchor(true, 148.0f, 16.0f, 18.0f)
+        .SetAnchor(true, 154.0f, 16.0f, 18.0f)
+        .SetNote(note)
         .AddBar(ui::Loc("Здоровье", "Health"), hp,  prevHp,  maxHp, "")
         .AddBar(ui::Loc("Броня",    "Armor"),  arm, prevArm, 100,   "%");
     card.Render();
@@ -316,6 +373,7 @@ bool IsOpen() { return g_screen != Screen::Closed; }
 void Reset() {
     g_screen          = Screen::Closed;
     g_openedFromPhone = false;
+    g_openedDirectTab = false;
 }
 
 } // namespace invmenu

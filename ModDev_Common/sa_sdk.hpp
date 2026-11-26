@@ -1264,6 +1264,95 @@ inline uint8_t GetNumMenusInUse() {
     return *reinterpret_cast<const uint8_t*>(0x00BA82E3);
 }
 
+// ============================================================================
+// Story Phone Call Priority Detection & CPickups Pool (Verified SA 1.0 US)
+// ============================================================================
+inline const char* GetActiveHelpTextRaw() {
+    if (*reinterpret_cast<const int32_t*>(0x00BAA474) == 0) return nullptr; // CHud::m_nHelpMessageState == 0
+    const char* s = reinterpret_cast<const char*>(0x00BAA480); // CHud::m_pHelpMessageToPrint
+    return (s && s[0]) ? s : nullptr;
+}
+
+// Detects whether GTA SA's story phone is ringing (help prompt CELL_1/CELL_2) or being held in a scripted call.
+// Gives native story phone calls Priority 1 over Weapon Wheel (TAB) & Custom Phone (F6)!
+inline bool IsStoryPhoneRinging() {
+    const char* help = GetActiveHelpTextRaw();
+    if (!help) return false;
+    // Compare against localized GXT strings used by main.scm for incoming phone calls (works in RUS & ENG!)
+    static constexpr const char* kPhoneKeys[] = {"CELL_1", "CELL_2", "PHON_1", "PHON_2", "MOB_1"};
+    for (const char* key : kPhoneKeys) {
+        const char* gxt = TextGet(key);
+        if (gxt && gxt[0] && std::strlen(gxt) >= 8) {
+            if (std::strncmp(help, gxt, std::min<size_t>(std::strlen(gxt), 16)) == 0) {
+                return true;
+            }
+        }
+    }
+    // Also detect raw control-key token ~k~~PED_ANSWER_PHONE~ before/after substitution
+    if (std::strstr(help, "PED_ANSWER_PHONE") != nullptr) return true;
+    return false;
+}
+
+// Identifies vanilla top-left menu control hint boxes (e.g. "Press Space to select, F to exit")
+// so GTA5UIKit hides redundant top-left hints while our unified bottom footer bar is visible!
+inline bool IsVanillaMenuControlHint(const char* help) {
+    if (!help || !help[0]) return false;
+    if (std::strstr(help, "PED_SPRINT") != nullptr ||
+        std::strstr(help, "VEHICLE_ENTER_EXIT") != nullptr ||
+        std::strstr(help, "GO_FORWARD") != nullptr ||
+        std::strstr(help, "GO_BACK") != nullptr) {
+        return true;
+    }
+    // Match localized shop control GXT headers (SHOP_1..SHOP_9, GYM_, TATT_, BARB_, CLOT_, FOOD_)
+    static constexpr const char* kHintKeys[] = {
+        "SHOPNO", "CLO_HLP", "BARB_H", "TAT_HLP", "GYM_HLP", "FOOD_H", "AMM_HLP", "MOD_HLP",
+        "FE_HLP1", "FE_HLP2", "FE_HLP3", "BUY_HLP", "S_HLP1", "S_HLP2"
+    };
+    for (const char* k : kHintKeys) {
+        const char* gxt = TextGet(k);
+        if (gxt && gxt[0] && std::strlen(gxt) >= 10 &&
+            std::strncmp(help, gxt, std::min<size_t>(std::strlen(gxt), 18)) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Verified against CPickup::Update (0x00457410) & CPickup::GetRidOfObjects (0x00454CF0):
+// CPickups::aPickUps @ 0x009788C0, 620 entries, stride 0x20 (32 bytes)
+#pragma pack(push, 1)
+struct CPickup {
+    float    m_fRevenueValue;     // +0x00
+    void*    m_pObject;           // +0x04
+    uint32_t m_nAmmo;             // +0x08
+    uint32_t m_nRegenerationTime; // +0x0C
+    int16_t  m_nPosX;             // +0x10 (world X = m_nPosX * 0.125f)
+    int16_t  m_nPosY;             // +0x12 (world Y = m_nPosY * 0.125f)
+    int16_t  m_nPosZ;             // +0x14 (world Z = m_nPosZ * 0.125f)
+    uint16_t m_nMoneyPerDay;      // +0x16
+    int16_t  m_nModelIndex;       // +0x18
+    int16_t  m_nReferenceIndex;   // +0x1A
+    uint8_t  m_nPickupType;       // +0x1C (3=ON_STREET, 4=ONCE, 5=ONCE_TIMEOUT, 8=ONCE_FOR_MISSION, 15=ON_STREET_SLOW)
+    uint8_t  m_nFlags;            // +0x1D (bit 0 = disabled/hidden)
+    uint8_t  _pad1E[2];           // +0x1E
+
+    CVector GetPos() const {
+        return {m_nPosX * 0.125f, m_nPosY * 0.125f, m_nPosZ * 0.125f};
+    }
+
+    void GetRidOfObjects() {
+        using Fn = void(__thiscall*)(CPickup*);
+        reinterpret_cast<Fn>(0x00454CF0)(this);
+    }
+};
+static_assert(sizeof(CPickup) == 0x20, "CPickup must be 32 bytes");
+#pragma pack(pop)
+
+constexpr int MAX_PICKUPS = 620;
+inline CPickup* GetPickupsArray() {
+    return reinterpret_cast<CPickup*>(0x009788C0);
+}
+
 // Verified at 0x0069DE90 & 0x0069E160 (called by CMenuSystem::DisplayStandardMenu @ 0x00581444)
 inline void InsertNumberInString(const char* src, int32_t n1, int32_t n2, int32_t n3,
                                  int32_t n4, int32_t n5, int32_t n6, char* dst) {

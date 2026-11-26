@@ -61,6 +61,12 @@ void EnsureCatalogLoaded();
 const std::vector<ClothItemDef>& Catalog();
 const ShopCatalog* FindShopCatalog(const char* loadedShopName);
 
+// Barber shop haircut catalog (bodyPart = 1, parsed from data\shopping.dat)
+const std::vector<ClothItemDef>& HairCatalog();
+const ShopCatalog* FindBarberCatalog(const char* loadedShopName);
+bool IsHaircutWorn(const sa::CPed* ped, int hairIdx);
+void ApplyHaircutItem(sa::CPed* ped, int hairIdx);
+
 std::string GetClothDisplayNameGame(const ClothItemDef& item);
 const char* SlotNameRus(int slotIdx);
 const char* SlotNameEng(int slotIdx);
