@@ -6,7 +6,7 @@
 
 ## 0. Project Vision & Mission
 - Build a fun, creative, experimental suite of **C++20 32-bit ASI plugins** for **GTA San Andreas 1.0 US (Hoodlum)** — porting GTA 5 / ETS 2 mechanics and original gameplay ideas into classic GTA SA.
-- Every feature and mod **MUST** remain 100% compatible with **SA-COOP (`Karimov-Akbar/sa-coop`)**, **WidescreenFix**, **Proper Shaders**, **Proper Vehicle Damage**, **ModelExtras**, and **MSKL Russificator**.
+- Every feature and mod **MUST** work seamlessly in **BOTH Singleplayer GTA SA** (clean New Game, `GTASAsf1..8` slots, storyline mission safety) **AND GTA SA COOP (`Karimov-Akbar/sa-coop`)**, as well as **WidescreenFix**, **Proper Shaders**, **Proper Vehicle Damage**, **ModelExtras**, and **MSKL Russificator**.
 - **Long-term roadmap (Rule 7):** Currently developed as independent standalone ASI modules (`ModDev_*`), **planned to be merged into ONE unified all-in-one ASI super-mod later**. Every architectural choice must keep that merge effortless.
 
 ---
@@ -15,48 +15,64 @@
 
 **ALL UI work** — every new screen, window, HUD overlay, modal, menu, toast, widget, or UI update for ANY existing or future mod — **MUST** live inside the shared UI Kit library (`ModDev_Common/ui_kit.hpp` + `ModDev_UIKit/`). Feature mods are **STRICTLY FORBIDDEN** from drawing raw rectangles, raw `CFont::PrintString` UI blocks, or ad-hoc custom styling outside the UI Kit.
 
-Follow a strict **React-inspired 3-tier component architecture**:
+Follow a strict **React-inspired layered component architecture**:
 
-### 1a. Single Design System (`Tier 0 — ui::ThemeTokens`)
-- `ui::Theme()` (`ThemeTokens` in `ModDev_Common/ui_kit.hpp`) is the **single source of truth** for the entire project's visual identity: color palette (`bgBody`, `bgHeader`, `bgFooter`, `bgInput`, `borderSubtle`, `divider`, `selectFill`, `textTitle`, `textCol`, `textNormal`, `textSelected`, `textDisabled`, `textFooter`, `barTrack`, `barFill`, `barGain`, `barLoss`, `accentWarn`), spacing, margins, typography scales, and WidescreenFix-matched scaling (`ui::GetScreenScales`).
+### 1a. Visual Identity & Single Design System (`Tier 0 — ui::ThemeTokens`)
+- **Target Aesthetic — Modernized Classic GTA SA:** Preserve iconic dark GTA SA menus with crisp white typography, elevated to a sleek modern finish:
+  - Semi-transparent dark/black surfaces (with optional subtle backdrop blur if/when supported) framed by a **slightly lighter subtle border** (`borderSubtle`) for depth and polish.
+  - **Every window AND notification/toast MUST have a clean header/title** (e.g., `"Звонок"` / `"Call"`, `"Обучение"` / `"Tutorial"`, `"Уведомление"` / `"Notice"` on notifications, and matching titles on every shop/feature window).
+  - **Semantic accent colors** are allowed only where meaningful: **green** (affordable / owned / gain / positive), **red** (cannot afford / wear / loss / error), **gray** (disabled / unavailable), **yellow** (warning / prompt / highlight).
+  - **Concise, minimalist bottom control hint bar (footer)** on interactive windows — short, clean, scannable hints (e.g., `ЛКМ/F/Enter - ПРИНЯТЬ` / `LMB/F/Enter - ACCEPT`). Never bloat footers with walls of text.
+- `ui::Theme()` (`ThemeTokens` in `ModDev_Common/ui_kit.hpp`) is the **single source of truth** for palette (`bgBody`, `bgHeader`, `bgFooter`, `bgInput`, `borderSubtle`, `divider`, `selectFill`, `textTitle`, `textCol`, `textNormal`, `textSelected`, `textDisabled`, `textFooter`, `barTrack`, `barFill`, `barGain`, `barLoss`, `accentWarn`), spacing, margins, typography scales, and WidescreenFix-matched scaling (`ui::GetScreenScales`).
 - Global runtime tokens (`Language`, `SpeedUnit`, `UIScale`, `RestyleVanillaMenus`, `RestyleHelpBoxes`) are owned by `GTA5UIKit.asi` (`GTA5UIKit.ini`) and synchronized live across all modules via `mod_bus.hpp` (`ui::SyncFromSharedBus()`).
 - **Never** hardcode rogue colors, arbitrary font sizes, or inconsistent layouts in feature mods. If a new visual token is needed, add it to `ThemeTokens`.
 
-### 1b. Strict Atomic Composition (`Tier 1 Primitives` → `Tier 2 Composite Components`)
-- **Tier 1 — Atomic Primitives (`ui::prim::*`)**:
-  - **THE ONLY LAYER** permitted to touch low-level rendering (`sa::font::DrawRect`, `CFont::PrintString`, Im2D primitives).
-  - Existing primitives: `Rect`, `Panel`, `Divider`, `AccentStrip`, `Label` (auto-fit width via `CFont::GetStringWidth`), `MeasureWrappedLines` / `WrappedText`, `Header`, `Row`, `Footer`, `ProgressBar` (with green delta gain & red wear loss), `TextField` (bordered input + blinking caret + char counter), `Banner`, `Swatch`.
-  - When a new basic building block is needed (e.g., `Button`, `Checkbox`, `Toggle`, `Slider`, `Badge`, `TabStrip`, `ScrollBar`, `IconBox`), **create it in `ui::prim::*` first**.
-- **Tier 2 — Composite Components (`ui::*`)**:
-  - **MUST be composed exclusively from `ui::prim::*` and/or other Tier 2 components** — NEVER call raw `sa::font::*` or bypass primitives!
-  - Guarantee: **changing a single Tier 1 primitive automatically updates every window across every mod** with zero design drift.
-  - Existing composites:
-    - `ui::ListMenu` — scrollable list window (shops, menus, vanilla restyler)
-    - `ui::StatsCard` — stat bars with green `+` / red `−` preview deltas and ETS 2 red wear bars
-    - `ui::PhoneFrame` — 1990s keypad handset with 4 LCD themes (`ClassicSA`, `Nokia92`, `Amber90s`, `NightBlue`)
-    - `ui::HelpToast` — top-left notification / prompt / story-call toast with semantic `~r~`/`~g~`/`~y~` accent strip
-    - `ui::ColorGrid` — color swatch grid (paint & vanilla `DisplayGridMenu`)
-    - `ui::RadialWheel` — 8-sector monochrome radial wheel
-    - `ui::TextInputModal` (`DrawTextInputBox`) — monochrome text-entry dialog (license plates, names, etc.)
-  - Unified Input Layer: `ui::ListInputController` (`ui::ListInput()`) drives consistent controls across all custom and vanilla menus (`Wheel`/`↑`/`↓`/`W`/`S` scroll; `←`/`→`/`A`/`D` tabs/grids; `F`/`Enter`/`LMB` accept; `Backspace`/`Esc`/`RMB` back without popping Pause Menu; `Q`/`E` 3D camera orbit; `Z`/`X` zoom; `C` reset; cross-DLL debounce via `LockMenuInputBriefly` & `TriggerPostCloseShield`).
+### 1b. Strict Atomic Composition, Layout (`relative`/`absolute`) & Base Containers
+- **Strict Bottom-Up Composition (Zero Exceptions):**
+  1. **Tier 1 — True Atomic Primitives (`ui::prim::*`):** **THE ONLY LAYER** permitted to call low-level rendering (`sa::font::DrawRect`, `CFont::PrintString`, RenderWare Im2D/sprites): `Rect`, `Panel`, `Divider`, `AccentStrip`, `Label` (auto-fit width via `CFont::GetStringWidth`), `MeasureWrappedLines` / `WrappedText`, `Icon`.
+  2. **Tier 1.5 — Reusable Micro-Components (composed STRICTLY from Tier 1 atoms):** Even simple widgets like `ProgressBar` (built from `Rect` track + fill + green gain + red wear segments), `Header`, `Row`, `Footer`, `TextField`, `Banner`, `Swatch`, `Button`, `Badge`, `Checkbox`, `Slider` **MUST** be built from Tier 1 primitives — never duplicating low-level rendering logic.
+  3. **Tier 2 — Composite Containers & Windows (composed STRICTLY from Tier 1 + Micro-Components):**
+     - **Core Reusable Layout Containers:** Always use shared container components — e.g., **List** (`ui::ListMenu`), **Grid** (`ui::ColorGrid` and generic item/card `Grid` containers), stacks/rows/modals — instead of hand-placing repeated items in feature mods.
+     - Existing composites: `ui::ListMenu`, `ui::StatsCard`, `ui::PhoneFrame` (4 90s LCD themes), `ui::HelpToast`, `ui::ColorGrid`, `ui::RadialWheel`, `ui::TextInputModal` (`DrawTextInputBox`).
+  - Guarantee: **changing a single primitive automatically updates every widget and window across every mod** with zero visual drift.
+- **CSS-Like Child Positioning (`relative` vs. `absolute`):**
+  - Every child component inside any parent container MUST support styling as either:
+    - **`relative` (default flow layout):** positioned within parent flow with automatic bounds fitting (e.g., text, rows, progress bars, and grids automatically adapt/fit to the parent container's dimensions).
+    - **`absolute` (explicit offset):** pinned to explicit coordinates relative to its parent container (or viewport) for rare cases such as corner badges, floating overlays, or anchored indicators.
 
 ### 1c. Strict "Dumb / Presentational" Component Discipline
-- **EVERY UI component (Tier 1 AND Tier 2) MUST be 100% "dumb" (presentational):**
-  - **ZERO business/domain logic** inside `ui_kit.hpp` or `ModDev_UIKit/` (no money checks, vehicle/weapon data, inventory rules, save logic, shop rules, or gameplay actions).
+- **EVERY UI component (Tier 1, Micro-Components, AND Tier 2) MUST be 100% "dumb" (presentational):**
+  - **ZERO business/domain logic** inside `ui_kit.hpp` or `ModDev_UIKit/` (no money checks, vehicle/weapon stats logic, inventory rules, save logic, shop rules, or gameplay actions).
   - Components expose **only**:
-    1. **Data / composition methods (props & children)**: e.g., `AddItem(...)`, `AddBar(...)`, `SetTitle(...)`, `SetSelected(...)`, `SetFooter(...)`, `SetBanner(...)`.
-    2. **Typed outbound signals / events**: e.g., `MenuEvent` (`HoverChanged`, `Activated`, `Back`), button click, list selection, character typed, key pressed, scroll/tab change.
+    1. **Data / layout / composition methods (props & children):** e.g., `AddItem(...)`, `AddBar(...)`, `SetTitle(...)`, `SetSelected(...)`, `SetFooter(...)`, `SetBanner(...)`, layout mode (`relative`/`absolute`).
+    2. **Typed outbound signals / events:** e.g., `MenuEvent` (`HoverChanged`, `Activated`, `Back`), button click, list/grid selection, character typed, key pressed, scroll/tab change.
   - Feature mods act as **smart containers**: they assemble UI components, feed display data, receive emitted signals, and execute domain logic in response.
 
-### 1d. Unified Vanilla GTA SA UI Restyling (`ModDev_UIKit`)
+### 1d. Unified Controls, Context-Aware Input Locking & Priority Arbitration
+- **Unified Input Controls Everywhere (`ui::ListInputController` / `ui::ListInput()`):**
+  - Scroll lists: `Mouse Wheel`, `↑`/`↓`, `W`/`S`
+  - Tabs / grids: `←`/`→`, `A`/`D`
+  - Accept / Select: `LMB`, `F`, `Enter`
+  - Back / Close: `RMB`, `Backspace`, `Esc` (never popping the Pause Menu on close)
+  - 3D preview zoom: `Z` / `X`
+  - 3D camera orbit around object/CJ: `Q` / `E` (reset: `C`)
+  - Cross-DLL transition debounce via `LockMenuInputBriefly` & `TriggerPostCloseShield`.
+- **Configurable Input Priority & Movement-Lock Policy (Owned by UI Kit / `mod_bus.hpp`):**
+  - Block base character/vehicle movement & combat **only where appropriate** (e.g., Phone, Shops, Workshops, Inventory lock CJ controls; passive HUD notifications or incoming story-call prompts let CJ keep walking/driving).
+  - **Explicit Key Priority Arbitration:** Higher-priority gameplay/UI contexts MUST preempt lower-priority UI bindings — e.g., while a storyline incoming-call prompt (`PED_ANSWER_PHONE` / `bus->storyPhonePriority`) is active, **`TAB` is owned by Priority 1 (Answer Phone)** and MUST NOT trigger the Weapon Wheel! New interactive UI layers must declare their priority & control-lock policy centrally through the UI Kit / bus rather than ad-hoc key grabbing.
+
+### 1e. Unified Vanilla GTA SA UI Restyling (`ModDev_UIKit`)
 - All vanilla GTA SA UI surfaces — unclaimed `CMenuSystem` panels (barber shops, tattoo parlors, gyms, betting shops, mission menus, color grids) and `CHud::DrawHelpText` top-left notifications / Q&A prompts / story phone calls — are restyled by `ModDev_UIKit/src/vanilla_restyle.cpp` using the exact same UI Kit components (`ListMenu`, `ColorGrid`, `HelpToast`) without modifying vanilla gameplay logic.
 - When a feature mod replaces a vanilla `CMenuSystem` menu with its own UI, it **MUST** register a claim via `modbus::RegisterPanelClaim()` so `GTA5UIKit` never overlaps it.
-- Storyline phone calls (`PED_ANSWER_PHONE` / `bus->storyPhonePriority`) always keep **Priority 1** and must never be blocked or hijacked by custom menus.
 
-### 1e. Mandatory Dual-Language Support (Russian MSKL + English)
-- Every user-visible string (titles, rows, buttons, stats, tooltips, footers, toast notifications, phone apps) **MUST** support **both Russian (`rus`) and English (`eng`)** via `ui::Loc(rusUtf8, engAscii)` (respecting `GTA5UIKit.ini` / module INI `Language=rus|eng`).
-- Keep all Russian strings as **UTF-8 in C++ source** and always encode for in-game rendering through `text::ToGameRussian()` (`ModDev_Common/text_rus.hpp`), which targets the **MSKL Russificator / SanLtd** font byte table while preserving GTA color tags (`~r~`, `~g~`, `~y~`, `~w~`, `~n~`).
-- **CRITICAL MSKL GLYPH RULE:** **NEVER** use the pipe character `|` (`0x7C`) as a UI separator — MSKL Russificator remaps `0x7C` to a custom glyph! Always use `-`, `:`, `,`, or `/` (as in `ui::StandardFooter()`).
+### 1f. Mandatory Dual-Language Support (Russian MSKL + English) & Clean In-Game Copywriting
+- Every user-visible string **MUST** support **both Russian (`rus`) and English (`eng`)** via `ui::Loc(rusUtf8, engAscii)` (respecting `GTA5UIKit.ini` / module INI `Language=rus|eng`).
+- Keep all Russian strings as **UTF-8 in C++ source** and always encode through `text::ToGameRussian()` (`ModDev_Common/text_rus.hpp`) for the **MSKL Russificator / SanLtd** font table while preserving GTA color tags (`~r~`, `~g~`, `~y~`, `~w~`, `~n~`).
+- **CRITICAL MSKL GLYPH RULE:** **NEVER** use the pipe character `|` (`0x7C`) as a UI separator — MSKL Russificator remaps `0x7C` to a custom glyph! Always use `-`, `:`, `,`, or `/`.
+- **STRICT IN-GAME COPYWRITING LAW (Applies to all player-visible game text, NOT code comments/logs):**
+  - **ZERO debug information** in game UI (no internal IDs, flags, addresses, `[DBG]` prefixes, or developer jargon).
+  - **No anglicisms in Russian UI text** — write clean, natural Russian without unnecessary English loanwords/transliterations; write clean, natural English for English mode.
+  - **Simple, concise, clutter-free wording:** NO parenthetical clarifications/asides like `(уточнение в скобках)`, NO redundant descriptions, and NO irrelevant extra details where they do not belong.
 
 ---
 
@@ -95,11 +111,12 @@ Although each module currently builds as a standalone `.asi`, the architecture *
 
 ---
 
-## 4. Golden Rule #8 — SA-COOP & Stability Compliance
+## 4. Golden Rule #8 — Singleplayer + SA-COOP Compatibility & Stability
 
+- **Full Singleplayer + SA-COOP Support:** Every feature MUST work cleanly in **both Singleplayer GTA SA** (clean New Game with zero stale autosave leakage, save slots `GTASAsf1..8`, storyline mission compatibility) **and GTA SA COOP (`Karimov-Akbar/sa-coop`)**.
 - **Never** use slow-motion / time-scale manipulation (`CTimer::ms_fTimeScale`) in wheels, phones, or menus.
 - **Always** guard custom hotkeys and overlays against unfocused windows (`sa::IsGameWindowFocused()`), active pause menu/cutscenes, and SA-COOP chat/overlays (`F2`, `F4`, `F9`, `T`).
-- **Isolate per-player persistence under SA-COOP:** detect via `sa::IsCoopModLoaded()`, bind singleplayer/host saves to `GTASAsf1..8`, and bind SA-COOP clients to `*_coop_<Nickname>.ini` (or `[Coop] ProfileName=` in `GTA5UIKit.ini`) under `Documents\GTA San Andreas User Files\GTA5*Saves\` — never mutate `.b` save files.
+- **Isolate per-player persistence:** detect SA-COOP via `sa::IsCoopModLoaded()`, bind singleplayer/host saves to `GTASAsf1..8`, and bind SA-COOP clients to `*_coop_<Nickname>.ini` (or `[Coop] ProfileName=` in `GTA5UIKit.ini`) under `Documents\GTA San Andreas User Files\GTA5*Saves\` — never mutate `.b` save files.
 - **Guard destructive world operations:** never `DELETE_CAR` while another player/ped is driving or occupying the vehicle; guard `CClothes::RebuildPlayer` when non-CJ skins (`F4` skin selector) are active.
 - **Respect shared cooldowns & sync-sensitive loops** (e.g., Old Friend wanted-level removal cooldown in SA-COOP).
 - **Verify binaries:** every build must target GTA SA 1.0 US (32-bit `pei-i386`, static `libgcc`/`libstdc++`, minimal standard Windows DLL imports verified via `objdump`).
