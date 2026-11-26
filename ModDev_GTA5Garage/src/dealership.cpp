@@ -594,14 +594,11 @@ void UpdateShowroomCamera() {
     const auto& site = kSites[g_siteIdx];
 
     float dt = std::clamp(sa::GetTimeStep() / 50.0f, 0.001f, 0.05f);
-    const auto& k = ui::Keys();
-    if (k.IsDown('Q'))      g_camAngle -= dt * 1.4f;
-    else if (k.IsDown('E')) g_camAngle += dt * 1.4f;
-    else                    g_camAngle += dt * 0.22f; // gentle showroom turntable rotation!
-
-    auto* ms = sa::GetNewMouseState();
-    if (ms && ms->wheelUp)   { g_camDist = std::clamp(g_camDist - 0.4f, 3.2f, 9.5f); ms->wheelUp = 0; }
-    if (ms && ms->wheelDown) { g_camDist = std::clamp(g_camDist + 0.4f, 3.2f, 9.5f); ms->wheelDown = 0; }
+    auto cam = ui::ListInputController::PollCamera(dt, 1.45f, 2.6f);
+    if (cam.orbitDelta != 0.0f) g_camAngle += cam.orbitDelta;
+    else                        g_camAngle += dt * 0.22f; // gentle showroom turntable rotation!
+    if (cam.zoomDelta != 0.0f)  g_camDist = std::clamp(g_camDist + cam.zoomDelta, 3.2f, 9.5f);
+    if (cam.resetCam)           g_camDist = 5.8f;
 
     sa::CVector focus{site.px, site.py, site.pz + 0.45f};
     if (sa::CVehicle* pv = sa::GetVehicleFromHandle(g_previewVehHandle)) {
@@ -618,7 +615,7 @@ void UpdateShowroomCamera() {
 }
 
 void HandleMenuInput() {
-    auto in = ui::PollMenuInput(!g_remoteMode, true, true);
+    auto in = ui::ListInput().Poll(true);
     const bool up     = in.up;
     const bool down   = in.down;
     const bool left   = in.left;
@@ -721,12 +718,11 @@ void Tick() {
     EnsureDealershipBlips();
 
     if (g_screen != Screen::Closed) {
-        // Keep showroom preview car parked horizontally WITHOUT FREEZE_CAR_POSITION so suspension stays 100% natural!
+        // Keep showroom preview car parked horizontally ONLY (no per-frame 0x04BA so gravity/suspension stay natural!)
         if (!g_remoteMode && g_previewVehHandle > 0) {
             if (sa::CVehicle* pv = sa::GetVehicleFromHandle(g_previewVehHandle)) {
                 pv->MoveSpeed().x = 0.0f;
                 pv->MoveSpeed().y = 0.0f;
-                sa::ScriptCmd(0x04BA).Int(g_previewVehHandle).Float(0.0f).Run();
             }
         }
         UpdateShowroomCamera();
@@ -834,7 +830,7 @@ void Render2D() {
         spec.colRightGame  = ui::Loc(pc.rus, pc.eng);
         spec.footerGame    = g_remoteMode
             ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет", "A/D Color")
-            : ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет | Q/E Кам.", "A/D Color | Q/E Cam");
+            : ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет | Q/E Кам. | Z/X Зум", "A/D Color | Q/E Cam | Z/X Zoom");
         spec.selectedIndex = g_vehCursor;
 
         for (const auto* cv : g_catList) {
@@ -852,7 +848,7 @@ void Render2D() {
         spec.titleGame     = ui::Loc("ОФОРМЛЕНИЕ ПОКУПКИ", "CONFIRM PURCHASE");
         spec.colLeftGame   = sa::GetVehicleDisplayNameGameEncoded(cv->modelId);
         spec.colRightGame  = ui::Loc(pc.rus, pc.eng);
-        spec.footerGame    = ui::Loc("Enter - Подтвердить | Backspace - Назад", "Enter - Confirm | Backspace - Back");
+        spec.footerGame    = ui::StandardFooter("Подтвердить", "Confirm", "Назад", "Back");
         spec.selectedIndex = g_confirmCursor;
 
         bool canBuy = (money >= price) && (garage::FindFreeSlot() >= 0);

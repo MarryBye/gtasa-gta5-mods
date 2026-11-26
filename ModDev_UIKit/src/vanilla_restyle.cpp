@@ -161,8 +161,8 @@ void __cdecl HookedScriptsProcess() {
                     ui::LockMenuInputBriefly(150);
                 }
 
-                // Poll unified input & clear pad so vanilla scripts NEVER misread Enter as Cancel/Exit!
-                auto in = ui::PollMenuInput(true, true, true);
+                // Poll unified ListInputController: Wheel/Arrows/WASD = Scroll, F/Enter/LMB = Select, Backspace/Esc/RMB = Back/Exit!
+                auto in = ui::ListInput().Poll(true);
                 p->m_nAcceptedRow = static_cast<int8_t>(-99);
 
                 if (p->m_nType == 0) {
@@ -229,16 +229,17 @@ void __cdecl HookedScriptsProcess() {
                 g_wasManagingVanillaPanel = false;
                 ui::SyncIdleMouseEdges();
 
-                // Hold ButtonTriangle suppressed until Enter/F/Mouse are released after accepting/exiting a vanilla menu!
+                // Hold ButtonTriangle & Esc suppressed until F/Enter/Esc/Mouse are released after accepting/exiting a vanilla menu!
                 if (g_blockTriangleAfterVanillaMenu) {
                     const auto& k = ui::Keys();
                     bool keysHeld = k.IsDown(VK_RETURN) || k.IsDown('F') ||
                                     k.IsDown(VK_LBUTTON) || k.IsDown(VK_RBUTTON) ||
-                                    k.IsDown(VK_BACK);
+                                    k.IsDown(VK_BACK) || k.IsDown(VK_ESCAPE);
                     uint8_t* pad = sa::GetPad0();
                     *reinterpret_cast<int16_t*>(pad + 0x1E) = 0; // ButtonTriangle
                     *reinterpret_cast<int16_t*>(pad + 0x4E) = 0;
                     *reinterpret_cast<int16_t*>(pad + 0x22) = 0; // ButtonCircle (prevent LMB punch!)
+                    *reinterpret_cast<int16_t*>(0x00B733A8) = 0; // NewKeyState.esc (prevent Pause Menu!)
                     if (!keysHeld && static_cast<int32_t>(GetTickCount() - g_blockTriangleUntilMs) >= 0) {
                         g_blockTriangleAfterVanillaMenu = false;
                     }

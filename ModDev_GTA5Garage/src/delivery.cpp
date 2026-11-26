@@ -463,8 +463,8 @@ void HandleMenuInput() {
         return;
     }
 
-    // Unified controls + full player movement/attack/camera lock (fixes CJ walking while choosing a car!)
-    auto in = ui::PollMenuInput(false, true, true);
+    // Unified ListInputController + full player movement/attack/camera/Esc lock!
+    auto in = ui::ListInput().Poll(true);
     const bool up     = in.up;
     const bool down   = in.down;
     const bool left   = in.left;
@@ -691,7 +691,7 @@ void Render2D() {
         spec.titleGame    = ui::Loc("СТРАХОВАЯ КОМПАНИЯ", "MORS MUTUAL INSURANCE");
         spec.colLeftGame  = ui::Loc("УНИЧТОЖЕННЫЕ АВТО", "WRECKED VEHICLES");
         spec.colRightGame = ui::Loc("ВЫПЛАТА", "CLAIM");
-        spec.footerGame   = ui::Loc("Enter - Восст. | Backspace - Назад", "Enter - Claim | Backspace - Back");
+        spec.footerGame   = ui::StandardFooter("Восст.", "Claim", "Назад", "Back");
         const int restoreCost = mod::ComputeRestoreCost(sa::GetPlayerMoney());
         const auto& slots = garage::Slots();
         std::vector<int> wreckedSlots;
@@ -720,7 +720,7 @@ void Render2D() {
         char pctBuf[32];
         std::snprintf(pctBuf, sizeof(pctBuf), "%d%%", mod::Config().restorePercent);
         spec.colRightGame = pctBuf;
-        spec.footerGame   = ui::Loc("Enter - Да | Backspace - Назад", "Enter - Confirm | Backspace - Back");
+        spec.footerGame   = ui::StandardFooter("Да", "Confirm", "Назад", "Back");
         spec.selectedIndex = g_confirmCursor;
 
         char costBuf[32];
@@ -733,7 +733,7 @@ void Render2D() {
         spec.titleGame    = ui::Loc("УДАЛИТЬ ТРАНСПОРТ?", "REMOVE VEHICLE?");
         spec.colLeftGame  = garage::Slots()[g_pendingSlot].displayNameGame;
         spec.colRightGame = "";
-        spec.footerGame   = ui::Loc("Enter - Да | Backspace - Назад", "Enter - Confirm | Backspace - Back");
+        spec.footerGame   = ui::StandardFooter("Да", "Confirm", "Назад", "Back");
         spec.selectedIndex = g_confirmCursor;
 
         spec.rows.push_back({ui::Loc("Да, снять с учёта", "Yes, Unregister"), "", true, false, {240, 110, 100, 255}});

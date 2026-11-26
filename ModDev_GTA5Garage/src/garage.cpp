@@ -13,18 +13,258 @@ namespace {
 
 int g_activeSaveSlot = 0; // 1..8 or 0 (autosave / SA-COOP client)
 std::array<mod::OwnedVehicle, mod::MAX_OWNED_VEHICLES> g_slots{};
+std::array<mod::SafehouseCarRecord, mod::MAX_SAFEHOUSE_CARS> g_safehouseCars{};
 
 sa::CVehicle* g_activeVeh        = nullptr;
 int32_t       g_activeVehHandle  = -1;
 int           g_activeSlot       = -1;
 int32_t       g_deliveryBlip     = 0;
+uint32_t      g_lastSafehouseScanMs = 0;
+bool          g_safehouseDirtySave  = false;
+
+mod::VisualAppearance CaptureVisuals(sa::CVehicle* veh) {
+    mod::VisualAppearance vis{};
+    if (!sa::IsVehicleValid(veh)) return vis;
+    int32_t handle = sa::GetVehicleHandle(veh);
+    if (handle > 0) {
+        int32_t c1 = veh->PrimaryColor();
+        int32_t c2 = veh->SecondaryColor();
+        sa::ScriptCmd(0x03F3).Int(handle).Out(c1).Out(c2).Run();
+        vis.primaryColor   = static_cast<uint8_t>(c1);
+        vis.secondaryColor = static_cast<uint8_t>(c2);
+        int32_t pj = -1;
+        sa::ScriptCmd(0x0988).Int(handle).Out(pj).Run();
+        vis.paintjob = (pj >= 0 && pj <= 3) ? static_cast<int8_t>(pj) : -1;
+    } else {
+        vis.primaryColor   = veh->PrimaryColor();
+        vis.secondaryColor = veh->SecondaryColor();
+        vis.paintjob       = -1;
+    }
+
+    const int16_t* upgs = veh->Upgrades();
+    int16_t lastNitro = -1;
+    for (int i = 0; i < 15; ++i) {
+        if (upgs[i] == 1008 || upgs[i] == 1009 || upgs[i] == 1010) lastNitro = upgs[i];
+    }
+    int writeIdx = 0;
+    for (int i = 0; i < 15; ++i) vis.upgrades[i] = -1;
+    bool wroteNitro = false;
+    for (int i = 0; i < 15 && writeIdx < 15; ++i) {
+        int16_t u = upgs[i];
+        if (u < 1000) continue;
+        if (u == 1008 || u == 1009 || u == 1010) {
+            if (!wroteNitro && lastNitro >= 1000) {
+                vis.upgrades[writeIdx++] = lastNitro;
+                wroteNitro = true;
+            }
+            continue;
+        }
+        vis.upgrades[writeIdx++] = u;
+    }
+    return vis;
+}
+
+// Returns match quality: 0 = mismatch, 1 = model+color match, 2 = model+color+upgrade overlap match
+int ScoreSafehouseMatch(sa::CVehicle* veh, int32_t modelId, const mod::VisualAppearance& vis) {
+    if (!sa::IsVehicleValid(veh) || veh->GetModelIndex() != modelId) return 0;
+    if (veh->PrimaryColor() != vis.primaryColor || veh->SecondaryColor() != vis.secondaryColor) return 0;
+
+    int savedCount = 0;
+    int hitCount   = 0;
+    const int16_t* liveUpg = veh->Upgrades();
+    for (int i = 0; i < 15; ++i) {
+        int16_t su = vis.upgrades[i];
+        if (su < 1000) continue;
+        ++savedCount;
+        for (int j = 0; j < 15; ++j) {
+            if (liveUpg[j] == su) { ++hitCount; break; }
+        }
+    }
+    if (savedCount == 0) return 2;
+    if (hitCount > 0) return 2 + hitCount;
+    return 1; // GTA SA CStoredCar may omit custom universal upgrades -> still match by garage+model+colors!
+}
+
+void UpsertSafehouseRecord(int hideoutGarageId, sa::CVehicle* veh, int personalSlotIdx,
+                           const mod::PerformanceTuning& tun, const mod::VehicleWear& wear) {
+    if (hideoutGarageId < 0 || !sa::IsVehicleValid(veh)) return;
+    int32_t mid = veh->GetModelIndex();
+    auto vis = CaptureVisuals(veh);
+
+    int targetIdx = -1;
+    int freeIdx   = -1;
+    for (int i = 0; i < mod::MAX_SAFEHOUSE_CARS; ++i) {
+        const auto& r = g_safehouseCars[i];
+        if (!r.occupied) {
+            if (freeIdx < 0) freeIdx = i;
+            continue;
+        }
+        if (personalSlotIdx >= 0 && r.personalSlotIdx == personalSlotIdx) {
+            targetIdx = i;
+            break;
+        }
+        if (r.hideoutGarageId == hideoutGarageId && r.modelId == mid &&
+            r.visuals.primaryColor == vis.primaryColor && r.visuals.secondaryColor == vis.secondaryColor) {
+            targetIdx = i;
+            break;
+        }
+    }
+    if (targetIdx < 0) targetIdx = (freeIdx >= 0) ? freeIdx : (mod::MAX_SAFEHOUSE_CARS - 1);
+
+    auto& dst = g_safehouseCars[targetIdx];
+    bool changed = (!dst.occupied || dst.hideoutGarageId != hideoutGarageId || dst.personalSlotIdx != personalSlotIdx);
+    dst.occupied        = true;
+    dst.hideoutGarageId = hideoutGarageId;
+    dst.personalSlotIdx = personalSlotIdx;
+    dst.modelId         = mid;
+    dst.visuals         = vis;
+    dst.tuning          = tun;
+    dst.wear            = wear;
+    if (changed) g_safehouseDirtySave = true;
+}
+
+void RestoreTuningOntoSafehouseVehicle(sa::CVehicle* veh, const mod::VisualAppearance& vis,
+                                      const mod::PerformanceTuning& tun, const mod::VehicleWear& wear,
+                                      int personalSlotIdx) {
+    if (!sa::IsVehicleValid(veh)) return;
+    int32_t handle = sa::GetVehicleHandle(veh);
+    if (handle <= 0) return;
+
+    // Re-attach any missing custom/universal visual upgrades that GTA SA's CStoredCar didn't keep
+    sa::EnsureUniversalUpgradeMounts(veh);
+    const int16_t* liveUpg = veh->Upgrades();
+    bool needReq = false;
+    int16_t missing[15] = {};
+    int missingCnt = 0;
+    for (int i = 0; i < 15; ++i) {
+        int16_t u = vis.upgrades[i];
+        if (u < 1000 || u > 1193) continue;
+        bool present = false;
+        for (int j = 0; j < 15; ++j) {
+            if (liveUpg[j] == u) { present = true; break; }
+        }
+        if (!present) {
+            missing[missingCnt++] = u;
+            sa::ScriptCmd(0x06E9).Int(u).Run();
+            needReq = true;
+        }
+    }
+    if (needReq) {
+        sa::ScriptCmd(0x038B).Run();
+        for (int i = 0; i < missingCnt; ++i) {
+            int32_t dummyOut = 0;
+            sa::ScriptCmd(0x06E7).Int(handle).Int(missing[i]).Out(dummyOut).Run();
+            sa::ScriptCmd(0x06EB).Int(missing[i]).Run();
+        }
+    }
+
+    if (tun.plateText[0] != '\0') {
+        sa::ApplyLiveCustomPlate(veh, tun.plateText);
+    }
+    tuning::ApplyTuning(veh, tun, &wear);
+
+    if (personalSlotIdx >= 0 && personalSlotIdx < mod::MAX_OWNED_VEHICLES &&
+        g_slots[personalSlotIdx].occupied && !g_slots[personalSlotIdx].destroyed) {
+        if (!GetActivePersonalVehicle()) {
+            g_activeVeh       = veh;
+            g_activeVehHandle = handle;
+            g_activeSlot      = personalSlotIdx;
+        }
+    }
+    modlog::Info("[Garage] Restored safehouse vehicle tuning/wear/plate (model=%d, personalSlot=%d, eng=%u, turbo=%d).",
+                 veh->GetModelIndex(), personalSlotIdx, tun.engineLevel, tun.turbo ? 1 : 0);
+}
+
+void TickSafehousePersistence() {
+    if (sa::GetActiveInterior() != 0 || workshop::IsWorkshopActive()) return;
+    uint32_t nowMs = sa::GetTimeMs();
+    sa::CVehicle* playerVeh = sa::FindPlayerVehicle(0, false);
+    bool urgentPlayerCheck = (playerVeh != nullptr && tuning::GetLiveTuning(playerVeh) == nullptr);
+    if (!urgentPlayerCheck && (nowMs - g_lastSafehouseScanMs < 350)) return;
+    g_lastSafehouseScanMs = nowMs;
+
+    auto* pool = sa::GetVehiclePool();
+    if (!pool || !pool->objects || !pool->byteMap || pool->size <= 0 || pool->size > 2000) return;
+
+    for (int i = 0; i < pool->size; ++i) {
+        if ((pool->byteMap[i] & 0x80) != 0) continue;
+        auto* v = reinterpret_cast<sa::CVehicle*>(pool->objects + static_cast<size_t>(i) * sa::VEHICLE_POOL_STRIDE);
+        if (!sa::IsVehicleValid(v) || v->Health() <= 0.0f) continue;
+
+        int gIdx = sa::FindHideoutGarageIndexAt(v->GetPosition());
+        if (gIdx < 0) continue;
+
+        const auto* liveTun = tuning::GetLiveTuning(v);
+        int liveSlot = FindSlotForLiveVehicle(v);
+
+        if (liveTun != nullptr || liveSlot >= 0) {
+            // 1. Live tuned / personal vehicle currently parked inside a safehouse garage -> continuously remember it!
+            mod::PerformanceTuning tun = liveTun ? *liveTun : g_slots[liveSlot].tuning;
+            mod::VehicleWear wear      = tuning::GetLiveWear(v);
+            if (liveSlot >= 0 || mod::HasAnyCustomTuning(tun) || wear.HasAnyWear()) {
+                UpsertSafehouseRecord(gIdx, v, liveSlot, tun, wear);
+            }
+            continue;
+        }
+
+        // 2. Untuned vehicle sitting inside a safehouse garage -> check if GTA SA just respawned our tuned car!
+        int bestRec   = -1;
+        int bestScore = 0;
+        for (int r = 0; r < mod::MAX_SAFEHOUSE_CARS; ++r) {
+            const auto& rec = g_safehouseCars[r];
+            if (!rec.occupied || rec.hideoutGarageId != gIdx) continue;
+            int sc = ScoreSafehouseMatch(v, rec.modelId, rec.visuals);
+            if (sc > bestScore) {
+                bestScore = sc;
+                bestRec   = r;
+            }
+        }
+        if (bestRec >= 0) {
+            auto& rec = g_safehouseCars[bestRec];
+            if (rec.personalSlotIdx >= 0 && rec.personalSlotIdx < mod::MAX_OWNED_VEHICLES &&
+                g_slots[rec.personalSlotIdx].occupied && !g_slots[rec.personalSlotIdx].destroyed) {
+                const auto& sl = g_slots[rec.personalSlotIdx];
+                rec.tuning  = sl.tuning;
+                rec.wear    = sl.wear;
+                rec.visuals = sl.visuals;
+            }
+            RestoreTuningOntoSafehouseVehicle(v, rec.visuals, rec.tuning, rec.wear, rec.personalSlotIdx);
+            continue;
+        }
+
+        // 3. Fallback for personal cars parked in a safehouse garage BEFORE this update (match occupied slots!)
+        if (!GetActivePersonalVehicle()) {
+            int bestSlot = -1;
+            int bestSlSc = 0;
+            for (int s = 0; s < mod::MAX_OWNED_VEHICLES; ++s) {
+                const auto& sl = g_slots[s];
+                if (!sl.occupied || sl.destroyed) continue;
+                int sc = ScoreSafehouseMatch(v, sl.modelId, sl.visuals);
+                if (sc > bestSlSc) {
+                    bestSlSc = sc;
+                    bestSlot = s;
+                }
+            }
+            if (bestSlot >= 0) {
+                const auto& sl = g_slots[bestSlot];
+                RestoreTuningOntoSafehouseVehicle(v, sl.visuals, sl.tuning, sl.wear, bestSlot);
+                UpsertSafehouseRecord(gIdx, v, bestSlot, sl.tuning, sl.wear);
+            }
+        }
+    }
+
+    if (g_safehouseDirtySave) {
+        g_safehouseDirtySave = false;
+        SaveNow();
+    }
+}
 
 } // namespace
 
 int GetActiveSaveSlot() { return g_activeSaveSlot; }
 
 void SaveNow() {
-    storage::SaveGarageToSlot(g_activeSaveSlot, g_slots);
+    storage::SaveGarageToSlot(g_activeSaveSlot, g_slots, &g_safehouseCars);
 }
 
 void OnGameSave(int slot1to8) {
@@ -48,7 +288,8 @@ void OnGameLoad(int slot1to8) {
     tuning::ResetAll();
 
     g_activeSaveSlot = (slot1to8 >= 1 && slot1to8 <= 8) ? slot1to8 : 0;
-    storage::LoadGarageFromSlot(g_activeSaveSlot, g_slots);
+    storage::LoadGarageFromSlot(g_activeSaveSlot, g_slots, &g_safehouseCars);
+    g_safehouseDirtySave = false;
 }
 
 void OnNewGame() {
@@ -60,6 +301,8 @@ void OnNewGame() {
 
     g_activeSaveSlot = 0;
     for (auto& s : g_slots) s = mod::OwnedVehicle{};
+    for (auto& r : g_safehouseCars) r = mod::SafehouseCarRecord{};
+    g_safehouseDirtySave = false;
     modlog::Info("[Garage] New game started -> cleared runtime garage (slot 0).");
 }
 
@@ -318,6 +561,9 @@ void DismissCurrentPersonalVehicle(bool deleteEntity) {
 }
 
 void Tick() {
+    // Always track & restore tuned/personal vehicles stored in vanilla safehouse garages (even after door closes!)
+    TickSafehousePersistence();
+
     if (g_activeSlot < 0 || g_activeSlot >= mod::MAX_OWNED_VEHICLES) return;
     if (!g_activeVeh) return;
 

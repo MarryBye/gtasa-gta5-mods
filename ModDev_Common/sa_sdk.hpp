@@ -367,11 +367,14 @@ inline void ClearPadPhoneInputs() {
     *reinterpret_cast<int16_t*>(pad + 0x16) = 0; // DPadRight
     *reinterpret_cast<int16_t*>(pad + 0x1A) = 0; // Select
     *reinterpret_cast<int16_t*>(pad + 0x1C) = 0; // ButtonSquare (Jump/Brake)
-    *reinterpret_cast<int16_t*>(pad + 0x1E) = 0; // ButtonTriangle (Enter/Exit car)
+    *reinterpret_cast<int16_t*>(pad + 0x1E) = 0; // ButtonTriangle (Enter/Exit car / F)
     *reinterpret_cast<int16_t*>(pad + 0x20) = 0; // ButtonCross (Sprint/Gas)
     *reinterpret_cast<int16_t*>(pad + 0x22) = 0; // ButtonCircle (Fire/Attack)
     *reinterpret_cast<int16_t*>(pad + 0x24) = 0; // ShockButtonL (Crouch/Horn)
     *reinterpret_cast<int16_t*>(pad + 0x26) = 0; // ShockButtonR
+    *reinterpret_cast<int16_t*>(pad + 0x4E) = 0; // OldState.ButtonTriangle
+    // Suppress CPad::NewKeyState.esc (verified at 0x00576B9F) so pressing Esc inside a menu NEVER pops Pause Menu!
+    *reinterpret_cast<int16_t*>(0x00B733A8) = 0;
     auto* ms = GetNewMouseState();
     ms->X = 0.0f;
     ms->Y = 0.0f;
@@ -380,6 +383,10 @@ inline void ClearPadPhoneInputs() {
     ms->rmb = 0;
     ms->wheelUp = 0;
     ms->wheelDown = 0;
+}
+
+inline void ClearPadListInputs() {
+    ClearPadPhoneInputs();
 }
 
 // Suppresses firing, aiming, camera rotation, weapon cycling & TAB stats while Weapon Wheel is held
@@ -1359,6 +1366,30 @@ static_assert(sizeof(CPickup) == 0x20, "CPickup must be 32 bytes");
 inline uint8_t GetPlayerState(int32_t playerId = 0) {
     if (playerId < 0 || playerId > 1) playerId = 0;
     return *reinterpret_cast<const uint8_t*>(0x00B7CD98 + static_cast<uintptr_t>(playerId) * 0x190 + 0xD4);
+}
+
+// Verified against gta_sa.exe 1.0 US:
+//   CGarages::NumGarages @ 0x0096C024, CGarages::aGarages @ 0x0096C048 (stride 0xD8, m_nType @ +0x4C)
+//   CGarages::GetSafeHouseIndexForType @ 0x004489F0
+//   CGarage::IsPointInsideGarage(CVector) @ 0x00448740
+inline bool IsHideoutGarageType(uint8_t garageType) {
+    if (garageType == 16) return true; // GARAGE_HIDEOUT_ONE (index 0)
+    return reinterpret_cast<int32_t(__cdecl*)(int32_t)>(0x004489F0)(static_cast<int32_t>(garageType)) > 0;
+}
+
+inline int FindHideoutGarageIndexAt(const CVector& pos) {
+    int32_t count = *reinterpret_cast<const int32_t*>(0x0096C024);
+    if (count <= 0) return -1;
+    if (count > 50) count = 50;
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(0x0096C048);
+    using IsInsideFn = bool(__thiscall*)(const uint8_t*, CVector);
+    auto isInside = reinterpret_cast<IsInsideFn>(0x00448740);
+    for (int32_t i = 0; i < count; ++i) {
+        const uint8_t* g = base + static_cast<size_t>(i) * 0xD8;
+        if (!IsHideoutGarageType(g[0x4C])) continue;
+        if (isInside(g, pos)) return static_cast<int>(i);
+    }
+    return -1;
 }
 
 constexpr int MAX_PICKUPS = 620;

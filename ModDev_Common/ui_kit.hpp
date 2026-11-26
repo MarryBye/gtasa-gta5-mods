@@ -111,13 +111,15 @@ inline KeyTracker& Keys() {
 }
 
 // ============================================================================
-// UNIFIED MENU INPUT CONTROLLER (Shared Across ALL 6 Modules + Vanilla Restyler!)
-// Guarantees ONE identical control scheme everywhere:
-//   - Scroll: Mouse Wheel Up/Down, Up/Down Arrows, W/S
-//   - Pages/Tabs/Colors/Settings: Left/Right Arrows, A/D
-//   - Select/Buy: LMB, Enter, Space
-//   - Back/Exit:  RMB, Backspace, Esc (and F inside shops/vanilla menus)
-// Includes cross-DLL open debounce & post-close punch/aim shield via ModBus!
+// UNIFIED LIST INPUT CONTROLLER (Shared Across ALL 6 Modules + Vanilla Restyler!)
+// Single source of truth for EVERY list menu in the game:
+//   - Scroll list:  Mouse Wheel Up/Down, Up/Down Arrows, W/S
+//   - Tabs/Grids:   Left/Right Arrows, A/D
+//   - Select / Buy: F, LMB, or Enter
+//   - Back / Exit:  Backspace, Esc, or RMB  (Esc NEVER pops Pause Menu while closing!)
+//   - 3D Camera:    Q/E = Orbit camera around object/CJ, Z/X = Zoom in/out, C = Reset
+// All conflicting game actions for those keys are blocked automatically while active.
+// Exceptions (handled natively): HelpToast notifications, Story Phone (TAB/Enter), Ped Y/N!
 // ============================================================================
 struct MenuInput {
     bool up     = false;
@@ -127,6 +129,12 @@ struct MenuInput {
     bool accept = false;
     bool back   = false;
     bool del    = false;
+};
+
+struct CameraInput {
+    float orbitDelta = 0.0f; // Q (-) / E (+)
+    float zoomDelta  = 0.0f; // Z (-) zoom in / X (+) zoom out
+    bool  resetCam   = false; // C
 };
 
 struct MouseEdgeState {
@@ -146,7 +154,7 @@ inline void LockMenuInputBriefly(uint32_t ms = 200) {
     }
 }
 
-inline void TriggerPostCloseShield(uint32_t ms = 160) {
+inline void TriggerPostCloseShield(uint32_t ms = 180) {
     if (auto* b = modbus::GetBus()) {
         uint32_t tgt = GetTickCount() + ms;
         if (tgt > b->postCloseShieldMs) b->postCloseShieldMs = tgt;
@@ -155,58 +163,27 @@ inline void TriggerPostCloseShield(uint32_t ms = 160) {
 
 inline void UpdatePostCloseShield() {
     if (auto* b = modbus::GetBus(); b && b->postCloseShieldMs != 0) {
-        if (static_cast<int32_t>(GetTickCount() - b->postCloseShieldMs) < 0) {
-            // Block only attack/aim/mouse release so closing a menu NEVER blocks 'F' (Enter/Exit car) or driving!
+        const auto& k = Keys();
+        bool stillHoldingCloseOrSelect = k.IsDown(VK_ESCAPE) || k.IsDown(VK_RETURN) ||
+                                         k.IsDown('F') || k.IsDown(VK_LBUTTON) || k.IsDown(VK_RBUTTON);
+        bool timerActive = (static_cast<int32_t>(GetTickCount() - b->postCloseShieldMs) < 0);
+        if (timerActive || stillHoldingCloseOrSelect) {
             uint8_t* pad = sa::GetPad0();
             *reinterpret_cast<int16_t*>(pad + 0x0C) = 0; // RightShoulder1 (Aim)
             *reinterpret_cast<int16_t*>(pad + 0x22) = 0; // ButtonCircle (Fire/Punch)
+            // Keep Esc suppressed so closing a menu on Esc NEVER triggers Pause Menu!
+            *reinterpret_cast<int16_t*>(0x00B733A8) = 0;
+            // Suppress ButtonTriangle ONLY while F or Enter is STILL held down from the menu action!
+            if (k.IsDown(VK_RETURN) || k.IsDown('F')) {
+                *reinterpret_cast<int16_t*>(pad + 0x1E) = 0;
+                *reinterpret_cast<int16_t*>(pad + 0x4E) = 0;
+            }
             auto* ms = sa::GetNewMouseState();
             if (ms) { ms->lmb = 0; ms->rmb = 0; }
         } else {
             b->postCloseShieldMs = 0;
         }
     }
-}
-
-// Must be called once per frame while a menu is open (in PreScriptsTick BEFORE CTheScripts::Process!).
-// Consumes mouse/keyboard input and immediately blocks ALL CJ movement/combat/camera via ClearPadPhoneInputs()!
-inline MenuInput PollMenuInput(bool allowFBack = false, bool allowWheelScroll = true, bool blockPad = true) {
-    MenuInput out{};
-    auto* ms = sa::GetNewMouseState();
-    auto& me = MouseEdges();
-    const bool lmbNow  = ms && (ms->lmb != 0);
-    const bool rmbNow  = ms && (ms->rmb != 0);
-    const bool lmbJust = lmbNow && !me.prevLmb;
-    const bool rmbJust = rmbNow && !me.prevRmb;
-    const bool whUp    = allowWheelScroll && ms && (ms->wheelUp != 0);
-    const bool whDn    = allowWheelScroll && ms && (ms->wheelDown != 0);
-    me.prevLmb = lmbNow;
-    me.prevRmb = rmbNow;
-
-    bool debounced = false;
-    if (auto* b = modbus::GetBus(); b && b->menuInputUnlockMs != 0) {
-        if (static_cast<int32_t>(GetTickCount() - b->menuInputUnlockMs) < 0) {
-            debounced = true;
-        } else {
-            b->menuInputUnlockMs = 0;
-        }
-    }
-
-    if (!debounced) {
-        const auto& k = Keys();
-        out.up     = whUp || k.Repeated(VK_UP)   || k.Repeated('W');
-        out.down   = whDn || k.Repeated(VK_DOWN) || k.Repeated('S');
-        out.left   = k.JustPressed(VK_LEFT)  || k.JustPressed('A');
-        out.right  = k.JustPressed(VK_RIGHT) || k.JustPressed('D');
-        out.accept = lmbJust || k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE);
-        out.back   = rmbJust || k.JustPressed(VK_BACK)   || k.JustPressed(VK_ESCAPE) || (allowFBack && k.JustPressed('F'));
-        out.del    = k.JustPressed(VK_DELETE);
-    }
-
-    if (blockPad) {
-        sa::ClearPadPhoneInputs();
-    }
-    return out;
 }
 
 // Keep mouse edges synced even when a module's menu is closed so opening a menu while LMB is held won't false-fire!
@@ -217,15 +194,97 @@ inline void SyncIdleMouseEdges() {
     me.prevRmb = ms && (ms->rmb != 0);
 }
 
+class ListInputController {
+public:
+    // Poll unified list controls & block ALL conflicting player/vehicle/camera/Esc actions while list is active.
+    MenuInput Poll(bool blockPad = true) const {
+        MenuInput out{};
+        auto* ms = sa::GetNewMouseState();
+        auto& me = MouseEdges();
+        const bool lmbNow  = ms && (ms->lmb != 0);
+        const bool rmbNow  = ms && (ms->rmb != 0);
+        const bool lmbJust = lmbNow && !me.prevLmb;
+        const bool rmbJust = rmbNow && !me.prevRmb;
+        const bool whUp    = ms && (ms->wheelUp != 0);
+        const bool whDn    = ms && (ms->wheelDown != 0);
+        me.prevLmb = lmbNow;
+        me.prevRmb = rmbNow;
+
+        bool debounced = false;
+        if (auto* b = modbus::GetBus(); b && b->menuInputUnlockMs != 0) {
+            if (static_cast<int32_t>(GetTickCount() - b->menuInputUnlockMs) < 0) {
+                debounced = true;
+            } else {
+                b->menuInputUnlockMs = 0;
+            }
+        }
+
+        if (!debounced) {
+            const auto& k = Keys();
+            out.up     = whUp || k.Repeated(VK_UP)   || k.Repeated('W');
+            out.down   = whDn || k.Repeated(VK_DOWN) || k.Repeated('S');
+            out.left   = k.JustPressed(VK_LEFT)  || k.JustPressed('A');
+            out.right  = k.JustPressed(VK_RIGHT) || k.JustPressed('D');
+            out.accept = lmbJust || k.JustPressed(VK_RETURN) || k.JustPressed('F');
+            out.back   = rmbJust || k.JustPressed(VK_BACK)   || k.JustPressed(VK_ESCAPE);
+            out.del    = k.JustPressed(VK_DELETE);
+        }
+
+        if (blockPad) {
+            sa::ClearPadListInputs();
+        }
+        return out;
+    }
+
+    // Apply unified up/down wrap-around navigation to any list cursor with crisp SFX_SCROLL!
+    bool ApplyToCursor(int& cursor, int itemCount, const MenuInput& in, bool playSound = true) const {
+        if (itemCount <= 0) return false;
+        int prev = std::clamp(cursor, 0, itemCount - 1);
+        int next = prev;
+        if (in.up)        next = (prev - 1 + itemCount) % itemCount;
+        else if (in.down) next = (prev + 1) % itemCount;
+        if (next != prev) {
+            cursor = next;
+            if (playSound) sa::PlayFrontendSound(sa::SFX_SCROLL);
+            return true;
+        }
+        return false;
+    }
+
+    // Unified 3D preview camera orbit (Q/E) & zoom (Z/X) for Workshop, Clothes, Barber, Dealership, Ammu-Nation!
+    static CameraInput PollCamera(float dt, float orbitSpeed = 1.75f, float zoomSpeed = 2.2f) {
+        CameraInput cam{};
+        const auto& k = Keys();
+        if (k.IsDown('Q'))      cam.orbitDelta -= dt * orbitSpeed;
+        else if (k.IsDown('E')) cam.orbitDelta += dt * orbitSpeed;
+
+        if (k.IsDown('Z') || k.IsDown(VK_OEM_PLUS) || k.IsDown(VK_ADD))         cam.zoomDelta -= dt * zoomSpeed;
+        else if (k.IsDown('X') || k.IsDown(VK_OEM_MINUS) || k.IsDown(VK_SUBTRACT)) cam.zoomDelta += dt * zoomSpeed;
+
+        cam.resetCam = k.JustPressed('C');
+        return cam;
+    }
+};
+
+inline const ListInputController& ListInput() {
+    static const ListInputController s_ctrl;
+    return s_ctrl;
+}
+
+// Legacy wrapper forwarding straight to ui::ListInput().Poll() so every plugin shares identical controls!
+inline MenuInput PollMenuInput(bool /*unusedAllowFBack*/ = false, bool /*unusedAllowWheel*/ = true, bool blockPad = true) {
+    return ListInput().Poll(blockPad);
+}
+
 inline std::string StandardFooter(const char* acceptRus = "Выбрать", const char* acceptEng = "Select",
                                   const char* backRus   = "Назад",   const char* backEng   = "Back",
                                   const char* extraRus  = nullptr,   const char* extraEng  = nullptr)
 {
-    std::string s = Loc("ЛКМ/Enter - ", "LMB/Enter - ") + Loc(acceptRus, acceptEng);
+    std::string s = Loc("F/Enter/ЛКМ - ", "F/Enter/LMB - ") + Loc(acceptRus, acceptEng);
     if (extraRus && extraRus[0]) {
         s += " | " + Loc(extraRus, extraEng ? extraEng : extraRus);
     }
-    s += " | " + Loc("ПКМ/Back - ", "RMB/Back - ") + Loc(backRus, backEng);
+    s += " | " + Loc("Back/Esc/ПКМ - ", "Back/Esc/RMB - ") + Loc(backRus, backEng);
     return s;
 }
 
@@ -380,7 +439,7 @@ inline void Label(float x, float y, float maxWidthPx, const char* gameText,
     const float sw = static_cast<float>(std::max(640, sa::GetScreenWidth()));
     if (align == 0)      sa::font::SetCentreSize(sw);
     else if (align == 1) sa::font::SetWrapx(sw);
-    else                 sa::font::SetRightJustifyWrap(0.0f);
+    else                 sa::font::SetRightJustifyWrap(-10000.0f); // Prevent single-line right-aligned labels from wrapping onto row 0!
     sa::font::PrintString(x, y, gameText);
 }
 
@@ -423,11 +482,13 @@ inline void Header(float x, float y, float w, float h, float padX,
                    bool drawDivider = true, float badgeReserveRatio = 0.38f)
 {
     Rect(x, y, w, h, bgCol);
+    const float gapX     = rightBadge.empty() ? 0.0f : (5.0f * xScale);
     const float badgeRes = rightBadge.empty() ? 0.0f : (w * badgeReserveRatio);
-    Label(x + padX, y + 2.2f * sy, w - padX * 2.0f - badgeRes, title.c_str(),
+    const float titleW   = std::max(16.0f * xScale, w - padX * 2.0f - badgeRes - gapX);
+    Label(x + padX, y + 2.2f * sy, titleW, title.c_str(),
           2, titleSx, titleSy, 1, titleCol);
     if (!rightBadge.empty()) {
-        Label(x + w - padX, y + 3.2f * sy, badgeRes, rightBadge.c_str(),
+        Label(x + w - padX, y + 3.2f * sy, std::max(16.0f * xScale, badgeRes - gapX * 0.5f), rightBadge.c_str(),
               1, badgeSx, badgeSy, 2, badgeCol);
     }
     if (drawDivider && divCol.a > 0) {
@@ -608,23 +669,24 @@ public:
     int GetSelected() const { return m_selected; }
     int GetCount() const    { return static_cast<int>(m_rows.size()); }
 
-    MenuEvent Update(const KeyTracker& k, bool allowBack = true) {
+    MenuEvent Update(const KeyTracker& /*k*/, bool allowBack = true) {
         ClampSelection();
         const int n = static_cast<int>(m_rows.size());
+        auto in = ListInput().Poll(true);
         if (n > 0) {
-            if (k.Repeated(VK_UP) || k.Repeated('W')) {
+            if (in.up) {
                 m_selected = (m_selected - 1 + n) % n;
                 return {MenuSignalType::HoverChanged, m_selected, m_rows[m_selected].userId};
             }
-            if (k.Repeated(VK_DOWN) || k.Repeated('S')) {
+            if (in.down) {
                 m_selected = (m_selected + 1) % n;
                 return {MenuSignalType::HoverChanged, m_selected, m_rows[m_selected].userId};
             }
-            if (k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE)) {
+            if (in.accept) {
                 return {MenuSignalType::Activated, m_selected, m_rows[m_selected].userId};
             }
         }
-        if (allowBack && (k.JustPressed(VK_BACK) || k.JustPressed(VK_ESCAPE) || k.JustPressed('F'))) {
+        if (allowBack && in.back) {
             return {MenuSignalType::Back, m_selected, (n > 0) ? m_rows[m_selected].userId : 0};
         }
         return {};

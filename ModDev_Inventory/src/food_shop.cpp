@@ -233,7 +233,7 @@ void HandleSelect() {
 }
 
 void ProcessInput() {
-    auto in = ui::PollMenuInput(true, true, true);
+    auto in = ui::ListInput().Poll(true);
     int n = static_cast<int>(g_rows.size());
     if (n > 0) {
         if (in.up) {

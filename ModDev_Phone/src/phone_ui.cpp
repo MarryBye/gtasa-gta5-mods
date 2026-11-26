@@ -918,7 +918,7 @@ void PreScriptsTick() {
         StopPhoneAnim();
     }
 
-    auto in = ui::PollMenuInput(false, true, true);
+    auto in = ui::ListInput().Poll(true);
 
     // Calling animation screen: allow Backspace/Esc/RMB to hang up early, block all player inputs
     if (g_screen == Screen::CallingAnimation) {
@@ -965,7 +965,7 @@ void Render2D() {
     if (g_screen == Screen::CallingAnimation) {
         phone.SetHeader(ui::Loc("ВЫЗОВ...", "CALLING..."), g_callingNameGame)
              .SetBanner(ui::Loc("Соединение...", "Dialing..."), {125, 235, 135, 255})
-             .SetFooter(ui::Loc("ПКМ / Back - Сброс", "RMB / Back - Hang Up"))
+             .SetFooter(ui::Loc("Back/Esc/ПКМ - Сброс", "Back/Esc/RMB - Hang Up"))
              .AddItem(ui::Loc("Идёт гудок...", "Ringing..."), "...", {200, 200, 200, 255}, true)
              .SetSelected(0);
         phone.Render();
@@ -983,40 +983,40 @@ void Render2D() {
                 homeSub = ui::Loc("Профиль: ", "Profile: ") + sa::GetCoopPlayerProfileName(ov);
             }
             phone.SetHeader(ui::Loc("ТЕЛЕФОН", "MOBILE"), homeSub)
-                 .SetFooter(ui::Loc("Колесо/WASD | ЛКМ - Откр. | ПКМ/F6", "Wheel/WASD | LMB - Open | RMB/F6"));
+                 .SetFooter(ui::StandardFooter("Откр.", "Open", "Убрать", "Close"));
             break;
         }
         case Screen::Contacts:
             phone.SetHeader(ui::Loc("КОНТАКТЫ", "CONTACTS"), ui::Loc("Записная книжка", "Phonebook"))
-                 .SetFooter(ui::Loc("ЛКМ/Enter - Позвонить | ПКМ - Назад", "LMB/Enter - Call | RMB - Back"));
+                 .SetFooter(ui::StandardFooter("Позв.", "Call", "Назад", "Back"));
             break;
         case Screen::WardrobeMenu:
             phone.SetHeader(ui::Loc("ГАРДЕРОБ CJ", "CJ WARDROBE"), ui::Loc("Стиль и Наборы", "Style & Presets"))
-                 .SetFooter(ui::Loc("ЛКМ/Enter - Выбр. | ПКМ - Назад", "LMB/Enter - Pick | RMB - Back"));
+                 .SetFooter(ui::StandardFooter("Выбр.", "Pick", "Назад", "Back"));
             break;
         case Screen::WardrobeSlots:
             phone.SetHeader(ui::Loc("ОДЕЖДА CJ", "CLOTHES"), ui::Loc("Купленные вещи", "Owned Items"))
-                 .SetFooter(ui::Loc("ЛКМ/Enter - Откр. | ПКМ - Назад", "LMB/Enter - Open | RMB - Back"));
+                 .SetFooter(ui::StandardFooter("Откр.", "Open", "Назад", "Back"));
             break;
         case Screen::WardrobeSlotItems:
             phone.SetHeader(ui::Loc(wardrobe::SlotNameRus(g_activeSlot), wardrobe::SlotNameEng(g_activeSlot)),
                             ui::Loc("Из гардероба", "From Wardrobe"))
-                 .SetFooter(ui::Loc("ЛКМ/Enter - Надеть | ПКМ - Назад", "LMB/Enter - Wear | RMB - Back"));
+                 .SetFooter(ui::StandardFooter("Надеть", "Wear", "Назад", "Back"));
             break;
         case Screen::OutfitPresets:
             phone.SetHeader(ui::Loc("НАБОРЫ ОДЕЖДЫ", "OUTFIT PRESETS"), ui::Loc("Авто-переодевание", "Auto-Equip Rules"))
-                 .SetFooter(ui::Loc("ЛКМ/Enter - Настр. | ПКМ - Назад", "LMB/Enter - Edit | RMB - Back"));
+                 .SetFooter(ui::StandardFooter("Настр.", "Edit", "Назад", "Back"));
             break;
         case Screen::OutfitPresetActions: {
             char sub[32];
             std::snprintf(sub, sizeof(sub), "%s #%d", ui::Loc("Набор", "Outfit").c_str(), g_activePreset + 1);
             phone.SetHeader(ui::Loc("НАСТРОЙКА НАБОРА", "OUTFIT SETTINGS"), sub)
-                 .SetFooter(ui::Loc("ЛКМ/Enter - Прим. | ПКМ - Назад", "LMB/Enter - Apply | RMB - Back"));
+                 .SetFooter(ui::StandardFooter("Прим.", "Apply", "Назад", "Back"));
             break;
         }
         case Screen::Settings:
             phone.SetHeader(ui::Loc("НАСТРОЙКИ", "SETTINGS"), ui::Loc("Параметры трубки", "Handset Options"))
-                 .SetFooter(ui::Loc("ЛКМ / A-D - Изменить | ПКМ - Назад", "LMB / A-D - Change | RMB - Back"));
+                 .SetFooter(ui::StandardFooter("Изм.", "Change", "Назад", "Back", "A/D", "A/D"));
             break;
         default:
             break;

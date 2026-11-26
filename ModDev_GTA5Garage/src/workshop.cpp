@@ -1248,7 +1248,7 @@ void EnterStandaloneWorkshop(int shopIdx, sa::CVehicle* veh) {
 
     veh->MoveSpeed() = {0.0f, 0.0f, 0.0f};
     sa::ScriptCmd(0x0519).Int(h).Int(0).Run(); // NEVER freeze car position inside mod shop (0 hits in Rockstar carmod1.scm!)
-    sa::ScriptCmd(0x00AB).Int(h).Float(shop.intX).Float(shop.intY).Float(shop.intZ + 0.04f).Run();
+    sa::ScriptCmd(0x00AB).Int(h).Float(shop.intX).Float(shop.intY).Float(shop.intZ).Run();
     sa::ScriptCmd(0x0175).Int(h).Float(shop.intHeading).Run();
     sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run();
     sa::ScriptCmd(0x016A).Int(260).Int(1).Run();    // Smooth fade-in
@@ -1327,17 +1327,19 @@ void ExitStandaloneWorkshop() {
     g_workshopVeh    = nullptr;
     g_waitLeaveBox   = true;
     g_standaloneCooldownUntilMs = sa::GetTimeMs() + 4000;
+    ui::TriggerPostCloseShield(200);
     sa::PlayFrontendSound(sa::SFX_BACK);
 }
 
 void ProcessMenuInput(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
     if (g_typingPlate) {
+        sa::ClearPadListInputs(); // Keep Esc from opening Pause Menu while canceling plate text entry!
         ProcessPlateTypingInput(veh);
         return;
     }
 
-    // Unified controls: Wheel (when not zooming standalone 3D camera), Arrows, WASD, LMB/Enter/Space = Select, RMB/Back/Esc/F = Back
-    auto in = ui::PollMenuInput(true, !g_standaloneMode, false);
+    // Unified ListInputController: Wheel/Arrows/WASD = Scroll, F/Enter/LMB = Select, Backspace/Esc/RMB = Back/Exit!
+    auto in = ui::ListInput().Poll(true);
 
     if (g_inSubmenu) {
         int n = static_cast<int>(g_subOptions.size());
@@ -1515,16 +1517,12 @@ void PostScriptsTick() {
     if (sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) return;
     vehmods::EnsureLoaded();
 
-    // Smart Part Auto-Focus + Manual Orbit (Q/E, Arrows) + Zoom (Mouse Wheel / Z,X / +,-) inside Mod Shop Interior!
+    // Smart Part Auto-Focus + Manual Orbit (Q/E) + Zoom (Z/X) inside Mod Shop Interior!
     if (g_standaloneMode && sa::IsVehicleValid(g_workshopVeh)) {
-        // Keep car parked horizontally WITHOUT calling FREEZE_CAR_POSITION(h, 1):
-        // leaving MoveSpeed.z free lets GTA SA's own suspension hold the chassis at its exact natural ride height!
+        // Keep car parked horizontally ONLY (NEVER call 0x04BA SET_CAR_FORWARD_SPEED per frame because 0x04BA zeroes MoveSpeed.z
+        // and causes slow-motion feather-fall in mid-air!). Leaving MoveSpeed.z untouched lets gravity & suspension settle instantaneously!
         g_workshopVeh->MoveSpeed().x = 0.0f;
         g_workshopVeh->MoveSpeed().y = 0.0f;
-        int32_t h = sa::GetVehicleHandle(g_workshopVeh);
-        if (h > 0) {
-            sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run();
-        }
 
         // Clear any leftover vanilla "cannot modify this vehicle" help popup right after entering!
         if (g_standaloneEnteredMs != 0 && (sa::GetTimeMs() - g_standaloneEnteredMs) < 1500) {
@@ -1533,40 +1531,17 @@ void PostScriptsTick() {
 
         float dt = std::clamp(sa::GetTimeStep() / 50.0f, 0.001f, 0.05f);
         if (!g_typingPlate) {
-            const auto& k = ui::Keys();
-            bool rotLeft  = k.IsDown('Q') || k.IsDown(VK_LEFT);
-            bool rotRight = k.IsDown('E') || k.IsDown(VK_RIGHT);
-            if (rotLeft) {
-                g_camOrbitAngle -= dt * 1.75f;
-                g_camTargetAngle = g_camOrbitAngle;
-                g_camAutoLerp    = false;
-            } else if (rotRight) {
-                g_camOrbitAngle += dt * 1.75f;
+            auto cam = ui::ListInputController::PollCamera(dt, 1.75f, 2.2f);
+            if (cam.orbitDelta != 0.0f) {
+                g_camOrbitAngle += cam.orbitDelta;
                 g_camTargetAngle = g_camOrbitAngle;
                 g_camAutoLerp    = false;
             }
-
-            // Zoom in / out via Mouse Wheel OR Z/X OR +/- keys (clamped inside room walls!)
-            auto* ms = sa::GetNewMouseState();
-            if (ms && ms->wheelUp) {
-                g_camTargetDist = std::clamp(g_camTargetDist - 0.34f, 2.05f, 5.45f);
-                g_camDist       = std::clamp(g_camDist - 0.34f, 2.05f, 5.45f);
-                ms->wheelUp     = 0;
-            } else if (ms && ms->wheelDown) {
-                g_camTargetDist = std::clamp(g_camTargetDist + 0.34f, 2.05f, 5.45f);
-                g_camDist       = std::clamp(g_camDist + 0.34f, 2.05f, 5.45f);
-                ms->wheelDown   = 0;
-            }
-            if (k.IsDown('Z') || k.IsDown(VK_OEM_PLUS) || k.IsDown(VK_ADD)) {
-                g_camTargetDist = std::clamp(g_camTargetDist - dt * 2.2f, 2.05f, 5.45f);
-                g_camDist       = g_camTargetDist;
-            } else if (k.IsDown('X') || k.IsDown(VK_OEM_MINUS) || k.IsDown(VK_SUBTRACT)) {
-                g_camTargetDist = std::clamp(g_camTargetDist + dt * 2.2f, 2.05f, 5.45f);
+            if (cam.zoomDelta != 0.0f) {
+                g_camTargetDist = std::clamp(g_camTargetDist + cam.zoomDelta, 2.05f, 5.45f);
                 g_camDist       = g_camTargetDist;
             }
-
-            // 'C' snaps/focuses smoothly back onto the active category's ideal camera angle!
-            if (k.JustPressed('C')) {
+            if (cam.resetCam) {
                 FocusCameraForCategory(g_inSubmenu ? g_activeSubCat : CategoryId::VanillaItem, g_workshopVeh, false);
             }
         }
@@ -1714,7 +1689,7 @@ void Render2D() {
         spec.colLeftGame  = ui::Loc("КАТЕГОРИЯ", "CATEGORY");
         spec.colRightGame = ui::Loc("СТАТУС", "STATUS");
         spec.footerGame   = g_standaloneMode
-            ? ui::StandardFooter("Выбр.", "Sel", "Выход", "Exit", "Q/E Кам. | Зум", "Q/E Cam | Zoom")
+            ? ui::StandardFooter("Выбр.", "Sel", "Выход", "Exit", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom")
             : ui::StandardFooter("Выбрать", "Select", "Выход", "Exit");
         spec.selectedIndex = g_mainCursor;
 
@@ -1738,7 +1713,7 @@ void Render2D() {
         spec.colLeftGame  = ui::Loc("УЛУЧШЕНИЕ", "UPGRADE");
         spec.colRightGame = ui::Loc("ЦЕНА", "PRICE");
         spec.footerGame   = g_standaloneMode
-            ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "Q/E Кам. | Зум", "Q/E Cam | Zoom")
+            ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom")
             : ui::StandardFooter("Купить", "Buy", "Назад", "Back");
         spec.selectedIndex = g_subCursor;
 

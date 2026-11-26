@@ -212,7 +212,7 @@ void PreScriptsTick() {
         return;
     }
 
-    auto in = ui::PollMenuInput(false, true, true);
+    auto in = ui::ListInput().Poll(true);
     bool f6Close = (phoneInstalled && k.JustPressed(VK_F6));
 
     if (g_screen == Screen::Categories) {

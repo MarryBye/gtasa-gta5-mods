@@ -385,8 +385,8 @@ void HandleSelect() {
             wstore::Store().SaveToDisk();
             wmods::ForceRefresh(true);
             sa::PlayFrontendSound(sa::SFX_BUY);
-            ui::ShowHelp("Куплено! Нажмите ~g~Enter~w~ ещё раз для тюнинга.",
-                         "Purchased! Press ~g~Enter~w~ again to customize.");
+            ui::ShowHelp("Куплено! Нажмите ~g~F/Enter~w~ ещё раз для тюнинга.",
+                         "Purchased! Press ~g~F/Enter~w~ again to customize.");
             return;
         }
 
@@ -517,7 +517,7 @@ void HandleBack() {
 }
 
 void ProcessMenuInput() {
-    auto in = ui::PollMenuInput(true, true, true);
+    auto in = ui::ListInput().Poll(true);
 
     int* curPtr = nullptr;
     int  count  = 0;
@@ -762,14 +762,16 @@ void PostScriptsTick() {
     if (g_inspectCamActive) {
         sa::CPed* ped = sa::FindPlayerPed(0);
         if (sa::IsPedValid(ped)) {
+            static float s_inspectDist = 1.25f;
             float dt = std::clamp(sa::GetTimeStep() / 50.0f, 0.001f, 0.05f);
-            if (ui::Keys().IsDown('Q') || ui::Keys().IsDown(VK_LEFT))       g_camOrbitAngle -= dt * 1.75f;
-            else if (ui::Keys().IsDown('E') || ui::Keys().IsDown(VK_RIGHT)) g_camOrbitAngle += dt * 1.75f;
+            auto cam = ui::ListInputController::PollCamera(dt, 1.75f, 1.35f);
+            g_camOrbitAngle += cam.orbitDelta;
+            s_inspectDist = std::clamp(s_inspectDist + cam.zoomDelta, 0.85f, 2.00f);
+            if (cam.resetCam) s_inspectDist = 1.25f;
 
             sa::CVector p = ped->GetPosition();
-            float dist = 1.25f;
-            float camX = p.x + std::cos(g_camOrbitAngle) * dist;
-            float camY = p.y + std::sin(g_camOrbitAngle) * dist;
+            float camX = p.x + std::cos(g_camOrbitAngle) * s_inspectDist;
+            float camY = p.y + std::sin(g_camOrbitAngle) * s_inspectDist;
             float camZ = p.z + 0.32f;
 
             sa::ScriptCmd(0x015F).Float(camX).Float(camY).Float(camZ).Float(0.0f).Float(0.0f).Float(0.0f).Run();
@@ -917,7 +919,7 @@ void Render2D() {
         spec.titleGame     = def ? ui::Loc(def->nameRus, def->nameEng) : ui::Loc("ОРУЖИЕ", "WEAPON");
         spec.colLeftGame   = ui::Loc("МОДУЛИ И ПАТРОНЫ", "MODS & AMMO");
         spec.colRightGame  = ui::Loc("СТАТУС", "STATUS");
-        spec.footerGame    = ui::StandardFooter("Выбр.", "Pick", "Назад", "Back", "Q/E - Осм.", "Q/E - Cam");
+        spec.footerGame    = ui::StandardFooter("Выбр.", "Pick", "Назад", "Back", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom");
         spec.selectedIndex = g_modCursor;
 
         int curAmmo = def ? wstore::Store().GetWeaponAmmo(ped, def) : 0;
@@ -957,7 +959,7 @@ void Render2D() {
         spec.titleGame     = ModSlotTitle(g_activeModSlot);
         spec.colLeftGame   = ui::Loc("ВАРИАНТ", "PART");
         spec.colRightGame  = ui::Loc("ЦЕНА", "PRICE");
-        spec.footerGame    = ui::StandardFooter("Уст.", "Equip", "Назад", "Back", "Q/E - Осм.", "Q/E - Cam");
+        spec.footerGame    = ui::StandardFooter("Уст.", "Equip", "Назад", "Back", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom");
         spec.selectedIndex = g_optCursor;
 
         for (const auto& opt : g_slotOptions) {

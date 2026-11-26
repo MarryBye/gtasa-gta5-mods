@@ -97,6 +97,18 @@ struct OwnedVehicle {
     VehicleWear       wear{};
 };
 
+// Persists tuning, custom plate, universal mods & mechanical wear across vanilla GTA SA safehouse garage storage!
+constexpr int MAX_SAFEHOUSE_CARS = 32;
+struct SafehouseCarRecord {
+    bool              occupied        = false;
+    int               hideoutGarageId = -1; // Index into CGarages::aGarages
+    int               personalSlotIdx = -1; // 0..9 if registered personal vehicle, -1 if unregistered tuned car
+    int32_t           modelId         = 0;
+    VisualAppearance  visuals{};
+    PerformanceTuning tuning{};
+    VehicleWear       wear{};
+};
+
 inline bool HasAnyCustomTuning(const PerformanceTuning& t) {
     return t.engineLevel > 0 || t.transmissionLevel > 0 || t.suspensionLevel > 0 ||
            t.brakesLevel > 0 || t.tiresGripLevel > 0 || t.armorLevel > 0 ||

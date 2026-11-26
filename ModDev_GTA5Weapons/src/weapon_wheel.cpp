@@ -567,26 +567,25 @@ void Render2D() {
         auto statPct = [](uint16_t sid) -> int {
             return std::clamp(static_cast<int>(std::round(sa::stats::Get(sid) * 0.1f)), 0, 100);
         };
+        int maxHp   = std::max(100, static_cast<int>(std::round(ped->GetMaxHealth())));
+        int hp      = std::clamp(static_cast<int>(std::round(ped->GetHealth())), 0, maxHp);
+        int arm     = std::clamp(static_cast<int>(std::round(ped->GetArmor())), 0, 100);
         int respect = statPct(sa::stats::STAT_RESPECT);
         int stamina = statPct(sa::stats::STAT_STAMINA);
         int muscle  = statPct(sa::stats::STAT_MUSCLE);
         int fat     = statPct(sa::stats::STAT_FAT);
         int sexy    = statPct(sa::stats::STAT_SEX_APPEAL);
-        int hp      = static_cast<int>(std::round(ped->GetHealth()));
-        int arm     = static_cast<int>(std::round(ped->GetArmor()));
-
-        char vitalsBuf[48];
-        std::snprintf(vitalsBuf, sizeof(vitalsBuf), "HP %d | %s %d%%",
-                      hp, ui::Loc("Броня", "Arm").c_str(), arm);
 
         ui::StatsCard cjCard;
-        cjCard.SetTitle(ui::Loc("ПЕРСОНАЖ", "CJ STATS"), vitalsBuf)
-              .SetAnchorBottomLeft(148.0f, 16.0f, 18.0f)
-              .AddBar(ui::Loc("Уважение",     "Respect"),    respect, respect, 100, "%")
-              .AddBar(ui::Loc("Выносливость", "Stamina"),    stamina, stamina, 100, "%")
-              .AddBar(ui::Loc("Мускулы",      "Muscle"),     muscle,  muscle,  100, "%")
-              .AddBar(ui::Loc("Жир",          "Fat"),        fat,     fat,     100, "%")
-              .AddBar(ui::Loc("Привлекат.",   "Sex Appeal"), sexy,    sexy,    100, "%");
+        cjCard.SetTitle(ui::Loc("ПЕРСОНАЖ", "CJ STATS"))
+              .SetAnchorBottomLeft(154.0f, 16.0f, 18.0f)
+              .AddBar(ui::Loc("Здоровье",     "Health"),     hp,      hp,      maxHp, "")
+              .AddBar(ui::Loc("Броня",        "Armor"),      arm,     arm,     100,   "%")
+              .AddBar(ui::Loc("Уважение",     "Respect"),    respect, respect, 100,   "%")
+              .AddBar(ui::Loc("Выносливость", "Stamina"),    stamina, stamina, 100,   "%")
+              .AddBar(ui::Loc("Мускулы",      "Muscle"),     muscle,  muscle,  100,   "%")
+              .AddBar(ui::Loc("Жир",          "Fat"),        fat,     fat,     100,   "%")
+              .AddBar(ui::Loc("Привлекат.",   "Sex Appeal"), sexy,    sexy,    100,   "%");
         cjCard.Render();
     }
 

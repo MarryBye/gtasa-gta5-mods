@@ -49,16 +49,19 @@ std::vector<int>             g_slotItems;   // Clothes or Haircuts catalog indic
 
 wardrobe::ClothSnapshot      g_savedSnap{};
 bool                         g_camActive        = false;
-float                        g_camAngle         = 0.0f;  // Open-aisle world angle from CJ -> camera
-float                        g_camDist          = 2.0f;  // Safe unobstructed distance
+float                        g_camAngle         = 0.0f;  // Interactive 360° camera orbit around CJ (Q/E)
+float                        g_camBaseAngle     = 0.0f;  // Default front-facing camera angle (for C reset)
+float                        g_camDist          = 2.0f;  // Base unobstructed showroom distance
+float                        g_camZoomOffset    = 0.0f;  // Interactive Z/X camera zoom offset
 sa::CVector                  g_savedPos{};               // CJ's original fitting booth position
 bool                         g_hasSavedPos      = false;
 sa::CVector                  g_showroomPos{};            // Bright open showroom floor position
 float                        g_savedHeadingDeg  = 0.0f;  // CJ heading before entering clothes shop
 bool                         g_hasSavedHeading  = false;
-float                        g_pedYawDeg        = 0.0f;  // Interactive 360° CJ rotation angle (Clothes)
+float                        g_pedYawDeg        = 0.0f;  // Fixed front-facing showroom heading for CJ
 float                        g_barberBaseAngle  = 0.0f;  // Base front angle of barber chair
 float                        g_barberOrbitOff   = 0.0f;  // Interactive camera orbit offset (Barber)
+float                        g_barberZoomOffset = 0.0f;  // Interactive Z/X camera zoom offset (Barber)
 
 // Verified open showroom floor coordinates for all 6 GTA SA clothing store interiors (from data\maps\interior\gen_int5.ipl)!
 // Moves CJ out of the closed fitting-room cubicle behind the curtain onto the bright, unobstructed main showroom floor.
@@ -199,7 +202,9 @@ void BeginClothesPreviewCam(sa::CPed* ped) {
         g_camDist  = std::clamp(clearD[bestIdx] - 0.32f, 1.45f, 2.20f);
     }
 
-    // Turn CJ directly toward our open-aisle showroom camera!
+    // Turn CJ cleanly forward facing the initial open showroom aisle (camera will orbit around CJ on Q/E!)
+    g_camBaseAngle  = g_camAngle;
+    g_camZoomOffset = 0.0f;
     float toCamX = std::cos(g_camAngle);
     float toCamY = std::sin(g_camAngle);
     g_pedYawDeg  = std::atan2(-toCamX, toCamY) * (180.0f / kPi);
@@ -211,10 +216,11 @@ void BeginClothesPreviewCam(sa::CPed* ped) {
 
 void BeginBarberPreviewCam(sa::CPed* ped) {
     if (!sa::IsPedValid(ped)) return;
-    sa::CVector fwd   = ped->GetForward();
-    g_barberBaseAngle = std::atan2(fwd.y, fwd.x);
-    g_barberOrbitOff  = 0.0f;
-    g_camActive       = true;
+    sa::CVector fwd    = ped->GetForward();
+    g_barberBaseAngle  = std::atan2(fwd.y, fwd.x);
+    g_barberOrbitOff   = 0.0f;
+    g_barberZoomOffset = 0.0f;
+    g_camActive        = true;
 }
 
 void EndPreviewCam() {
@@ -376,7 +382,7 @@ void HandleBack() {
 }
 
 void ProcessInput() {
-    auto in = ui::PollMenuInput(true, true, true);
+    auto in = ui::ListInput().Poll(true);
     int* cur = (g_mode == ShopMode::Clothes && g_screen == Screen::Categories) ? &g_catCursor : &g_itemCursor;
     int  cnt = (g_mode == ShopMode::Clothes && g_screen == Screen::Categories)
         ? static_cast<int>(g_availSlots.size())
@@ -508,12 +514,11 @@ void PostScriptsTick() {
     if (!sa::IsPedValid(ped)) return;
 
     float dt = std::clamp(sa::GetTimeStep() / 50.0f, 0.001f, 0.05f);
-    const auto& k = ui::Keys();
+    auto cam = ui::ListInputController::PollCamera(dt, 1.85f, 1.40f);
     int32_t pedH  = sa::GetPedHandle(ped);
 
     if (g_mode == ShopMode::Clothes) {
-        // Guarantee CJ stays visible in the open showroom (even if cloth.sc tries to pull him into the booth!)
-        // and rotates 360° smoothly on Q/E or Left/Right!
+        // Keep CJ standing steadily in the bright open showroom while CAMERA orbits 360° around him (Q/E) & zooms (Z/X)!
         if (pedH > 0) {
             sa::CVector curP = ped->GetPosition();
             if (g_hasSavedPos && curP.Dist2D(g_showroomPos) > 0.45f) {
@@ -521,32 +526,43 @@ void PostScriptsTick() {
                 sa::ScriptCmd(0x04D7).Int(pedH).Int(1).Run();
             }
             sa::ScriptCmd(0x0337).Int(pedH).Int(1).Run(); // SET_CHAR_VISIBLE(ped, TRUE)
-            if (k.IsDown('Q') || k.IsDown(VK_LEFT))        g_pedYawDeg -= dt * 125.0f;
-            else if (k.IsDown('E') || k.IsDown(VK_RIGHT))  g_pedYawDeg += dt * 125.0f;
-            sa::ScriptCmd(0x0173).Int(pedH).Float(g_pedYawDeg).Run(); // SET_CHAR_HEADING
+            sa::ScriptCmd(0x0173).Int(pedH).Float(g_pedYawDeg).Run(); // Hold CJ facing forward steadily!
+        }
+
+        g_camAngle     += cam.orbitDelta;
+        g_camZoomOffset = std::clamp(g_camZoomOffset + cam.zoomDelta, -0.95f, 0.85f);
+        if (cam.resetCam) {
+            g_camAngle      = g_camBaseAngle;
+            g_camZoomOffset = 0.0f;
         }
 
         sa::CVector p = ped->GetPosition();
-        float dist  = g_camDist;
-        float camZ  = p.z + 0.30f;
-        float lookZ = p.z + 0.06f;
+        float baseDist = g_camDist;
+        float camZ     = p.z + 0.30f;
+        float lookZ    = p.z + 0.06f;
 
         if (g_screen == Screen::Items && g_catCursor >= 0 && g_catCursor < static_cast<int>(g_availSlots.size())) {
             int slotIdx = g_availSlots[g_catCursor];
             if (slotIdx == 2) { // Shoes -> frame feet cleanly
-                dist  = std::min(g_camDist, 1.65f);
-                camZ  = p.z - 0.12f;
-                lookZ = p.z - 0.45f;
+                baseDist = std::min(g_camDist, 1.65f);
+                camZ     = p.z - 0.12f;
+                lookZ    = p.z - 0.45f;
             } else if (slotIdx == 5 || slotIdx == 6) { // Glasses / Hats -> close-up on head
-                dist  = std::min(g_camDist, 1.32f);
-                camZ  = p.z + 0.62f;
-                lookZ = p.z + 0.56f;
+                baseDist = std::min(g_camDist, 1.32f);
+                camZ     = p.z + 0.62f;
+                lookZ    = p.z + 0.56f;
             } else if (slotIdx == 3 || slotIdx == 4) { // Chains / Watches -> upper torso
-                dist  = std::min(g_camDist, 1.55f);
-                camZ  = p.z + 0.42f;
-                lookZ = p.z + 0.28f;
+                baseDist = std::min(g_camDist, 1.55f);
+                camZ     = p.z + 0.42f;
+                lookZ    = p.z + 0.28f;
             }
         }
+
+        // Dynamic wall/rack collision clamp so 360° orbit + Z/X zoom NEVER clips behind interior walls!
+        float desiredDist = std::clamp(baseDist + g_camZoomOffset, 0.88f, 2.75f);
+        sa::CVector rayOrigin{p.x, p.y, lookZ + 0.15f};
+        float clearD = ProbeRayClearDist(rayOrigin, g_camAngle, desiredDist + 0.22f);
+        float dist   = std::clamp(clearD - 0.22f, 0.72f, desiredDist);
 
         float cosA = std::cos(g_camAngle);
         float sinA = std::sin(g_camAngle);
@@ -562,15 +578,19 @@ void PostScriptsTick() {
         sa::ScriptCmd(0x015F).Float(camX).Float(camY).Float(camZ).Float(0.0f).Float(0.0f).Float(0.0f).Run();
         sa::ScriptCmd(0x0160).Float(lookX).Float(lookY).Float(lookZ).Int(2).Run();
     } else if (g_mode == ShopMode::Barber) {
-        if (k.IsDown('Q') || k.IsDown(VK_LEFT))       g_barberOrbitOff -= dt * 1.65f;
-        else if (k.IsDown('E') || k.IsDown(VK_RIGHT)) g_barberOrbitOff += dt * 1.65f;
-        g_barberOrbitOff = std::clamp(g_barberOrbitOff, -2.0f, 2.0f);
+        g_barberOrbitOff   = std::clamp(g_barberOrbitOff + cam.orbitDelta, -2.0f, 2.0f);
+        g_barberZoomOffset = std::clamp(g_barberZoomOffset + cam.zoomDelta, -0.40f, 0.55f);
+        if (cam.resetCam) {
+            g_barberOrbitOff   = 0.0f;
+            g_barberZoomOffset = 0.0f;
+        }
 
         sa::CVector p = ped->GetPosition();
         float ang     = g_barberBaseAngle + g_barberOrbitOff;
         sa::CVector headPos{p.x, p.y, p.z + 0.58f};
-        float clearD  = ProbeRayClearDist(headPos, ang, 1.38f);
-        float dist    = std::clamp(clearD - 0.22f, 0.72f, 1.15f);
+        float desired = std::clamp(1.15f + g_barberZoomOffset, 0.72f, 1.65f);
+        float clearD  = ProbeRayClearDist(headPos, ang, desired + 0.22f);
+        float dist    = std::clamp(clearD - 0.22f, 0.65f, desired);
 
         float cosA = std::cos(ang);
         float sinA = std::sin(ang);
@@ -599,7 +619,7 @@ void Render2D() {
         const auto& hairs = wardrobe::HairCatalog();
         menu.SetTitle(ui::Loc(g_activeShop->nameRus.c_str(), g_activeShop->nameEng.c_str()))
             .SetColumns(ui::Loc("ПРИЧЁСКА", "HAIRCUT"), ui::Loc("ЦЕНА", "PRICE"))
-            .SetFooter(ui::StandardFooter("Подстричься", "Buy Cut", "Встать", "Leave", "Q/E - Осм.", "Q/E - Cam"));
+            .SetFooter(ui::StandardFooter("Подстричься", "Buy Cut", "Встать", "Leave", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom"));
 
         for (int hairIdx : g_slotItems) {
             const auto& item = hairs[hairIdx];
@@ -630,7 +650,7 @@ void Render2D() {
     if (g_screen == Screen::Categories) {
         menu.SetTitle(ui::Loc(g_activeShop->nameRus.c_str(), g_activeShop->nameEng.c_str()))
             .SetColumns(ui::Loc("КАТЕГОРИЯ ОДЕЖДЫ", "CLOTHING CATEGORY"), ui::Loc("КУПЛЕНО", "OWNED"))
-            .SetFooter(ui::StandardFooter("Выбр.", "Select", "Выход", "Exit", "Q/E - Поворот", "Q/E - Spin"));
+            .SetFooter(ui::StandardFooter("Выбр.", "Select", "Выход", "Exit", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom"));
 
         for (int slotIdx : g_availSlots) {
             uint32_t bp = wardrobe::kSlotBodyParts[slotIdx];
@@ -651,7 +671,7 @@ void Render2D() {
         int slotIdx = g_availSlots[std::clamp(g_catCursor, 0, static_cast<int>(g_availSlots.size()) - 1)];
         menu.SetTitle(ui::Loc(wardrobe::SlotNameRus(slotIdx), wardrobe::SlotNameEng(slotIdx)))
             .SetColumns(ui::Loc("ОДЕЖДА", "ITEM"), ui::Loc("ЦЕНА / СТАТУС", "PRICE / STATUS"))
-            .SetFooter(ui::StandardFooter("Куп./Над.", "Buy/Wear", "Назад", "Back", "Q/E - Поворот", "Q/E - Spin"));
+            .SetFooter(ui::StandardFooter("Куп./Над.", "Buy/Wear", "Назад", "Back", "Q/E Кам. | Z/X Зум", "Q/E Cam | Z/X Zoom"));
 
         for (int idx : g_slotItems) {
             const auto& item = cat[idx];
