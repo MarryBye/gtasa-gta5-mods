@@ -4,15 +4,37 @@
 #include "config.hpp"
 #include "log.hpp"
 #include "memory.hpp"
+#include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "ui_kit.hpp"
 #include "weapon_audio.hpp"
+#include "weapon_data.hpp"
 #include "weapon_mods.hpp"
 #include "weapon_storage.hpp"
 #include "weapon_visuals.hpp"
 #include "weapon_wheel.hpp"
 
 namespace {
+
+bool __cdecl BusIsWeaponsUiOpen() { return ammu::IsShopActive() || wheel::IsWheelOpen(); }
+bool __cdecl BusIsAmmuClaimed()   { return ammu::IsShopActive(); }
+int  __cdecl BusGetOwnedWeaponCount() {
+    sa::CPed* ped = sa::FindPlayerPed(0);
+    int own = 0;
+    for (size_t i = 0; i < wdata::kWeaponCount; ++i) {
+        if (wdata::kWeapons[i].soldInShop && wstore::Store().PlayerHasWeaponOrOwned(ped, wdata::kWeapons[i].id)) {
+            ++own;
+        }
+    }
+    return own;
+}
+void __cdecl BusGetArsenalSummary(char* outBuf, int bufSize) {
+    if (!outBuf || bufSize <= 0) return;
+    int own = BusGetOwnedWeaponCount();
+    sa::CPed* ped = sa::FindPlayerPed(0);
+    int arm = sa::IsPedValid(ped) ? static_cast<int>(ped->GetArmor() + 0.5f) : 0;
+    std::snprintf(outBuf, static_cast<size_t>(bufSize), "%d / %d%%", own, arm);
+}
 
 using FnVoid      = void(__cdecl*)();
 using FnIntArg    = void(__cdecl*)(int32_t);
@@ -144,7 +166,15 @@ void InstallAllHooks() {
     wvis::InstallHooks();
     waudio::InstallHooks();
 
-    modlog::Info("[Init] All GTA5AmmuNation v1.1 hooks installed cleanly (Wheel + Multi-Weapon + 3D Attachments + Audio)!");
+    if (auto* b = modbus::GetBus()) {
+        b->weaponsInstalled      = true;
+        b->weaponsIsAnyMenuOpen  = &BusIsWeaponsUiOpen;
+        b->weaponsGetOwnedCount  = &BusGetOwnedWeaponCount;
+        b->weaponsGetSummary     = &BusGetArsenalSummary;
+    }
+    modbus::RegisterPanelClaim("AMMU", &BusIsAmmuClaimed);
+
+    modlog::Info("[Init] All GTA5AmmuNation v1.2 hooks & UIKit/Inventory Bus registered cleanly!");
 }
 
 } // namespace

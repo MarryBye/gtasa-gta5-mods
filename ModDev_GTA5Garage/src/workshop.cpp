@@ -37,29 +37,30 @@ constexpr ModShopGarage kModShops[5] = {
     {"BODLAWN", "TransFender", "TransFender",
      1037.0f, 1069.5f, -1027.0f, -994.0f, 30.0f, 40.0f, 1041.8f, -1018.0f, 32.1f,
      1, 617.536f, -1.990f, 999.980f, 90.0f,
-     1041.8f, -1029.5f, 32.1f, 180.0f},
+     1041.8f, -1034.8f, 32.1f, 180.0f},
     {"MODLAST", "Loco Low Co.", "Loco Low Co.",
      2639.5f, 2650.5f, -2051.5f, -2038.0f, 11.5f, 17.5f, 2644.9f, -2044.8f, 13.5f,
      2, 616.783f, -74.815f, 997.014f, 90.0f,
-     2644.9f, -2035.5f, 13.55f, 0.0f},
+     2644.9f, -2031.0f, 13.55f, 0.0f},
     {"MDSSFSE", "TransFender", "TransFender",
      -1942.5f, -1929.5f, 238.5f, 253.0f, 32.5f, 39.5f, -1935.8f, 245.6f, 34.4f,
      1, 617.536f, -1.990f, 999.980f, 90.0f,
-     -1935.8f, 235.5f, 34.4f, 180.0f},
+     -1935.8f, 230.8f, 34.4f, 180.0f},
     {"MDS1SFS", "Wheel Arch Angels", "Wheel Arch Angels",
      -2730.0f, -2715.0f, 211.0f, 224.0f, 2.5f, 9.5f, -2722.4f, 217.5f, 4.5f,
      3, 615.286f, -124.239f, 996.995f, 90.0f,
-     -2711.0f, 217.5f, 4.4f, 270.0f},
+     -2707.5f, 217.5f, 4.4f, 270.0f},
     {"VECMOD", "TransFender", "TransFender",
      2381.0f, 2392.5f, 1042.5f, 1061.0f, 8.8f, 15.0f, 2386.7f, 1051.9f, 10.8f,
      1, 617.536f, -1.990f, 999.980f, 90.0f,
-     2386.7f, 1038.5f, 10.8f, 180.0f},
+     2386.7f, 1034.8f, 10.8f, 180.0f},
 };
 
 enum class CategoryId {
     VanillaItem = 0,
     // Standalone / Universal Visual Tuning
     Repair,
+    Maintenance, // ETS 2-style Per-Part Mechanical Wear & Overhaul!
     Paintjob,
     PaintPrimary,
     PaintSecondary,
@@ -127,6 +128,8 @@ uint32_t      g_insideStartMs     = 0;
 uint32_t      g_standaloneEnteredMs = 0;
 uint32_t      g_standaloneCooldownUntilMs = 0;
 bool          g_waitLeaveBox      = false;
+int           g_doorBlockedShopIdx = -1;
+bool          g_doorOpened[5]     = {false, false, false, false, false};
 bool          g_workshopFrozen    = false;
 uint32_t      g_workshopSettleUntilMs = 0;
 
@@ -252,6 +255,17 @@ void RebuildMainEntries(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
     if (!veh) return;
     const bool isFourWheel = veh->IsFourWheelLike();
     const auto cur = GetCurrentVehTuning(veh);
+
+    // ETS 2-style Mechanical Wear & Maintenance entry (shown in BOTH Mode A & Mode B!)
+    if (mod::Config().enableWearSystem) {
+        auto wear = tuning::GetLiveWear(veh);
+        int avgW  = static_cast<int>(std::round(wear.Average()));
+        char wbuf[32];
+        if (avgW > 0) std::snprintf(wbuf, sizeof(wbuf), "%s %d%%", ui::Loc("Износ", "Wear").c_str(), avgW);
+        else          std::snprintf(wbuf, sizeof(wbuf), "%s", ui::Loc("Идеал 0%", "Mint 0%").c_str());
+        g_mainEntries.push_back({CategoryId::Maintenance, -1,
+            ui::Loc("ТО и Состояние узлов", "Maintenance & Wear"), wbuf});
+    }
 
     // In Standalone Mode B: expose ALL visual tuning (Wheels, Paintjobs, Colors, Spoilers, Bumpers, Skirts, Exhaust, Roof, Hood, Hydraulics, Nitro, Stereo!)
     if (!vanillaPanel) {
@@ -387,6 +401,7 @@ void RebuildMainEntries(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
 
 std::string GetSubmenuTitle(CategoryId cat) {
     switch (cat) {
+        case CategoryId::Maintenance:    return ui::Loc("ТО И ИЗНОС УЗЛОВ", "MAINTENANCE & WEAR");
         case CategoryId::Paintjob:       return ui::Loc("ВИНИЛЫ (ПОКРАСКА)", "PAINTJOBS");
         case CategoryId::PaintPrimary:   return ui::Loc("ОСНОВНОЙ ЦВЕТ", "PRIMARY COLOR");
         case CategoryId::PaintSecondary: return ui::Loc("ДОП. ЦВЕТ", "SECONDARY COLOR");
@@ -444,6 +459,33 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
     }
 
     switch (cat) {
+        case CategoryId::Maintenance: {
+            auto w = tuning::GetLiveWear(veh);
+            int cEng = mod::ComputePartServiceCost(w.engine,       cfg.maintBaseEngine,  cur, cfg.maintCostMult);
+            int cTr  = mod::ComputePartServiceCost(w.transmission, cfg.maintBaseTrans,   cur, cfg.maintCostMult);
+            int cBrk = mod::ComputePartServiceCost(w.brakes,       cfg.maintBaseBrakes,  cur, cfg.maintCostMult);
+            int cTir = mod::ComputePartServiceCost(w.tires,        cfg.maintBaseTires,   cur, cfg.maintCostMult);
+            int cSus = mod::ComputePartServiceCost(w.suspension,   cfg.maintBaseSusp,    cur, cfg.maintCostMult);
+            int cCha = mod::ComputePartServiceCost(w.chassis,      cfg.maintBaseChassis, cur, cfg.maintCostMult);
+            int cAllRaw = cEng + cTr + cBrk + cTir + cSus + cCha;
+            int cAll = (cAllRaw > 0) ? std::max(200, static_cast<int>(std::round((cAllRaw * 0.90f) / 50.0f)) * 50) : 0;
+
+            auto makePartLabel = [](const char* rus, const char* eng, float wp) {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "%s (%d%%)", ui::Loc(rus, eng).c_str(), static_cast<int>(std::round(wp)));
+                return std::string(buf);
+            };
+
+            g_subOptions.push_back({makePartLabel("Полное ТО (Всё)", "Full Overhaul (All)", w.Average()), cAll, cAll == 0, 100});
+            g_subOptions.push_back({makePartLabel("Двигатель",       "Engine",       w.engine),       cEng, cEng == 0, 0});
+            g_subOptions.push_back({makePartLabel("Трансмиссия",     "Transmission", w.transmission), cTr,  cTr  == 0, 1});
+            g_subOptions.push_back({makePartLabel("Тормоза",         "Brakes",       w.brakes),       cBrk, cBrk == 0, 2});
+            g_subOptions.push_back({makePartLabel("Шины",            "Tires",        w.tires),        cTir, cTir == 0, 3});
+            g_subOptions.push_back({makePartLabel("Подвеска",        "Suspension",   w.suspension),   cSus, cSus == 0, 4});
+            g_subOptions.push_back({makePartLabel("Кузов и Шасси",   "Chassis/Body", w.chassis),      cCha, cCha == 0, 5});
+            g_subCursor = 0;
+            return;
+        }
         case CategoryId::Paintjob: {
             int32_t h = sa::GetVehicleHandle(veh);
             int32_t numPj = 0, curPj = -1;
@@ -589,6 +631,23 @@ mod::PerformanceTuning BuildPreviewTuningForStats() {
         default: break;
     }
     return t;
+}
+
+mod::VehicleWear BuildPreviewWearForStats(sa::CVehicle* veh) {
+    auto w = tuning::GetLiveWear(veh);
+    if (!g_inSubmenu || g_activeSubCat != CategoryId::Maintenance || g_subOptions.empty()) return w;
+    int val = g_subOptions[g_subCursor].value;
+    switch (val) {
+        case 100: w = mod::VehicleWear{}; break;
+        case 0:   w.engine       = 0.0f; break;
+        case 1:   w.transmission = 0.0f; break;
+        case 2:   w.brakes       = 0.0f; break;
+        case 3:   w.tires        = 0.0f; break;
+        case 4:   w.suspension   = 0.0f; break;
+        case 5:   w.chassis      = 0.0f; break;
+        default: break;
+    }
+    return w;
 }
 
 void ApplySubPreview(sa::CVehicle* veh) {
@@ -860,6 +919,50 @@ void PurchaseSubOption(sa::CVehicle* veh) {
         return;
     }
 
+    // Special ETS 2 Maintenance & Part Overhaul purchase!
+    if (g_activeSubCat == CategoryId::Maintenance) {
+        if (opt.installed || opt.price <= 0) {
+            sa::PlayFrontendSound(sa::SFX_ERROR);
+            ui::ShowHelp("Узел уже в идеальном состоянии (0% износа).", "Part is already in mint condition (0% wear).");
+            return;
+        }
+        if (sa::GetPlayerMoney() < opt.price) {
+            sa::PlayFrontendSound(sa::SFX_ERROR);
+            ui::ShowHelp("~r~Недостаточно денег для обслуживания!", "~r~Not enough money for maintenance!");
+            return;
+        }
+        sa::AddPlayerMoney(-opt.price);
+        auto w = tuning::GetLiveWear(veh);
+        switch (opt.value) {
+            case 100: w = mod::VehicleWear{}; break;
+            case 0:   w.engine       = 0.0f; break;
+            case 1:   w.transmission = 0.0f; break;
+            case 2:   w.brakes       = 0.0f; break;
+            case 3:   w.tires        = 0.0f; break;
+            case 4:   w.suspension   = 0.0f; break;
+            case 5:   w.chassis      = 0.0f; break;
+            default: break;
+        }
+        tuning::SetLiveWear(veh, w);
+        if (opt.value == 100 || opt.value == 5) {
+            int32_t h = sa::GetVehicleHandle(veh);
+            if (h > 0) {
+                sa::ScriptCmd(0x0A30).Int(h).Run(); // FIX_CAR
+                sa::ScriptCmd(0x0878).Int(h).Float(0.0f).Run();
+            }
+        }
+        int ownedSlot = garage::FindSlotForLiveVehicle(veh);
+        if (ownedSlot >= 0) {
+            garage::SnapshotVehicleToSlot(veh, ownedSlot);
+            garage::SaveNow();
+        }
+        sa::PlayFrontendSound(sa::SFX_BUY);
+        ui::ShowHelp("~g~Обслуживание выполнено!~w~ Характеристики восстановлены.",
+                     "~g~Maintenance complete!~w~ Performance restored.");
+        RebuildSubOptions(CategoryId::Maintenance, veh);
+        return;
+    }
+
     // Special Registration actions
     if (g_activeSubCat == CategoryId::Registration) {
         if (opt.value == 0) { sa::PlayFrontendSound(sa::SFX_ERROR); return; }
@@ -1089,6 +1192,7 @@ void EnterStandaloneWorkshop(int shopIdx, sa::CVehicle* veh) {
 
     sa::ScriptCmd(0x03E6).Run();                    // CLEAR_HELP (kill vanilla "cannot modify" text immediately!)
     sa::ScriptCmd(0x0361).Str8(shop.name).Run();    // CLOSE_GARAGE
+    g_doorOpened[shopIdx] = false;
     sa::ScriptCmd(0x01B4).Int(0).Int(0).Run();      // SET_PLAYER_CONTROL false
     sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run(); // SET_CAR_FORWARD_SPEED 0
 
@@ -1141,21 +1245,25 @@ void ExitStandaloneWorkshop() {
 
         if (shopIdx >= 0 && shopIdx < 5 && h > 0) {
             const auto& shop = kModShops[shopIdx];
-            sa::ScriptCmd(0x04E4).Float(shop.exitX).Float(shop.exitY).Run();
+            sa::ScriptCmd(0x04E4).Float(shop.exitX).Float(shop.exitY).Run(); // REQUEST_COLLISION
             sa::ScriptCmd(0x04BB).Int(0).Run();
             if (pedH > 0) sa::ScriptCmd(0x0860).Int(pedH).Int(0).Run();
             sa::ScriptCmd(0x0840).Int(h).Int(0).Run();
+            // Synchronously stream exterior pavement collision BEFORE querying ground Z so the car NEVER falls!
+            sa::ScriptCmd(0x03CB).Float(shop.exitX).Float(shop.exitY).Float(shop.exitZ).Run(); // LOAD_SCENE
 
-            // Place cleanly onto exact street ground height BEFORE unfreezing so the car never drops!
             float groundZ = shop.exitZ;
-            sa::ScriptCmd(0x02CE).Float(shop.exitX).Float(shop.exitY).Float(shop.exitZ + 2.0f).Out(groundZ).Run();
-            float placeZ = (groundZ > shop.exitZ - 3.0f && groundZ < shop.exitZ + 3.0f) ? (groundZ + 0.08f) : shop.exitZ;
+            sa::ScriptCmd(0x02CE).Float(shop.exitX).Float(shop.exitY).Float(shop.exitZ + 2.5f).Out(groundZ).Run();
+            float placeZ = (groundZ > shop.exitZ - 3.0f && groundZ < shop.exitZ + 3.0f) ? (groundZ + 0.04f) : shop.exitZ;
 
+            g_workshopVeh->MoveSpeed() = {0.0f, 0.0f, 0.0f};
             sa::ScriptCmd(0x00AB).Int(h).Float(shop.exitX).Float(shop.exitY).Float(placeZ).Run();
             sa::ScriptCmd(0x0175).Int(h).Float(shop.exitHeading).Run();
             sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run();
             sa::ScriptCmd(0x0519).Int(h).Int(0).Run(); // FREEZE_CAR_POSITION false
-            sa::ScriptCmd(0x0361).Str8(shop.name).Run();
+            sa::ScriptCmd(0x0361).Str8(shop.name).Run(); // Keep garage door closed until player drives away!
+            g_doorBlockedShopIdx  = shopIdx;
+            g_doorOpened[shopIdx] = false;
         } else if (h > 0) {
             sa::ScriptCmd(0x0519).Int(h).Int(0).Run();
         }
@@ -1433,22 +1541,42 @@ void PostScriptsTick() {
     sa::CVehicle* veh = sa::FindPlayerVehicle(0, false);
     sa::CPed* ped = sa::FindPlayerPed(0);
     if (!veh || !ped || veh->GetDriver() != ped || !veh->IsLandVehicle()) {
-        g_insideShopIdx = -1;
-        g_waitLeaveBox  = false;
+        for (int i = 0; i < 5; ++i) {
+            if (g_doorOpened[i]) {
+                sa::ScriptCmd(0x0361).Str8(kModShops[i].name).Run();
+                g_doorOpened[i] = false;
+            }
+        }
+        g_insideShopIdx      = -1;
+        g_waitLeaveBox       = false;
+        g_doorBlockedShopIdx = -1;
         return;
     }
 
     sa::CVector p = veh->GetPosition();
     int foundInside = -1;
 
+    // After exiting a workshop, keep its garage door CLOSED until the player drives > 22m away!
+    if (g_doorBlockedShopIdx >= 0 && g_doorBlockedShopIdx < 5) {
+        const auto& bs = kModShops[g_doorBlockedShopIdx];
+        float dBlk = std::sqrt((p.x - bs.cx) * (p.x - bs.cx) + (p.y - bs.cy) * (p.y - bs.cy));
+        if (dBlk > 22.0f) {
+            g_doorBlockedShopIdx = -1;
+        }
+    }
+
     for (int i = 0; i < 5; ++i) {
         const auto& s = kModShops[i];
         float dCenter = std::sqrt((p.x - s.cx) * (p.x - s.cx) + (p.y - s.cy) * (p.y - s.cy));
+        float dz      = std::fabs(p.z - s.cz);
 
-        if (dCenter < 19.0f && std::fabs(p.z - s.cz) < 6.0f) {
-            if (!sa::ScriptCmd(0x03B0).Str8(s.name).Run()) {
-                sa::ScriptCmd(0x0360).Str8(s.name).Run();
-            }
+        // Clean single-trigger hysteresis: open ONCE when pulling right up to the door, close ONCE after leaving!
+        if (i != g_doorBlockedShopIdx && !g_doorOpened[i] && dCenter < 13.0f && dz < 5.0f) {
+            sa::ScriptCmd(0x0360).Str8(s.name).Run(); // OPEN_GARAGE
+            g_doorOpened[i] = true;
+        } else if (g_doorOpened[i] && (dCenter > 17.5f || dz > 6.5f)) {
+            sa::ScriptCmd(0x0361).Str8(s.name).Run(); // CLOSE_GARAGE
+            g_doorOpened[i] = false;
         }
 
         if (p.x >= s.minX && p.x <= s.maxX &&
@@ -1485,14 +1613,28 @@ void PostScriptsTick() {
 void Render2D() {
     if (sa::IsPauseMenuActive()) return;
 
-    // Show live vehicle stats panel whenever inside ANY mod shop (Mode A vanilla OR Mode B interior!)
+    // Show live vehicle stats panel with RED ETS 2 wear-loss bars whenever inside ANY mod shop!
     if ((g_vanillaHookMode || g_standaloneMode || IsAnyVanillaCarmodPanelOpen()) && sa::IsVehicleValid(g_workshopVeh)) {
         auto curCfg     = g_inSubmenu ? g_savedTuningBeforeSub : GetCurrentVehTuning(g_workshopVeh);
         auto previewCfg = g_inSubmenu ? BuildPreviewTuningForStats() : curCfg;
-        auto curStats   = tuning::ComputeStats(g_workshopVeh, curCfg);
-        auto prevStats  = tuning::ComputeStats(g_workshopVeh, previewCfg);
-        std::string vName = sa::GetVehicleDisplayNameGameEncoded(g_workshopVeh->GetModelIndex());
-        ui::DrawVehicleStatsPanel(vName, curStats, prevStats);
+        auto curWear    = tuning::GetLiveWear(g_workshopVeh);
+        auto prevWear   = BuildPreviewWearForStats(g_workshopVeh);
+
+        auto curStats      = tuning::ComputeStats(g_workshopVeh, curCfg, curWear);
+        auto prevStats     = tuning::ComputeStats(g_workshopVeh, previewCfg, prevWear);
+        auto pristineStats = tuning::ComputeStats(g_workshopVeh, curCfg, mod::VehicleWear{});
+        std::string vName  = sa::GetVehicleDisplayNameGameEncoded(g_workshopVeh->GetModelIndex());
+
+        std::string note;
+        if (mod::Config().enableWearSystem && curWear.HasAnyWear()) {
+            char wb[64];
+            std::snprintf(wb, sizeof(wb), "%s: %d%%",
+                          ui::Loc("Общий износ", "Total Wear").c_str(),
+                          static_cast<int>(std::round(curWear.Average())));
+            note = wb;
+        }
+        const auto* prisPtr = (mod::Config().enableWearSystem && curWear.HasAnyWear()) ? &pristineStats : nullptr;
+        ui::DrawVehicleStatsPanel(vName, curStats, prevStats, false, note, prisPtr);
     }
 
     if (!g_vanillaHookMode && !g_standaloneMode) return;
@@ -1518,9 +1660,13 @@ void Render2D() {
             ui::MenuRow row;
             row.leftGame  = e.labelGame;
             row.rightGame = e.rightGame;
-            row.rightColor = (e.cat == CategoryId::Registration)
-                ? sa::CRGBA{135, 225, 135, 255}
-                : sa::CRGBA{200, 200, 200, 255};
+            if (e.cat == CategoryId::Maintenance && sa::IsVehicleValid(g_workshopVeh)) {
+                row.rightColor = ui::GetWearColor(tuning::GetLiveWear(g_workshopVeh).Average());
+            } else if (e.cat == CategoryId::Registration) {
+                row.rightColor = {135, 225, 135, 255};
+            } else {
+                row.rightColor = {200, 200, 200, 255};
+            }
             spec.rows.push_back(std::move(row));
         }
     } else {
@@ -1559,19 +1705,25 @@ bool IsWorkshopActive() {
     return g_vanillaHookMode || g_standaloneMode || IsAnyVanillaCarmodPanelOpen();
 }
 
+bool IsCustomWorkshopMenuDrawing() {
+    return g_vanillaHookMode || g_standaloneMode;
+}
+
 sa::CVehicle* GetWorkshopVehicle() {
     return (g_vanillaHookMode || g_standaloneMode) ? g_workshopVeh : nullptr;
 }
 
 void Reset() {
-    g_vanillaHookMode   = false;
-    g_vanillaEverOpened = false;
-    g_standaloneMode    = false;
-    g_inSubmenu         = false;
-    g_typingPlate       = false;
-    g_workshopVeh       = nullptr;
-    g_insideShopIdx     = -1;
-    g_waitLeaveBox      = false;
+    g_vanillaHookMode    = false;
+    g_vanillaEverOpened  = false;
+    g_standaloneMode     = false;
+    g_inSubmenu          = false;
+    g_typingPlate        = false;
+    g_workshopVeh        = nullptr;
+    g_insideShopIdx      = -1;
+    g_waitLeaveBox       = false;
+    g_doorBlockedShopIdx = -1;
+    for (int i = 0; i < 5; ++i) g_doorOpened[i] = false;
 }
 
 } // namespace workshop

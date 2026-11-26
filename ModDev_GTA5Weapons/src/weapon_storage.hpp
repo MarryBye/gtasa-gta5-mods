@@ -6,6 +6,7 @@
 #include <vector>
 #include "config.hpp"
 #include "log.hpp"
+#include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "weapon_data.hpp"
 
@@ -98,7 +99,7 @@ public:
         m_loadouts.clear();
         for (int c = 0; c < wdata::kWheelCategoryCount; ++c) m_preferredWeapon[c] = 0;
 
-        std::string path = BuildFilePath(m_slot);
+        std::string path = BuildFilePath(m_slot, true);
         if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
             modlog::Info("[WStore] No saved weapons yet at %s (fresh slot %d).", path.c_str(), m_slot);
             return;
@@ -289,12 +290,13 @@ public:
     }
 
 private:
-    static std::string BuildFilePath(int slot) {
-        std::string dir = sa::GetUserFilesSubDir("GTA5WeaponSaves", wcfg::Get().modDir);
-        char name[64];
-        if (slot >= 1 && slot <= 8) std::snprintf(name, sizeof(name), "\\weapons_slot_%d.ini", slot);
-        else std::snprintf(name, sizeof(name), "\\weapons_autosave.ini");
-        return dir + name;
+    static std::string BuildFilePath(int slot, bool forLoading = false) {
+        const char* ov = nullptr;
+        if (auto* b = modbus::GetBus(); b && b->coopProfileName[0]) ov = b->coopProfileName;
+        if (forLoading) {
+            return sa::ResolveExistingLoadPath("GTA5WeaponSaves", wcfg::Get().modDir, "weapons", slot, ov);
+        }
+        return sa::BuildSaveProfilePath("GTA5WeaponSaves", wcfg::Get().modDir, "weapons", slot, ov);
     }
 
     int      m_slot = 0;

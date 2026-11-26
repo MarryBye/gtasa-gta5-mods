@@ -23,6 +23,21 @@ struct ModConfig {
     int     minRestoreCost    = 500;
     int     maxRestoreCost    = 25000;
 
+    // Wear & Maintenance (ETS 2-style mechanical wear)
+    bool    enableWearSystem  = true;
+    float   wearRateMult      = 1.0f;
+    float   maintCostMult     = 1.0f;
+    int     maintBaseEngine   = 14000;
+    int     maintBaseTrans    = 10500;
+    int     maintBaseBrakes   = 7000;
+    int     maintBaseTires    = 6500;
+    int     maintBaseSusp     = 8500;
+    int     maintBaseChassis  = 11500;
+
+    // Dealership
+    bool    enableDealership  = true;
+    float   dealershipPriceMult = 1.0f;
+
     // Sound toggles
     bool    enableTurboAudio  = true;
     bool    enableEngineTone  = true;
@@ -98,6 +113,22 @@ inline void LoadConfig(HMODULE selfModule) {
     c.restorePercent  = GetPrivateProfileIntA("Insurance", "RestorePercent", 5, p);
     c.minRestoreCost  = GetPrivateProfileIntA("Insurance", "MinRestoreCost", 500, p);
     c.maxRestoreCost  = GetPrivateProfileIntA("Insurance", "MaxRestoreCost", 25000, p);
+
+    c.enableWearSystem = GetPrivateProfileIntA("Wear", "EnableWearSystem", 1, p) != 0;
+    GetPrivateProfileStringA("Wear", "WearRateMultiplier", "1.0", fbuf, sizeof(fbuf), p);
+    c.wearRateMult     = std::max(0.05f, static_cast<float>(std::atof(fbuf)));
+    GetPrivateProfileStringA("Wear", "MaintenanceCostMultiplier", "1.0", fbuf, sizeof(fbuf), p);
+    c.maintCostMult    = std::max(0.10f, static_cast<float>(std::atof(fbuf)));
+    c.maintBaseEngine  = GetPrivateProfileIntA("Wear", "BaseOverhaulEngine",  14000, p);
+    c.maintBaseTrans   = GetPrivateProfileIntA("Wear", "BaseOverhaulTrans",   10500, p);
+    c.maintBaseBrakes  = GetPrivateProfileIntA("Wear", "BaseOverhaulBrakes",   7000, p);
+    c.maintBaseTires   = GetPrivateProfileIntA("Wear", "BaseOverhaulTires",    6500, p);
+    c.maintBaseSusp    = GetPrivateProfileIntA("Wear", "BaseOverhaulSusp",     8500, p);
+    c.maintBaseChassis = GetPrivateProfileIntA("Wear", "BaseOverhaulChassis", 11500, p);
+
+    c.enableDealership = GetPrivateProfileIntA("Dealership", "EnableDealership", 1, p) != 0;
+    GetPrivateProfileStringA("Dealership", "PriceMultiplier", "1.0", fbuf, sizeof(fbuf), p);
+    c.dealershipPriceMult = std::max(0.10f, static_cast<float>(std::atof(fbuf)));
 
     c.enableTurboAudio = GetPrivateProfileIntA("Effects", "EnableTurboAudio", 1, p) != 0;
     c.enableEngineTone = GetPrivateProfileIntA("Effects", "EnableEngineTone", 1, p) != 0;

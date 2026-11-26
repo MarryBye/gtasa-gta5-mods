@@ -3,10 +3,13 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 #include <windows.h>
 #include "config.hpp"
+#include "dealership.hpp"
 #include "garage.hpp"
 #include "log.hpp"
+#include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "tuning_physics.hpp"
 #include "ui_menu.hpp"
@@ -21,6 +24,7 @@ constexpr int32_t MODEL_MECHANIC = 50; // WMYMECH — classic San Andreas mechan
 enum class MenuMode {
     Closed = 0,
     VehicleList,
+    InsuranceList,
     ConfirmRestore,
     ConfirmDelete
 };
@@ -32,11 +36,13 @@ enum class DeliveryPhase {
 };
 
 // Menu state
-MenuMode g_menuMode     = MenuMode::Closed;
-int      g_page         = 0; // 0 or 1 (5 slots per page, 10 total)
-int      g_rowInPage    = 0; // 0..4
+MenuMode g_menuMode      = MenuMode::Closed;
+bool     g_openedFromPhone = false;
+int      g_page          = 0; // 0 or 1 (5 slots per page, 10 total)
+int      g_rowInPage     = 0; // 0..4
+int      g_insCursor     = 0;
 int      g_confirmCursor = 0; // 0 = Yes, 1 = Cancel
-int      g_pendingSlot  = -1;
+int      g_pendingSlot   = -1;
 
 // Active mechanic delivery state
 DeliveryPhase g_phase          = DeliveryPhase::Idle;
@@ -405,19 +411,36 @@ void UpdateDeliveryStateMachine() {
     }
 }
 
+void CloseMenuAndMaybeReturn() {
+    bool backToPhone = g_openedFromPhone;
+    g_menuMode = MenuMode::Closed;
+    g_openedFromPhone = false;
+    if (backToPhone) {
+        if (auto* b = modbus::GetBus(); b && b->phoneInstalled && b->phoneReturnToMain) {
+            b->phoneReturnToMain();
+        }
+    }
+}
+
 void HandleMenuInput() {
     const auto& k = ui::Keys();
+    auto* bus = modbus::GetBus();
+    bool phoneOwnsF6 = (bus && bus->phoneInstalled);
 
-    // Toggle F6 menu
-    if (k.JustPressed(mod::Config().callMenuKey)) {
+    // Toggle F6 menu ONLY when GTA5Phone.asi is NOT installed and no SA-COOP/ImGui overlay is active!
+    if (!phoneOwnsF6 && !sa::IsExternalOverlayActive() && k.JustPressed(mod::Config().callMenuKey)) {
         if (g_menuMode != MenuMode::Closed) {
             g_menuMode = MenuMode::Closed;
+            g_openedFromPhone = false;
             sa::PlayFrontendSound(sa::SFX_BACK);
             return;
         }
-        if (!workshop::IsWorkshopActive() && !sa::IsPauseMenuActive() && !sa::IsCutsceneRunning()) {
-            g_menuMode  = MenuMode::VehicleList;
-            g_rowInPage = std::clamp(g_rowInPage, 0, mod::VEHICLES_PER_PAGE - 1);
+        if (!workshop::IsWorkshopActive() && !dealership::IsActive() &&
+            !modbus::IsAnyModalMenuOpen("garage") &&
+            !sa::IsPauseMenuActive() && !sa::IsCutsceneRunning()) {
+            g_menuMode        = MenuMode::VehicleList;
+            g_openedFromPhone = false;
+            g_rowInPage       = std::clamp(g_rowInPage, 0, mod::VEHICLES_PER_PAGE - 1);
             sa::PlayFrontendSound(sa::SFX_SELECT);
             return;
         }
@@ -425,22 +448,52 @@ void HandleMenuInput() {
 
     if (g_menuMode == MenuMode::Closed) return;
 
-    // Close menu automatically if workshop/pause/cutscene opens
-    if (workshop::IsWorkshopActive() || sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) {
+    // Close menu automatically if workshop/dealership/pause/cutscene opens
+    if (workshop::IsWorkshopActive() || dealership::IsActive() || sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) {
         g_menuMode = MenuMode::Closed;
+        g_openedFromPhone = false;
         return;
     }
 
-    const bool up     = k.Repeated(VK_UP);
-    const bool down   = k.Repeated(VK_DOWN);
-    const bool left   = k.JustPressed(VK_LEFT);
-    const bool right  = k.JustPressed(VK_RIGHT);
+    const bool up     = k.Repeated(VK_UP) || k.Repeated('W');
+    const bool down   = k.Repeated(VK_DOWN) || k.Repeated('S');
+    const bool left   = k.JustPressed(VK_LEFT) || k.JustPressed('A');
+    const bool right  = k.JustPressed(VK_RIGHT) || k.JustPressed('D');
     const bool accept = k.JustPressed(VK_RETURN) || k.JustPressed(VK_SPACE);
-    const bool back   = k.JustPressed(VK_BACK)   || k.JustPressed(VK_ESCAPE);
+    const bool back   = k.JustPressed(VK_BACK)   || k.JustPressed(VK_ESCAPE) || (phoneOwnsF6 && k.JustPressed(VK_F6));
     const bool delKey = k.JustPressed(VK_DELETE);
 
     const int maxVeh   = std::min(mod::Config().maxVehicles, mod::MAX_OWNED_VEHICLES);
     const int numPages = (maxVeh + mod::VEHICLES_PER_PAGE - 1) / mod::VEHICLES_PER_PAGE;
+
+    if (g_menuMode == MenuMode::InsuranceList) {
+        std::vector<int> wreckedSlots;
+        for (int i = 0; i < maxVeh; ++i) {
+            if (garage::Slots()[i].occupied && garage::Slots()[i].destroyed) {
+                wreckedSlots.push_back(i);
+            }
+        }
+        if (back) {
+            sa::PlayFrontendSound(sa::SFX_BACK);
+            CloseMenuAndMaybeReturn();
+            return;
+        }
+        if (wreckedSlots.empty()) return;
+        g_insCursor = std::clamp(g_insCursor, 0, static_cast<int>(wreckedSlots.size()) - 1);
+        if (up) {
+            g_insCursor = (g_insCursor - 1 + static_cast<int>(wreckedSlots.size())) % static_cast<int>(wreckedSlots.size());
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        } else if (down) {
+            g_insCursor = (g_insCursor + 1) % static_cast<int>(wreckedSlots.size());
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        } else if (accept) {
+            g_pendingSlot   = wreckedSlots[g_insCursor];
+            g_confirmCursor = 0;
+            g_menuMode      = MenuMode::ConfirmRestore;
+            sa::PlayFrontendSound(sa::SFX_SELECT);
+        }
+        return;
+    }
 
     if (g_menuMode == MenuMode::VehicleList) {
         if (up) {
@@ -453,8 +506,8 @@ void HandleMenuInput() {
             g_page = (g_page + (right ? 1 : -1) + numPages) % numPages;
             sa::PlayFrontendSound(sa::SFX_SCROLL);
         } else if (back) {
-            g_menuMode = MenuMode::Closed;
             sa::PlayFrontendSound(sa::SFX_BACK);
+            CloseMenuAndMaybeReturn();
         } else if (delKey) {
             int slotIdx = g_page * mod::VEHICLES_PER_PAGE + g_rowInPage;
             if (slotIdx < maxVeh && garage::Slots()[slotIdx].occupied) {
@@ -468,8 +521,8 @@ void HandleMenuInput() {
             if (slotIdx >= maxVeh || !garage::Slots()[slotIdx].occupied) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
                 ui::ShowHelp(
-                    "Слот пуст. Заезжайте в мастерскую и выберите ~y~Зарегистрировать авто~w~.",
-                    "Slot empty. Visit any mod shop and choose ~y~Register Vehicle~w~.");
+                    "Слот пуст. Купите авто в автосалоне или зарегистрируйте в мастерской.",
+                    "Slot empty. Buy a vehicle at a dealership or register one in a mod shop.");
                 return;
             }
             if (g_phase != DeliveryPhase::Idle) {
@@ -488,6 +541,7 @@ void HandleMenuInput() {
                 // Free delivery!
                 if (StartMechanicDelivery(slotIdx)) {
                     g_menuMode = MenuMode::Closed;
+                    g_openedFromPhone = false;
                 }
             }
         }
@@ -537,6 +591,7 @@ void HandleMenuInput() {
             sa::PlayFrontendSound(sa::SFX_BUY);
             if (StartMechanicDelivery(g_pendingSlot)) {
                 g_menuMode = MenuMode::Closed;
+                g_openedFromPhone = false;
             } else {
                 // Refund if spawn somehow failed
                 sa::AddPlayerMoney(cost);
@@ -619,6 +674,32 @@ void Render2D() {
             }
             spec.rows.push_back(std::move(row));
         }
+    } else if (g_menuMode == MenuMode::InsuranceList) {
+        spec.titleGame    = ui::Loc("СТРАХОВАЯ КОМПАНИЯ", "MORS MUTUAL INSURANCE");
+        spec.colLeftGame  = ui::Loc("УНИЧТОЖЕННЫЕ АВТО", "WRECKED VEHICLES");
+        spec.colRightGame = ui::Loc("ВЫПЛАТА", "CLAIM");
+        spec.footerGame   = ui::Loc("Enter - Восст. | Backspace - Назад", "Enter - Claim | Backspace - Back");
+        const int restoreCost = mod::ComputeRestoreCost(sa::GetPlayerMoney());
+        const auto& slots = garage::Slots();
+        std::vector<int> wreckedSlots;
+        for (int i = 0; i < maxVeh; ++i) {
+            if (slots[i].occupied && slots[i].destroyed) {
+                wreckedSlots.push_back(i);
+                ui::MenuRow row;
+                row.leftGame   = slots[i].displayNameGame;
+                row.rightGame  = ui::FormatPrice(restoreCost);
+                row.rightColor = (sa::GetPlayerMoney() >= restoreCost)
+                    ? sa::CRGBA{125, 235, 135, 255}
+                    : sa::CRGBA{240, 100, 95, 255};
+                spec.rows.push_back(std::move(row));
+            }
+        }
+        if (spec.rows.empty()) {
+            spec.rows.push_back({ui::Loc("Нет уничтоженного транспорта", "No wrecked vehicles"), "", false, false, {140, 140, 140, 255}});
+            spec.selectedIndex = 0;
+        } else {
+            spec.selectedIndex = std::clamp(g_insCursor, 0, static_cast<int>(spec.rows.size()) - 1);
+        }
     } else if (g_menuMode == MenuMode::ConfirmRestore && g_pendingSlot >= 0) {
         int cost = mod::ComputeRestoreCost(sa::GetPlayerMoney());
         spec.titleGame    = ui::Loc("СТРАХОВАЯ КОМПАНИЯ", "INSURANCE CLAIM");
@@ -648,33 +729,75 @@ void Render2D() {
 
     ui::DrawVanillaMenu(spec);
 
-    // Show live Vehicle Stats Card at bottom-right for the currently highlighted personal vehicle!
-    int previewIdx = (g_menuMode == MenuMode::VehicleList)
-        ? (g_page * mod::VEHICLES_PER_PAGE + g_rowInPage)
-        : g_pendingSlot;
+    // Show live Vehicle Stats Card at bottom-right (with RED ETS 2 wear-loss bars!)
+    int previewIdx = -1;
+    if (g_menuMode == MenuMode::VehicleList) {
+        previewIdx = g_page * mod::VEHICLES_PER_PAGE + g_rowInPage;
+    } else if (g_menuMode == MenuMode::InsuranceList) {
+        int seen = 0;
+        for (int i = 0; i < maxVeh; ++i) {
+            if (garage::Slots()[i].occupied && garage::Slots()[i].destroyed) {
+                if (seen == g_insCursor) { previewIdx = i; break; }
+                ++seen;
+            }
+        }
+    } else {
+        previewIdx = g_pendingSlot;
+    }
+
     if (previewIdx >= 0 && previewIdx < maxVeh) {
         const auto& slot = garage::Slots()[previewIdx];
         if (slot.occupied) {
-            auto stats = tuning::ComputeStatsForModel(slot.modelId, slot.tuning);
+            auto actualStats   = tuning::ComputeStatsForModel(slot.modelId, slot.tuning, slot.wear);
+            auto pristineStats = tuning::ComputeStatsForModel(slot.modelId, slot.tuning, mod::VehicleWear{});
             std::string note;
             if (slot.destroyed) {
                 note = ui::Loc("Уничтожен (нужна страховка)", "Wrecked (insurance req.)");
             } else {
+                if (mod::Config().enableWearSystem && slot.wear.HasAnyWear()) {
+                    char wbuf[48];
+                    std::snprintf(wbuf, sizeof(wbuf), "%s %d%%",
+                                  ui::Loc("Износ", "Wear").c_str(),
+                                  static_cast<int>(std::round(slot.wear.Average())));
+                    note += wbuf;
+                }
                 if (slot.tuning.turbo) {
+                    if (!note.empty()) note += " | ";
                     note += ui::Loc("Турбо", "Turbo");
                 }
                 if (slot.tuning.bulletproofTires) {
                     if (!note.empty()) note += " | ";
-                    note += ui::Loc("Пулест. шины", "BP Tires");
+                    note += ui::Loc("Пулест.", "BP");
                 }
                 if (slot.tuning.plateText[0] != '\0') {
                     if (!note.empty()) note += " | ";
                     note += slot.tuning.plateText;
                 }
             }
-            ui::DrawVehicleStatsPanel(slot.displayNameGame, stats, stats, true, note);
+            const auto* prisPtr = (mod::Config().enableWearSystem && slot.wear.HasAnyWear()) ? &pristineStats : nullptr;
+            ui::DrawVehicleStatsPanel(slot.displayNameGame, actualStats, actualStats, true, note, prisPtr);
         }
     }
+}
+
+void OpenMechanicMenu(bool fromPhone) {
+    if (workshop::IsWorkshopActive() || dealership::IsActive() || sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) return;
+    g_menuMode        = MenuMode::VehicleList;
+    g_openedFromPhone = fromPhone;
+    g_rowInPage       = std::clamp(g_rowInPage, 0, mod::VEHICLES_PER_PAGE - 1);
+    sa::PlayFrontendSound(sa::SFX_SELECT);
+}
+
+void OpenInsuranceMenu(bool fromPhone) {
+    if (workshop::IsWorkshopActive() || dealership::IsActive() || sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) return;
+    g_menuMode        = MenuMode::InsuranceList;
+    g_openedFromPhone = fromPhone;
+    g_insCursor       = 0;
+    sa::PlayFrontendSound(sa::SFX_SELECT);
+}
+
+bool StartDeliveryForSlot(int slotIdx) {
+    return StartMechanicDelivery(slotIdx);
 }
 
 bool IsMenuOpen() { return g_menuMode != MenuMode::Closed; }
@@ -694,11 +817,12 @@ void CancelDelivery(bool deleteVehicle) {
 }
 
 void Reset() {
-    g_menuMode       = MenuMode::Closed;
-    g_phase          = DeliveryPhase::Idle;
-    g_delivVehHandle = -1;
-    g_delivPedHandle = -1;
-    g_delivSlot      = -1;
+    g_menuMode        = MenuMode::Closed;
+    g_openedFromPhone = false;
+    g_phase           = DeliveryPhase::Idle;
+    g_delivVehHandle  = -1;
+    g_delivPedHandle  = -1;
+    g_delivSlot       = -1;
 }
 
 } // namespace delivery

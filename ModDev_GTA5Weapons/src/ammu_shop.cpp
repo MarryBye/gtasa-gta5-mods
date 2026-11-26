@@ -9,6 +9,7 @@
 #include "config.hpp"
 #include "log.hpp"
 #include "memory.hpp"
+#include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "ui_kit.hpp"
 #include "weapon_audio.hpp"
@@ -297,21 +298,48 @@ void HandleSelect() {
     }
 
     if (g_screen == Screen::ArmorShop) {
-        int price = (g_armorCursor == 0) ? 250 : 500;
-        float tgt = (g_armorCursor == 0) ? 50.0f : 100.0f;
-        if (ped->GetArmor() >= tgt - 0.5f) {
-            sa::PlayFrontendSound(sa::SFX_ERROR);
-            ui::ShowHelp("Броня уже максимальная.", "Armor already sufficient.");
+        if (g_armorCursor < 2) {
+            int price = (g_armorCursor == 0) ? 250 : 500;
+            float tgt = (g_armorCursor == 0) ? 50.0f : 100.0f;
+            if (ped->GetArmor() >= tgt - 0.5f) {
+                sa::PlayFrontendSound(sa::SFX_ERROR);
+                ui::ShowHelp("Броня уже максимальная.", "Armor already sufficient.");
+                return;
+            }
+            if (sa::GetPlayerMoney() < price) {
+                sa::PlayFrontendSound(sa::SFX_ERROR);
+                ui::ShowHelp("Недостаточно денег!", "Not enough money!");
+                return;
+            }
+            sa::AddPlayerMoney(-price);
+            ped->SetArmor(tgt);
+            sa::PlayFrontendSound(sa::SFX_BUY);
             return;
         }
-        if (sa::GetPlayerMoney() < price) {
-            sa::PlayFrontendSound(sa::SFX_ERROR);
-            ui::ShowHelp("Недостаточно денег!", "Not enough money!");
-            return;
+        // Spare Body Armor purchase straight into GTA5Inventory pocket!
+        auto* bus = modbus::GetBus();
+        int tier = g_armorCursor - 2; // 0..3
+        if (bus && bus->inventoryInstalled && bus->inventoryAddArmor && bus->inventoryGetArmorCount && bus->inventoryGetArmorMax &&
+            tier >= 0 && tier < 4) {
+            static constexpr int kSparePrices[4] = {200, 350, 500, 650};
+            int cur = bus->inventoryGetArmorCount(tier);
+            int mx  = bus->inventoryGetArmorMax(tier);
+            if (cur >= mx) {
+                sa::PlayFrontendSound(sa::SFX_ERROR);
+                ui::ShowHelp("Достигнут лимит запасных бронежилетов этого типа!", "Max spare armor of this tier reached!");
+                return;
+            }
+            if (sa::GetPlayerMoney() < kSparePrices[tier]) {
+                sa::PlayFrontendSound(sa::SFX_ERROR);
+                ui::ShowHelp("Недостаточно денег!", "Not enough money!");
+                return;
+            }
+            if (bus->inventoryAddArmor(tier, +1)) {
+                sa::AddPlayerMoney(-kSparePrices[tier]);
+                sa::PlayFrontendSound(sa::SFX_BUY);
+                ui::ShowHelp("~g~Запасной бронежилет добавлен в инвентарь!", "~g~Spare body armor added to inventory!");
+            }
         }
-        sa::AddPlayerMoney(-price);
-        ped->SetArmor(tgt);
-        sa::PlayFrontendSound(sa::SFX_BUY);
         return;
     }
 
@@ -473,7 +501,13 @@ void ProcessMenuInput() {
         case Screen::WeaponList:     curPtr = &g_weapCursor;  count = static_cast<int>(g_catWeapons.size()); break;
         case Screen::WeaponMods:     curPtr = &g_modCursor;   count = static_cast<int>(g_modSlots.size()); break;
         case Screen::ModSlotOptions: curPtr = &g_optCursor;   count = static_cast<int>(g_slotOptions.size()); break;
-        case Screen::ArmorShop:      curPtr = &g_armorCursor; count = 2; break;
+        case Screen::ArmorShop: {
+            auto* bus = modbus::GetBus();
+            bool hasInv = (bus && bus->inventoryInstalled && bus->inventoryAddArmor);
+            curPtr = &g_armorCursor;
+            count  = hasInv ? 6 : 2;
+            break;
+        }
     }
 
     if (curPtr && count > 0) {
@@ -537,10 +571,12 @@ std::string ModSlotTitle(ModSlot slot) {
 void DrawBottomRightWeaponStats(const sa::CPed* ped) {
     if (g_screen == Screen::ArmorShop) {
         int curArm  = sa::IsPedValid(ped) ? static_cast<int>(std::round(ped->GetArmor())) : 0;
-        int prevArm = std::max(curArm, (g_armorCursor == 0) ? 50 : 100);
+        static constexpr int kPreviewVals[6] = {50, 100, 25, 50, 75, 100};
+        int idx     = std::clamp(g_armorCursor, 0, 5);
+        int prevArm = std::max(curArm, kPreviewVals[idx]);
         ui::StatsPanelSpec sp;
         sp.titleGame         = ui::Loc("БРОНЯ", "ARMOR");
-        sp.subtitleGame      = "";
+        sp.subtitleGame      = (idx >= 2) ? ui::Loc("В КАРМАН", "SPARE") : ui::Loc("НА СЕБЯ", "EQUIP");
         sp.anchorBottomRight = true;
         sp.w640              = 152.0f;
         sp.rightMargin640    = 18.0f;
@@ -765,6 +801,33 @@ void Render2D() {
                 r.rightColor = (money >= opts[i].price) ? sa::CRGBA{220, 220, 220, 255} : sa::CRGBA{230, 90, 90, 255};
             }
             spec.rows.push_back(std::move(r));
+        }
+
+        // If GTA5Inventory.asi is installed, also offer GTA 5 Online Spare Body Armor straight in Ammu-Nation!
+        if (auto* bus = modbus::GetBus(); bus && bus->inventoryInstalled && bus->inventoryGetArmorCount && bus->inventoryGetArmorMax) {
+            struct SpareOpt { const char* rus; const char* eng; int price; };
+            static constexpr SpareOpt kSpares[4] = {
+                {"В запас: Лёгкий (25%)",       "Spare: Light (25%)",       200},
+                {"В запас: Средний (50%)",      "Spare: Standard (50%)",    350},
+                {"В запас: Тяжёлый (75%)",      "Spare: Heavy (75%)",       500},
+                {"В запас: Сверхтяжёлый (100%)","Spare: Super Heavy (100%)",650},
+            };
+            for (int t = 0; t < 4; ++t) {
+                int cur = bus->inventoryGetArmorCount(t);
+                int mx  = bus->inventoryGetArmorMax(t);
+                ui::MenuRow r;
+                r.leftGame = ui::Loc(kSpares[t].rus, kSpares[t].eng);
+                char rb[40];
+                if (cur >= mx) {
+                    std::snprintf(rb, sizeof(rb), "%d/%d", cur, mx);
+                    r.rightColor = {115, 225, 125, 255};
+                } else {
+                    std::snprintf(rb, sizeof(rb), "%d/%d $%d", cur, mx, kSpares[t].price);
+                    r.rightColor = (money >= kSpares[t].price) ? sa::CRGBA{140, 200, 255, 255} : sa::CRGBA{230, 90, 90, 255};
+                }
+                r.rightGame = rb;
+                spec.rows.push_back(std::move(r));
+            }
         }
     } else if (g_screen == Screen::WeaponList) {
         const auto& cinfo = kCategories[std::clamp(g_catCursor, 0, kCategoryCount - 1)];

@@ -79,10 +79,15 @@ inline bool IsSA10US() {
 }
 
 inline bool IsCoopModLoaded() {
-    return (GetModuleHandleA("sa-coop.asi") != nullptr) ||
-           (GetModuleHandleA("SA-COOP.asi") != nullptr) ||
-           (GetModuleHandleA("coop.asi")    != nullptr) ||
-           (GetModuleHandleA("sa_coop.asi") != nullptr);
+    return (GetModuleHandleA("coop.asi")           != nullptr) ||
+           (GetModuleHandleA("sa-coop.asi")        != nullptr) ||
+           (GetModuleHandleA("SA-COOP.asi")        != nullptr) ||
+           (GetModuleHandleA("sa_coop.asi")        != nullptr) ||
+           (GetModuleHandleA("CoopAndreas.asi")    != nullptr) ||
+           (GetModuleHandleA("coopandreas.asi")    != nullptr) ||
+           (GetModuleHandleA("sa_coop_client.asi") != nullptr) ||
+           (GetModuleHandleA("sa-coop-client.asi") != nullptr) ||
+           (GetModuleHandleA("coop_client.asi")    != nullptr);
 }
 
 inline bool IsGameWindowFocused() {
@@ -91,6 +96,78 @@ inline bool IsGameWindowFocused() {
     DWORD pid = 0;
     GetWindowThreadProcessId(fg, &pid);
     return pid == GetCurrentProcessId();
+}
+
+// Detects active ImGui / SA-COOP overlays (F9 menu, F2 player list, F4 skins, T chat, Cheat Menu)
+// so our mod hotkeys (F6/F7/TAB) never steal typing or clicks from external overlays!
+inline bool IsExternalOverlayActive() {
+    if (!IsGameWindowFocused()) return true;
+    if (*reinterpret_cast<const uint8_t*>(0x00BA6748 + 0x5C) != 0) return true; // Pause menu
+    CURSORINFO ci{};
+    ci.cbSize = sizeof(ci);
+    if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) != 0) {
+        return true;
+    }
+    return false;
+}
+
+inline std::string SanitizeProfileTag(const char* raw) {
+    std::string out;
+    if (!raw) return out;
+    for (const char* p = raw; *p && out.size() < 28; ++p) {
+        unsigned char ch = static_cast<unsigned char>(*p);
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
+            out.push_back(static_cast<char>(ch));
+        } else if (ch == ' ' && !out.empty() && out.back() != '_') {
+            out.push_back('_');
+        }
+    }
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    return out;
+}
+
+// Reads local player nickname from Karimov-Akbar/sa-coop (coop\coop.ini) or explicit override,
+// enabling isolated per-player profiles on every PC without modifying GTA SA's .b save binary!
+inline std::string GetCoopPlayerProfileName(const char* overrideName = nullptr) {
+    if (overrideName && overrideName[0]) {
+        std::string s = SanitizeProfileTag(overrideName);
+        if (!s.empty()) return s;
+    }
+
+    char exeBuf[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exeBuf, MAX_PATH);
+    std::string exeFull(exeBuf);
+    size_t slash = exeFull.find_last_of("\\/");
+    std::string gDir = (slash != std::string::npos) ? exeFull.substr(0, slash) : ".";
+
+    const std::string iniPaths[3] = {
+        gDir + "\\coop\\coop.ini",
+        gDir + "\\sa-coop.ini",
+        gDir + "\\coop.ini"
+    };
+    const char* sections[] = {"coop", "player", "network", "game", "general"};
+    const char* keys[]     = {"nickname", "name", "player_name", "username", "playername"};
+
+    for (const auto& path : iniPaths) {
+        if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        for (const char* sec : sections) {
+            for (const char* key : keys) {
+                char val[64] = {};
+                GetPrivateProfileStringA(sec, key, "", val, sizeof(val), path.c_str());
+                std::string clean = SanitizeProfileTag(val);
+                if (!clean.empty()) return clean;
+            }
+        }
+    }
+
+    char userBuf[64] = {};
+    DWORD userLen = sizeof(userBuf);
+    if (GetUserNameA(userBuf, &userLen) && userBuf[0]) {
+        std::string clean = SanitizeProfileTag(userBuf);
+        if (!clean.empty()) return clean;
+    }
+    return "player";
 }
 
 inline std::string GetUserFilesSubDir(const char* subFolder, const std::string& fallbackDir) {
@@ -105,6 +182,38 @@ inline std::string GetUserFilesSubDir(const char* subFolder, const std::string& 
     std::string dir = fallbackDir + "\\" + subFolder;
     CreateDirectoryA(dir.c_str(), nullptr);
     return dir;
+}
+
+// Unified save-file resolver for Singleplayer slots (1..8) AND SA-COOP per-player profiles (slot 0)!
+inline std::string BuildSaveProfilePath(const char* saveFolder, const std::string& fallbackDir,
+                                        const char* filePrefix, int slot1to8,
+                                        const char* coopOverride = nullptr)
+{
+    std::string dir = GetUserFilesSubDir(saveFolder, fallbackDir);
+    char name[96];
+    if (slot1to8 >= 1 && slot1to8 <= 8) {
+        std::snprintf(name, sizeof(name), "\\%s_slot_%d.ini", filePrefix, slot1to8);
+    } else if (IsCoopModLoaded()) {
+        std::string nick = GetCoopPlayerProfileName(coopOverride);
+        std::snprintf(name, sizeof(name), "\\%s_coop_%s.ini", filePrefix, nick.c_str());
+    } else {
+        std::snprintf(name, sizeof(name), "\\%s_autosave.ini", filePrefix);
+    }
+    return dir + name;
+}
+
+// When loading in SA-COOP for the first time after upgrading, smoothly migrate from legacy *_autosave.ini if present!
+inline std::string ResolveExistingLoadPath(const char* saveFolder, const std::string& fallbackDir,
+                                           const char* filePrefix, int slot1to8,
+                                           const char* coopOverride = nullptr)
+{
+    std::string primary = BuildSaveProfilePath(saveFolder, fallbackDir, filePrefix, slot1to8, coopOverride);
+    if (GetFileAttributesA(primary.c_str()) != INVALID_FILE_ATTRIBUTES) return primary;
+    if ((slot1to8 < 1 || slot1to8 > 8) && IsCoopModLoaded()) {
+        std::string legacy = GetUserFilesSubDir(saveFolder, fallbackDir) + "\\" + std::string(filePrefix) + "_autosave.ini";
+        if (GetFileAttributesA(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) return legacy;
+    }
+    return primary;
 }
 
 // Parse slot number 1..8 from GTA SA save filename buffer (e.g., "...\GTASAsf3.b")
@@ -169,6 +278,14 @@ inline uint8_t GetClockHours() {
     return *reinterpret_cast<const uint8_t*>(0x00B70153); // CClock::ms_nGameClockHours
 }
 
+inline uint8_t GetClockMinutes() {
+    return *reinterpret_cast<const uint8_t*>(0x00B70152); // CClock::ms_nGameClockMinutes
+}
+
+inline uint8_t GetClockDaysPassed() {
+    return *reinterpret_cast<const uint8_t*>(0x00B70154); // CClock::ms_nGameClockDays
+}
+
 inline bool IsOnMission() {
     const uint8_t* scriptSpace = reinterpret_cast<const uint8_t*>(0x00A49960);
     return (*reinterpret_cast<const int32_t*>(scriptSpace + 0x4 * 4)) != 0;
@@ -230,6 +347,39 @@ static_assert(sizeof(CMouseControllerState) == 20, "CMouseControllerState must b
 
 inline CMouseControllerState* GetNewMouseState() {
     return reinterpret_cast<CMouseControllerState*>(0x00B73418);
+}
+
+// Clears ALL player movement, combat, camera, and mouse inputs while Phone / Modal UI is active!
+// Keeps CJ completely stationary even when navigating Phone with WASD, Arrows, Mouse Wheel, LMB/RMB!
+inline void ClearPadPhoneInputs() {
+    uint8_t* pad = GetPad0();
+    *reinterpret_cast<int16_t*>(pad + 0x00) = 0; // LeftStickX  (A/D movement)
+    *reinterpret_cast<int16_t*>(pad + 0x02) = 0; // LeftStickY  (W/S movement)
+    *reinterpret_cast<int16_t*>(pad + 0x04) = 0; // RightStickX (Camera X)
+    *reinterpret_cast<int16_t*>(pad + 0x06) = 0; // RightStickY (Camera Y)
+    *reinterpret_cast<int16_t*>(pad + 0x08) = 0; // LeftShoulder1 (TAB)
+    *reinterpret_cast<int16_t*>(pad + 0x0A) = 0; // LeftShoulder2 (Q / Prev Weapon)
+    *reinterpret_cast<int16_t*>(pad + 0x0C) = 0; // RightShoulder1 (Aim)
+    *reinterpret_cast<int16_t*>(pad + 0x0E) = 0; // RightShoulder2 (E / Next Weapon)
+    *reinterpret_cast<int16_t*>(pad + 0x10) = 0; // DPadUp
+    *reinterpret_cast<int16_t*>(pad + 0x12) = 0; // DPadDown
+    *reinterpret_cast<int16_t*>(pad + 0x14) = 0; // DPadLeft
+    *reinterpret_cast<int16_t*>(pad + 0x16) = 0; // DPadRight
+    *reinterpret_cast<int16_t*>(pad + 0x1A) = 0; // Select
+    *reinterpret_cast<int16_t*>(pad + 0x1C) = 0; // ButtonSquare (Jump/Brake)
+    *reinterpret_cast<int16_t*>(pad + 0x1E) = 0; // ButtonTriangle (Enter/Exit car)
+    *reinterpret_cast<int16_t*>(pad + 0x20) = 0; // ButtonCross (Sprint/Gas)
+    *reinterpret_cast<int16_t*>(pad + 0x22) = 0; // ButtonCircle (Fire/Attack)
+    *reinterpret_cast<int16_t*>(pad + 0x24) = 0; // ShockButtonL (Crouch/Horn)
+    *reinterpret_cast<int16_t*>(pad + 0x26) = 0; // ShockButtonR
+    auto* ms = GetNewMouseState();
+    ms->X = 0.0f;
+    ms->Y = 0.0f;
+    ms->Z = 0.0f;
+    ms->lmb = 0;
+    ms->rmb = 0;
+    ms->wheelUp = 0;
+    ms->wheelDown = 0;
 }
 
 // Suppresses firing, aiming, camera rotation, weapon cycling & TAB stats while Weapon Wheel is held
@@ -507,9 +657,12 @@ struct CPed : CEntity {
     uint8_t* Raw() { return reinterpret_cast<uint8_t*>(this); }
     const uint8_t* Raw() const { return reinterpret_cast<const uint8_t*>(this); }
 
-    float GetHealth() const { return *reinterpret_cast<const float*>(Raw() + 0x540); }
-    float GetArmor() const  { return *reinterpret_cast<const float*>(Raw() + 0x548); }
-    void  SetArmor(float v) { *reinterpret_cast<float*>(Raw() + 0x548) = v; }
+    float GetHealth() const    { return *reinterpret_cast<const float*>(Raw() + 0x540); }
+    void  SetHealth(float v)   { *reinterpret_cast<float*>(Raw() + 0x540) = v; }
+    float GetMaxHealth() const { return *reinterpret_cast<const float*>(Raw() + 0x544); }
+    float GetArmor() const     { return *reinterpret_cast<const float*>(Raw() + 0x548); }
+    void  SetArmor(float v)    { *reinterpret_cast<float*>(Raw() + 0x548) = v; }
+    void* GetPlayerData() const { return *reinterpret_cast<void* const*>(Raw() + 0x480); }
     void* GetVehiclePtr() const { return *reinterpret_cast<void* const*>(Raw() + 0x58C); }
     bool  IsInVehicle() const { return (*reinterpret_cast<const uint32_t*>(Raw() + 0x46C) & 0x100) != 0 && GetVehiclePtr() != nullptr; }
     bool  IsInWater() const { return (*reinterpret_cast<const uint32_t*>(Raw() + 0x46C) & 0x40) != 0; }
@@ -1012,7 +1165,19 @@ namespace font {
     inline float GetStringWidth(const char* text, bool unk1 = true, bool spaces = false) {
         return reinterpret_cast<float(__cdecl*)(const char*, bool, bool)>(0x0071A0E0)(text, unk1, spaces);
     }
+    // Verified at 0x0071A5E0 (called by CHud::DrawHelpText @ 0x0058B7E5): exact wrapped line count!
+    inline int16_t GetNumberLines(float x, float y, const char* text) {
+        return reinterpret_cast<int16_t(__cdecl*)(float, float, const char*)>(0x0071A5E0)(x, y, text);
+    }
     inline void DrawRect(const CRect& r, const CRGBA& c) { reinterpret_cast<void(__cdecl*)(const CRect&, const CRGBA&)>(0x00727B60)(r, c); }
+}
+
+// Verified at 0x005817C9 (CVehicleModelInfo::ms_vehicleColourTable @ 0x00B4E480, 128 CRGBA entries)
+inline CRGBA GetVehicleColorRGBA(uint8_t colorIdx) {
+    const auto* tbl = reinterpret_cast<const CRGBA*>(0x00B4E480);
+    CRGBA c = tbl[colorIdx & 0x7F];
+    c.a = 255;
+    return c;
 }
 
 // Verified at 0x00728350 (CSprite2d::Draw(CRect const&, CRGBA const&), __thiscall on RwTexture**):
@@ -1052,29 +1217,34 @@ inline void RegisterCorona(
 }
 
 // ============================================================================
-// CMenuSystem Structures (Verified against gta_sa.exe 1.0 US)
+// CMenuSystem Structures (Fully Verified against gta_sa.exe 1.0 US @ 0x00580E00)
 // ============================================================================
 #pragma pack(push, 1)
 struct tMenuPanel {
-    uint8_t  m_anUsedCarColors[64];
-    uint8_t  m_nType;
-    char     m_aaacRowItems[4][12][10];
-    uint8_t  _unk221[0x1AB];
-    char     m_acTitle[10];
-    uint8_t  m_anRowEnabled[12];
-    uint8_t  _unk3E2[0x14];
-    uint8_t  m_nNumRows;
-    uint8_t  m_nNumColumns;
-    uint8_t  m_bInteractive;
-    uint8_t  m_bColumnBackground;
-    uint8_t  _pad3FA[2];
-    float    m_fColumnWidth[4];
-    float    m_fPosX;
-    float    m_fPosY;
-    uint8_t  m_bBackground;
-    int8_t   m_nSelectedRow;
-    int8_t   m_nAcceptedRow;
-    uint8_t  _pad417;
+    uint8_t  m_anUsedCarColors[64];           // +0x000
+    uint8_t  m_nType;                         // +0x040 (0=Standard, 1=Grid)
+    char     m_aaacRowItems[4][12][10];       // +0x041
+    uint8_t  _pad221[3];                      // +0x221
+    int32_t  m_aadwNumberInRowTitle[4][12];   // +0x224
+    int32_t  m_aadw2ndNumberInRowTitle[4][12];// +0x2E4
+    char     m_aacColumnHeaders[4][10];       // +0x3A4
+    char     m_acTitle[10];                   // +0x3CC
+    uint8_t  m_anRowEnabled[12];              // +0x3D6
+    uint8_t  m_anRowHighlighted[12];          // +0x3E2
+    uint8_t  m_anColumnAlignment[4];          // +0x3EE
+    int8_t   m_anColumnHeaderAlignment[4];    // +0x3F2
+    uint8_t  m_nNumRows;                      // +0x3F6
+    uint8_t  m_nNumColumns;                   // +0x3F7
+    uint8_t  m_bInteractive;                  // +0x3F8
+    uint8_t  m_bColumnBackground;             // +0x3F9
+    uint8_t  _pad3FA[2];                      // +0x3FA
+    float    m_fColumnWidth[4];               // +0x3FC
+    float    m_fPosX;                         // +0x40C
+    float    m_fPosY;                         // +0x410
+    uint8_t  m_bBackground;                   // +0x414
+    int8_t   m_nSelectedRow;                  // +0x415
+    int8_t   m_nAcceptedRow;                  // +0x416
+    uint8_t  _pad417;                         // +0x417
 };
 static_assert(sizeof(tMenuPanel) == 0x418, "tMenuPanel must be 0x418 bytes");
 #pragma pack(pop)
@@ -1086,9 +1256,134 @@ inline tMenuPanel* GetMenuPanel(int idx) {
     return reinterpret_cast<tMenuPanel**>(0x00BA82D8)[idx];
 }
 
+inline int8_t GetCurrentMenuInFocus() {
+    return *reinterpret_cast<const int8_t*>(0x00BA82E2);
+}
+
 inline uint8_t GetNumMenusInUse() {
     return *reinterpret_cast<const uint8_t*>(0x00BA82E3);
 }
+
+// Verified at 0x0069DE90 & 0x0069E160 (called by CMenuSystem::DisplayStandardMenu @ 0x00581444)
+inline void InsertNumberInString(const char* src, int32_t n1, int32_t n2, int32_t n3,
+                                 int32_t n4, int32_t n5, int32_t n6, char* dst) {
+    using Fn = void(__cdecl*)(const char*, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, char*);
+    reinterpret_cast<Fn>(0x0069DE90)(src, n1, n2, n3, n4, n5, n6, dst);
+}
+
+inline void InsertPlayerControlKeysInString(char* str) {
+    reinterpret_cast<void(__cdecl*)(char*)>(0x0069E160)(str);
+}
+
+// ============================================================================
+// CKeyGen, CStats, CWanted, CClothes, CShopping (Verified against gta_sa.exe!)
+// ============================================================================
+inline uint32_t GetUppercaseKey(const char* str) {
+    if (!str) return 0;
+    return reinterpret_cast<uint32_t(__cdecl*)(const char*)>(0x0053CF30)(str);
+}
+
+namespace stats {
+    constexpr uint16_t STAT_FAT        = 21;
+    constexpr uint16_t STAT_STAMINA    = 22;
+    constexpr uint16_t STAT_MUSCLE     = 23;
+    constexpr uint16_t STAT_MAX_HEALTH = 24;
+
+    // Verified at 0x00558E40 & 0x0055A070
+    inline float Get(uint16_t statId) {
+        return reinterpret_cast<float(__cdecl*)(uint16_t)>(0x00558E40)(statId);
+    }
+    inline void Set(uint16_t statId, float value) {
+        reinterpret_cast<void(__cdecl*)(uint16_t, float)>(0x0055A070)(statId, value);
+    }
+} // namespace stats
+
+namespace wanted {
+    // Verified at 0x0056E230 (FindPlayerWanted), +0x2C (m_nWantedLevel), 0x00562470 (SetWantedLevel)
+    inline uint8_t* GetPlayerWanted(int32_t playerId = 0) {
+        return reinterpret_cast<uint8_t*(__cdecl*)(int32_t)>(0x0056E230)(playerId);
+    }
+    inline int32_t GetLevel(int32_t playerId = 0) {
+        uint8_t* w = GetPlayerWanted(playerId);
+        return w ? *reinterpret_cast<const int32_t*>(w + 0x2C) : 0;
+    }
+    inline void SetLevel(int32_t stars, int32_t playerId = 0) {
+        uint8_t* w = GetPlayerWanted(playerId);
+        if (!w) return;
+        if (stars < 0) stars = 0;
+        if (stars > 6) stars = 6;
+        using Fn = void(__thiscall*)(void*, int32_t);
+        reinterpret_cast<Fn>(0x00562470)(w, stars);
+    }
+} // namespace wanted
+
+namespace clothes {
+    struct CPedClothesDesc {
+        uint32_t m_anModelKeys[10];   // +0x00
+        uint32_t m_anTextureKeys[18]; // +0x28
+        float    m_fFatStat;          // +0x70
+        float    m_fMuscleStat;       // +0x74
+    };
+
+    inline CPedClothesDesc* GetPlayerClothesDesc(const CPed* ped) {
+        if (!IsPedValid(ped)) return nullptr;
+        uint8_t* pdata = reinterpret_cast<uint8_t*>(ped->GetPlayerData());
+        if (!pdata) return nullptr;
+        return *reinterpret_cast<CPedClothesDesc**>(pdata + 0x04);
+    }
+
+    // Verified at 0x005A8080: void __thiscall CPedClothesDesc::SetTextureAndModel(const char* tex, const char* model, uint32_t bodyPart)
+    inline void SetTextureAndModel(CPedClothesDesc* desc, const char* texName, const char* modelName, uint32_t bodyPart) {
+        if (!desc || bodyPart >= 18) return;
+        using Fn = void(__thiscall*)(void*, const char*, const char*, uint32_t);
+        reinterpret_cast<Fn>(0x005A8080)(desc, texName, modelName, bodyPart);
+    }
+
+    // Verified at 0x005A82C0: void __cdecl CClothes::RebuildPlayer(CPlayerPed* player, bool bIgnoreFatAndMuscle)
+    inline void RebuildPlayer(CPed* ped, bool ignoreFatAndMuscle = false) {
+        if (!IsPedValid(ped)) return;
+        reinterpret_cast<void(__cdecl*)(CPed*, bool)>(0x005A82C0)(ped, ignoreFatAndMuscle);
+    }
+} // namespace clothes
+
+namespace shopping {
+    constexpr int MAX_SHOPPING_ITEMS = 0x230; // 560 verified at 0x0049BC5E
+
+    // Verified at 0x0049BBE8
+    inline const char* GetLoadedShopName() {
+        return reinterpret_cast<const char*>(0x00A9A7D8);
+    }
+
+    // Verified at 0x0049BC54 (keys @ 0x00A97D90) & 0x0049BC68 (bought flags @ 0x00A972A0)
+    inline int FindItemIndexByHash(uint32_t hash) {
+        if (hash == 0) return -1;
+        const uint32_t* keys = reinterpret_cast<const uint32_t*>(0x00A97D90);
+        for (int i = 0; i < MAX_SHOPPING_ITEMS; ++i) {
+            if (keys[i] == hash) return i;
+        }
+        return -1;
+    }
+
+    inline bool HasBoughtHash(uint32_t hash) {
+        int idx = FindItemIndexByHash(hash);
+        if (idx < 0) return false;
+        return reinterpret_cast<const uint8_t*>(0x00A972A0)[idx] != 0;
+    }
+
+    inline bool HasBoughtName(const char* itemName) {
+        return HasBoughtHash(GetUppercaseKey(itemName));
+    }
+
+    inline void SetBoughtHash(uint32_t hash, bool bought) {
+        int idx = FindItemIndexByHash(hash);
+        if (idx < 0) return;
+        reinterpret_cast<uint8_t*>(0x00A972A0)[idx] = bought ? 1 : 0;
+    }
+
+    inline void SetBoughtName(const char* itemName, bool bought) {
+        SetBoughtHash(GetUppercaseKey(itemName), bought);
+    }
+} // namespace shopping
 
 // ============================================================================
 // Native SCM Opcode Runner (Calls CRunningScript::ProcessOneCommand 0x00469EB0)

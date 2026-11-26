@@ -8,6 +8,7 @@
 #include "ammu_shop.hpp"
 #include "config.hpp"
 #include "log.hpp"
+#include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "ui_kit.hpp"
 #include "weapon_data.hpp"
@@ -201,7 +202,9 @@ void PreScriptsTick() {
     bool canOpen = (sa::GetGameState() == 9) &&
                    !sa::IsPauseMenuActive() &&
                    !sa::IsCutsceneRunning() &&
+                   !sa::IsExternalOverlayActive() &&
                    !ammu::IsShopActive() &&
+                   !modbus::IsAnyModalMenuOpen("weapons") &&
                    (sa::GetNumMenusInUse() == 0) &&
                    sa::IsPedValid(ped) &&
                    ped->GetHealth() > 0.0f &&

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "v1.0.0",
+    [string]$Version = "v2.0.0",
     [switch]$SkipZip
 )
 
@@ -8,16 +8,19 @@ $RootDir = $PSScriptRoot
 $DistDir = Join-Path $RootDir "dist"
 
 $Mods = @(
-    @{ Folder = "ModDev_GTA5Garage";  Name = "GTA5GarageAndTuning" },
+    @{ Folder = "ModDev_UIKit";       Name = "GTA5UIKit" },
     @{ Folder = "ModDev_GTA5Weapons"; Name = "GTA5AmmuNation" },
+    @{ Folder = "ModDev_GTA5Garage";  Name = "GTA5GarageAndTuning" },
+    @{ Folder = "ModDev_Inventory";   Name = "GTA5Inventory" },
+    @{ Folder = "ModDev_Phone";       Name = "GTA5Phone" },
     @{ Folder = "ModDev_EarlyUnlock"; Name = "GTA5EarlyUnlock" }
 )
 
-Write-Host "=== Building all GTA SA GTA5-style ASI plugins ($Version) ===" -ForegroundColor Cyan
+Write-Host "=== Building all 6 modular GTA SA GTA5-style ASI plugins ($Version) ===" -ForegroundColor Cyan
 
 foreach ($m in $Mods) {
     $script = Join-Path $RootDir "$($m.Folder)\build.ps1"
-    & $script -NoDeploy
+    powershell -NoProfile -ExecutionPolicy Bypass -File $script -NoDeploy
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to build $($m.Name)"
     }
@@ -63,4 +66,4 @@ if (-not $SkipZip) {
     Write-Host "[PACK] Created $BundleZip" -ForegroundColor Green
 }
 
-Write-Host "=== All 3 ASI plugins built & packaged cleanly! ===" -ForegroundColor Cyan
+Write-Host "=== All 6 ASI plugins built & packaged cleanly! ===" -ForegroundColor Cyan

@@ -3,25 +3,36 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <windows.h>
 #include "sa_sdk.hpp"
 #include "text_rus.hpp"
+#include "mod_bus.hpp"
 
 // ============================================================================
-// Shared GTA SA Vanilla Dumb-Component UI Kit (Web-Style Architecture)
+// Shared GTA SA Atomic Dumb-Component UI Kit (3-Tier Web-Style Architecture)
 //
-// Core Design:
-//   1. Single root ui::Theme controls ALL sizing, fonts, margins & colors across all mods.
-//   2. Automatic text fitting via native CFont::GetStringWidth (0x0071A0E0):
-//      EVERY label, title, right-badge, footer & wheel label automatically shrinks
-//      to fit inside its container width (and screen bounds) — ZERO overflow ever!
-//   3. Dumb, stateless/signal-emitting UI components:
-//      - ui::ListMenu     (populates via .AddItem(), emits MenuEvent signals)
-//      - ui::StatsCard    (populates via .AddBar(), renders anchored card)
-//      - ui::TextPrompt   (populates via .SetText(), emits PromptEvent signals)
-//      - ui::RadialWheel  (populates via .SetSector(), emits WheelEvent signals)
+// Strict Layer Hierarchy:
+//   Tier 0 — ThemeTokens (`ui::Theme()`)
+//            Single source of truth for palette, spacing, fonts & global scale
+//            (synchronized live across ALL mods from GTA5UIKit.ini via ModBus).
+//
+//   Tier 1 — Dumb Primitives (`ui::prim::*`)
+//            THE ONLY LAYER THAT TOUCHES `sa::font::DrawRect` / `CFont::PrintString`!
+//            Primitives: Rect, Panel, Divider, AccentStrip, Label (auto-fit),
+//            WrappedText, Header, Row, Footer, ProgressBar, TextField, Banner, Swatch.
+//            Styling a primitive automatically restyles EVERY window in EVERY mod!
+//
+//   Tier 2 — Composite Dumb Components (100% composed from `ui::prim::*`)
+//            - ui::ListMenu        (scrollable list menus, shops, vanilla restyle)
+//            - ui::StatsCard       (vehicle/weapon/vitals stat bars + ETS2 red wear)
+//            - ui::PhoneFrame      (authentic 1990s keypad handset with LCD themes)
+//            - ui::TextInputModal  (sleek monochrome text entry modal, e.g. plates)
+//            - ui::HelpToast       (restyled vanilla notifications / phone prompts / Q&A)
+//            - ui::ColorGrid       (restyled vanilla CMenuSystem DisplayGridMenu swatches)
+//            - ui::RadialWheel     (8-sector monochrome GTA SA weapon wheel)
 // ============================================================================
 namespace ui {
 
@@ -99,16 +110,15 @@ inline KeyTracker& Keys() {
     return kt;
 }
 
-// ----------------------------------------------------------------------------
-// Root Theme & WidescreenFix-Matched Scale Engine
-// ----------------------------------------------------------------------------
+// ============================================================================
+// TIER 0: Root Theme Tokens & WidescreenFix-Matched Scale Engine
+// ============================================================================
 struct ThemeTokens {
-    // Global root scale multiplier (1.0 = exact vanilla GTA SA + WidescreenFix scale!)
     float uiScale        = 1.0f;
-    float screenMarginX  = 14.0f; // 640-space safety margin from left/right screen edges
-    float screenMarginY  = 14.0f; // 448-space safety margin from top/bottom screen edges
+    float screenMarginX  = 14.0f;
+    float screenMarginY  = 14.0f;
 
-    // ListMenu geometry (in 640x448 virtual space)
+    // Shared geometry (in 640x448 virtual coordinates)
     float menuDefaultW   = 176.0f;
     float menuHeaderH    = 17.5f;
     float menuColBarH    = 12.0f;
@@ -117,7 +127,6 @@ struct ThemeTokens {
     float menuPadX       = 6.0f;
     float menuPadBot     = 4.5f;
 
-    // StatsCard geometry (in 640x448 virtual space)
     float cardDefaultW   = 148.0f;
     float cardHeaderH    = 16.0f;
     float cardRowH       = 17.5f;
@@ -130,12 +139,15 @@ struct ThemeTokens {
     float fontRowX       = 0.28f, fontRowY    = 0.56f;
     float fontFooterX    = 0.24f, fontFooterY = 0.48f;
     float fontStatX      = 0.25f, fontStatY   = 0.50f;
-    float fontMinRatio   = 0.55f; // Never squish text below 55% width
+    float fontToastX     = 0.27f, fontToastY  = 0.54f;
+    float fontMinRatio   = 0.36f;
 
-    // Authentic Vanilla GTA San Andreas Monochrome Palette (Black / Grey / White + HUD Green/Red)
-    sa::CRGBA bgBody       = {0, 0, 0, 195};
-    sa::CRGBA bgHeader     = {0, 0, 0, 232};
-    sa::CRGBA bgFooter     = {0, 0, 0, 185};
+    // Unified Vanilla GTA SA Monochrome Palette
+    sa::CRGBA bgBody       = {0,   0,   0,   195};
+    sa::CRGBA bgHeader     = {0,   0,   0,   232};
+    sa::CRGBA bgFooter     = {0,   0,   0,   185};
+    sa::CRGBA bgInput      = {14,  14,  16,  240};
+    sa::CRGBA borderSubtle = {160, 160, 165, 90};
     sa::CRGBA divider      = {175, 175, 175, 95};
     sa::CRGBA selectFill   = {215, 215, 215, 62};
     sa::CRGBA textTitle    = {232, 232, 232, 255};
@@ -144,10 +156,11 @@ struct ThemeTokens {
     sa::CRGBA textSelected = {255, 255, 255, 255};
     sa::CRGBA textDisabled = {105, 105, 105, 255};
     sa::CRGBA textFooter   = {200, 200, 200, 255};
-    sa::CRGBA barTrack     = {62, 62, 62, 190};
+    sa::CRGBA barTrack     = {62,  62,  62,  190};
     sa::CRGBA barFill      = {218, 218, 218, 240};
-    sa::CRGBA barGain      = {82, 222, 105, 255};
-    sa::CRGBA barLoss      = {228, 78, 78, 255};
+    sa::CRGBA barGain      = {82,  222, 105, 255};
+    sa::CRGBA barLoss      = {228, 78,  78,  255};
+    sa::CRGBA accentWarn   = {235, 200, 95,  255};
 };
 
 inline ThemeTokens& Theme() {
@@ -155,13 +168,33 @@ inline ThemeTokens& Theme() {
     return t;
 }
 
+inline void SyncFromSharedBus() {
+    if (auto* b = modbus::GetBus(); b && b->uiKitInstalled) {
+        UseRussianFlag() = b->useRussian;
+        Theme().uiScale  = std::clamp(b->uiScale, 0.70f, 1.40f);
+    }
+}
+
 inline void GetScreenScales(float& sw, float& sh, float& xScale, float& sy) {
+    SyncFromSharedBus();
     sw = static_cast<float>(sa::GetScreenWidth());
     sh = static_cast<float>(sa::GetScreenHeight());
     const float mult = Theme().uiScale;
     sy = (sh / 448.0f) * mult;
     xScale = ((sw / sh > 1.4f) ? (sh * (4.0f / 3.0f) / 640.0f) : (sw / 640.0f)) * mult;
 }
+
+inline sa::CRGBA WithAlpha(sa::CRGBA c, float alphaFrac) {
+    float a = std::clamp(static_cast<float>(c.a) * std::clamp(alphaFrac, 0.0f, 1.0f), 0.0f, 255.0f);
+    return {c.r, c.g, c.b, static_cast<uint8_t>(a)};
+}
+
+// ============================================================================
+// TIER 1: Dumb Atomic UI Primitives (`ui::prim`)
+// ALL low-level rectangles, borders, headers, dividers, rows, footers, bars,
+// input fields, swatches, and typography live strictly here!
+// ============================================================================
+namespace prim {
 
 inline void PrepareFontBase() {
     sa::font::SetBackground(false, false);
@@ -173,16 +206,39 @@ inline void PrepareFontBase() {
     sa::font::SetRightJustifyWrap(0.0f);
 }
 
-// ============================================================================
-// Auto-Fitting Text Renderer (Uses native CFont::GetStringWidth @ 0x0071A0E0!)
-// Automatically shrinks font scale if text exceeds maxWidthPx -> ZERO overflow!
-// align: 0 = Center, 1 = Left, 2 = Right
-// ============================================================================
-inline void PrintFittedText(float x, float y, float maxWidthPx, const char* gameText,
-                            uint8_t fontStyle, float scaleX, float scaleY,
-                            uint8_t align, sa::CRGBA color)
+// 1. Rect: Standard top-left (x, y, w, h) rectangle primitive
+inline void Rect(float x, float y, float w, float h, sa::CRGBA col) {
+    if (col.a == 0 || w <= 0.0f || h <= 0.0f) return;
+    sa::font::DrawRect({x, y + h, x + w, y}, col);
+}
+
+// 2. Panel: Styled surface box with optional subtle outline
+inline void Panel(float x, float y, float w, float h, sa::CRGBA bg, sa::CRGBA border = {0, 0, 0, 0},
+                  float borderPxX = 0.7f, float borderPxY = 0.7f)
 {
-    if (!gameText || !gameText[0]) return;
+    if (border.a > 0) {
+        Rect(x - borderPxX, y - borderPxY, w + borderPxX * 2.0f, h + borderPxY * 2.0f, border);
+    }
+    Rect(x, y, w, h, bg);
+}
+
+// 3. Divider: Thin horizontal separator rule
+inline void Divider(float x, float y, float w, float h, sa::CRGBA col) {
+    Rect(x, y, w, h, col);
+}
+
+// 4. AccentStrip: Left/top semantic highlight strip (used by HelpToast & cards)
+inline void AccentStrip(float x, float y, float w, float h, sa::CRGBA col) {
+    Rect(x, y, w, h, col);
+}
+
+// 5. Label: Single-line auto-fitting text (NEVER overflows or wraps into columns!)
+// align: 0 = Center, 1 = Left, 2 = Right
+inline void Label(float x, float y, float maxWidthPx, const char* gameText,
+                  uint8_t fontStyle, float scaleX, float scaleY,
+                  uint8_t align, sa::CRGBA color)
+{
+    if (!gameText || !gameText[0] || color.a == 0) return;
     PrepareFontBase();
     sa::font::SetFontStyle(fontStyle);
     sa::font::SetScale(scaleX, scaleY);
@@ -194,26 +250,196 @@ inline void PrintFittedText(float x, float y, float maxWidthPx, const char* game
         if (measured > maxWidthPx && measured > 1.0f) {
             float ratio = std::max(Theme().fontMinRatio, (maxWidthPx / measured) * 0.96f);
             fitX = scaleX * ratio;
-            // Gently trim Y height too so narrowed text stays naturally proportioned
             fitY = scaleY * (0.65f + 0.35f * ratio);
             sa::font::SetScale(fitX, fitY);
         }
     }
 
     sa::font::SetColor(color);
+    sa::font::SetDropColor({0, 0, 0, color.a});
     sa::font::SetOrientation(align);
-    if (align == 0) {
-        sa::font::SetCentreSize(std::max(10.0f, maxWidthPx + 4.0f));
-    } else if (align == 1) {
-        sa::font::SetWrapx(x + std::max(10.0f, maxWidthPx + 8.0f));
-    } else {
-        sa::font::SetRightJustifyWrap(std::max(0.0f, x - std::max(10.0f, maxWidthPx + 8.0f)));
-    }
+    const float sw = static_cast<float>(std::max(640, sa::GetScreenWidth()));
+    if (align == 0)      sa::font::SetCentreSize(sw);
+    else if (align == 1) sa::font::SetWrapx(sw);
+    else                 sa::font::SetRightJustifyWrap(0.0f);
     sa::font::PrintString(x, y, gameText);
 }
 
+// 6. MeasureWrappedLines & WrappedText: Multi-line wrapped paragraph primitive (for HelpToast!)
+inline int MeasureWrappedLines(float x, float y, float maxWidthPx, const char* gameText,
+                               uint8_t fontStyle, float scaleX, float scaleY)
+{
+    if (!gameText || !gameText[0]) return 0;
+    PrepareFontBase();
+    sa::font::SetFontStyle(fontStyle);
+    sa::font::SetScale(scaleX, scaleY);
+    sa::font::SetOrientation(1);
+    sa::font::SetWrapx(x + std::max(32.0f, maxWidthPx));
+    int lines = static_cast<int>(sa::font::GetNumberLines(x, y, gameText));
+    return std::max(1, lines);
+}
+
+inline void WrappedText(float x, float y, float maxWidthPx, const char* gameText,
+                        uint8_t fontStyle, float scaleX, float scaleY, sa::CRGBA color)
+{
+    if (!gameText || !gameText[0] || color.a == 0) return;
+    PrepareFontBase();
+    sa::font::SetFontStyle(fontStyle);
+    sa::font::SetScale(scaleX, scaleY);
+    sa::font::SetColor(color);
+    sa::font::SetDropColor({0, 0, 0, color.a});
+    sa::font::SetOrientation(1);
+    sa::font::SetWrapx(x + std::max(32.0f, maxWidthPx));
+    sa::font::PrintString(x, y, gameText);
+    // Reset wrapx to full screen width afterward so nothing downstream gets clipped
+    sa::font::SetWrapx(static_cast<float>(std::max(640, sa::GetScreenWidth())));
+}
+
+// 7. Header: Standard dark header bar with title, optional right badge/counter, and bottom divider
+inline void Header(float x, float y, float w, float h, float padX,
+                   const std::string& title, const std::string& rightBadge,
+                   float titleSx, float titleSy, float badgeSx, float badgeSy,
+                   float xScale, float sy,
+                   sa::CRGBA bgCol, sa::CRGBA divCol, sa::CRGBA titleCol, sa::CRGBA badgeCol,
+                   bool drawDivider = true, float badgeReserveRatio = 0.38f)
+{
+    Rect(x, y, w, h, bgCol);
+    const float badgeRes = rightBadge.empty() ? 0.0f : (w * badgeReserveRatio);
+    Label(x + padX, y + 2.2f * sy, w - padX * 2.0f - badgeRes, title.c_str(),
+          2, titleSx, titleSy, 1, titleCol);
+    if (!rightBadge.empty()) {
+        Label(x + w - padX, y + 3.2f * sy, badgeRes, rightBadge.c_str(),
+              1, badgeSx, badgeSy, 2, badgeCol);
+    }
+    if (drawDivider && divCol.a > 0) {
+        Divider(x + 2.5f * xScale, y + h - 0.7f * sy, w - 5.0f * xScale, 0.7f * sy, divCol);
+    }
+}
+
+// 8. Row: Standard interactive list row with highlight strip + left/right auto-fitted labels
+inline void Row(float x, float y, float w, float h, float padX,
+                const std::string& leftText, const std::string& rightText,
+                bool selected, bool enabled,
+                float fontSx, float fontSy, float xScale, float sy,
+                sa::CRGBA selFill, sa::CRGBA leftCol, sa::CRGBA rightCol,
+                sa::CRGBA selTextCol, sa::CRGBA disTextCol)
+{
+    if (selected && selFill.a > 0) {
+        Rect(x + 1.8f * xScale, y + 0.4f * sy, w - 3.6f * xScale, h - 0.8f * sy, selFill);
+    }
+    const float rightRes = rightText.empty() ? 0.0f : (w * 0.38f);
+    const float leftMaxW = w - padX * 2.0f - rightRes - (rightText.empty() ? 0.0f : 3.8f * xScale);
+
+    sa::CRGBA lCol = selected ? selTextCol : (enabled ? leftCol : disTextCol);
+    Label(x + padX, y + 1.4f * sy, leftMaxW, leftText.c_str(), 1, fontSx, fontSy, 1, lCol);
+
+    if (!rightText.empty()) {
+        sa::CRGBA rCol = selected ? selTextCol : (enabled ? rightCol : disTextCol);
+        Label(x + w - padX, y + 1.4f * sy, rightRes, rightText.c_str(), 1, fontSx * 0.96f, fontSy * 0.96f, 2, rCol);
+    }
+}
+
+// 9. Footer: Standard single-line hint bar with optional top divider rule
+inline void Footer(float x, float y, float w, float h, float padX,
+                   const std::string& text, float fontSx, float fontSy,
+                   float xScale, float sy,
+                   sa::CRGBA bgCol, sa::CRGBA textCol, sa::CRGBA topDivCol = {0, 0, 0, 0})
+{
+    Rect(x, y, w, h, bgCol);
+    if (topDivCol.a > 0) {
+        Divider(x + 2.0f * xScale, y, w - 4.0f * xScale, 0.6f * sy, topDivCol);
+    }
+    if (!text.empty()) {
+        Label(x + padX, y + 2.1f * sy, w - padX * 2.0f, text.c_str(), 1, fontSx, fontSy, 1, textCol);
+    }
+}
+
+// 10. ProgressBar: Metric bar with track, main fill, green delta gain & red wear/delta loss!
+inline void ProgressBar(float x, float y, float w, float h,
+                        float curFrac, float prevFrac, float prisFrac,
+                        int delta, int wearLoss,
+                        sa::CRGBA trackCol, sa::CRGBA fillCol, sa::CRGBA gainCol, sa::CRGBA lossCol)
+{
+    Rect(x, y, w, h, trackCol);
+    curFrac  = std::clamp(curFrac,  0.0f, 1.0f);
+    prevFrac = std::clamp(prevFrac, 0.0f, 1.0f);
+    prisFrac = std::clamp(prisFrac, 0.0f, 1.0f);
+
+    if (delta > 0) {
+        Rect(x, y, w * curFrac, h, fillCol);
+        Rect(x + w * curFrac, y, w * (prevFrac - curFrac), h, gainCol);
+        if (prisFrac > prevFrac) {
+            Rect(x + w * prevFrac, y, w * (prisFrac - prevFrac), h, lossCol);
+        }
+    } else if (delta < 0) {
+        Rect(x, y, w * prevFrac, h, fillCol);
+        Rect(x + w * prevFrac, y, w * (curFrac - prevFrac), h, lossCol);
+    } else {
+        Rect(x, y, w * curFrac, h, fillCol);
+        if (wearLoss > 0 && prisFrac > curFrac) {
+            Rect(x + w * curFrac, y, w * (prisFrac - curFrac), h, lossCol);
+        }
+    }
+}
+
+// 11. TextField: Compact bordered monochrome text entry field with blinking caret & char counter
+inline void TextField(float x, float y, float w, float h,
+                      const std::string& text, const std::string& placeholder, int maxLen,
+                      float xScale, float sy,
+                      sa::CRGBA borderCol, sa::CRGBA bgCol, sa::CRGBA textCol, sa::CRGBA phCol, sa::CRGBA cntCol)
+{
+    Panel(x, y, w, h, bgCol, borderCol, 0.7f * xScale, 0.7f * sy);
+    const bool  blink    = ((GetTickCount() / 420) % 2) == 0;
+    const float cntW     = 24.0f * xScale;
+    const float textMaxW = w - 10.0f * xScale - cntW;
+
+    if (text.empty()) {
+        std::string ph = placeholder.empty() ? std::string("_") : (placeholder + (blink ? "_" : ""));
+        Label(x + 4.5f * xScale, y + 3.2f * sy, textMaxW, ph.c_str(), 1, 0.27f * xScale, 0.54f * sy, 1, phCol);
+    } else {
+        std::string shown = text;
+        if (static_cast<int>(shown.size()) < maxLen && blink) shown.push_back('_');
+        Label(x + 4.5f * xScale, y + 2.6f * sy, textMaxW, shown.c_str(), 2, 0.36f * xScale, 0.68f * sy, 1, textCol);
+    }
+
+    char cntBuf[16];
+    std::snprintf(cntBuf, sizeof(cntBuf), "%d/%d", static_cast<int>(text.size()), maxLen);
+    Label(x + w - 4.0f * xScale, y + 4.2f * sy, cntW, cntBuf, 1, 0.22f * xScale, 0.44f * sy, 2, cntCol);
+}
+
+// 12. Banner: Centered alert/status strip
+inline void Banner(float x, float y, float w, float h, float padX,
+                   const std::string& text, float fontSx, float fontSy,
+                   float xScale, float sy, sa::CRGBA bgCol, sa::CRGBA textCol)
+{
+    Rect(x + 2.0f * xScale, y + 0.8f * sy, w - 4.0f * xScale, h - 1.6f * sy, bgCol);
+    Label(x + w * 0.5f, y + 1.8f * sy, w - padX * 2.0f, text.c_str(), 1, fontSx, fontSy, 0, textCol);
+}
+
+// 13. Swatch: Color tile primitive (for ColorGrid / paint menus)
+inline void Swatch(float x, float y, float w, float h, sa::CRGBA fillCol,
+                   bool selected, float xScale, float sy,
+                   sa::CRGBA selCol = {255, 255, 255, 255}, sa::CRGBA borderCol = {90, 90, 95, 180})
+{
+    if (selected) {
+        Panel(x, y, w, h, fillCol, selCol, 1.4f * xScale, 1.4f * sy);
+    } else {
+        Panel(x + 0.8f * xScale, y + 0.8f * sy, w - 1.6f * xScale, h - 1.6f * sy, fillCol, borderCol, 0.5f * xScale, 0.5f * sy);
+    }
+}
+
+} // namespace prim
+
+// Backward-compatible alias for code referencing ui::PrintFittedText
+inline void PrintFittedText(float x, float y, float maxWidthPx, const char* gameText,
+                            uint8_t fontStyle, float scaleX, float scaleY,
+                            uint8_t align, sa::CRGBA color)
+{
+    prim::Label(x, y, maxWidthPx, gameText, fontStyle, scaleX, scaleY, align, color);
+}
+
 // ============================================================================
-// DUMB COMPONENT 1: ListMenu (Web-style Props + Event Signals + Auto-Fit Render)
+// TIER 2 — COMPOSITE COMPONENT 1: ListMenu (Built 100% from ui::prim::*)
 // ============================================================================
 struct MenuRow {
     std::string leftGame;
@@ -298,81 +524,68 @@ public:
         const int visible   = std::min(totalRows, m_maxVisible);
         int scrollTop = 0;
         if (totalRows > visible) {
-            scrollTop = m_selected - (visible / 2);
-            scrollTop = std::clamp(scrollTop, 0, totalRows - visible);
+            scrollTop = std::clamp(m_selected - (visible / 2), 0, totalRows - visible);
         }
 
         const float headerH = th.menuHeaderH * sy;
-        const float colBarH = th.menuColBarH * sy;
+        const float colBarH = (m_colLeft.empty() && m_colRight.empty()) ? 0.0f : (th.menuColBarH * sy);
         const float rowH    = th.menuRowH    * sy;
         const float padX    = th.menuPadX    * xScale;
         const float padBot  = th.menuPadBot  * sy;
         const float bodyH   = headerH + colBarH + (visible * rowH) + padBot;
         const float footH   = m_footer.empty() ? 0.0f : (th.menuFooterH * sy + 2.5f * sy);
 
-        // Clamp strictly inside screen bounds so menu & footer NEVER clip off-screen!
         const float marginX = th.screenMarginX * xScale;
         const float marginY = th.screenMarginY * sy;
         const float px = std::clamp(m_x640 * xScale, marginX, std::max(marginX, sw - pw - marginX));
         const float py = std::clamp(m_y448 * sy,     marginY, std::max(marginY, sh - (bodyH + footH) - marginY));
 
-        sa::font::DrawRect({px, py + bodyH, px + pw, py}, th.bgBody);
-        sa::font::DrawRect({px, py + headerH, px + pw, py}, th.bgHeader);
+        // 1. Body Panel primitive
+        prim::Panel(px, py, pw, bodyH, th.bgBody);
 
-        const float countReserve = (totalRows > visible) ? (28.0f * xScale) : 0.0f;
-        PrintFittedText(px + padX, py + 2.5f * sy, pw - padX * 2.0f - countReserve, m_title.c_str(),
-                        2, th.fontTitleX * xScale, th.fontTitleY * sy, 1, th.textTitle);
-
+        // 2. Header primitive (with optional scroll counter badge)
+        std::string countBadge;
         if (totalRows > visible) {
             char buf[24];
             std::snprintf(buf, sizeof(buf), "%d/%d", m_selected + 1, totalRows);
-            PrintFittedText(px + pw - padX, py + 4.0f * sy, 26.0f * xScale, buf,
-                            1, th.fontColX * xScale, th.fontColY * sy, 2, th.textCol);
+            countBadge = buf;
         }
+        prim::Header(px, py, pw, headerH, padX, m_title, countBadge,
+                     th.fontTitleX * xScale, th.fontTitleY * sy,
+                     th.fontColX * xScale, th.fontColY * sy,
+                     xScale, sy, th.bgHeader, th.divider, th.textTitle, th.textCol,
+                     colBarH <= 0.0f, 0.22f);
 
-        const float colY = py + headerH + 1.5f * sy;
-        const float colRightW = m_colRight.empty() ? 0.0f : (pw * 0.36f);
-        PrintFittedText(px + padX, colY, pw - padX * 2.0f - colRightW, m_colLeft.c_str(),
-                        1, th.fontColX * xScale, th.fontColY * sy, 1, th.textCol);
-        if (!m_colRight.empty()) {
-            PrintFittedText(px + pw - padX, colY, colRightW, m_colRight.c_str(),
-                            1, th.fontColX * xScale, th.fontColY * sy, 2, th.textCol);
-        }
-
+        // 3. Column labels + Divider primitive
         const float listTop = py + headerH + colBarH;
-        sa::font::DrawRect({px + 3.0f * xScale, listTop, px + pw - 3.0f * xScale, listTop - 0.8f * sy}, th.divider);
+        if (colBarH > 0.0f) {
+            const float colY      = py + headerH + 1.5f * sy;
+            const float colRightW = m_colRight.empty() ? 0.0f : (pw * 0.36f);
+            prim::Label(px + padX, colY, pw - padX * 2.0f - colRightW, m_colLeft.c_str(),
+                        1, th.fontColX * xScale, th.fontColY * sy, 1, th.textCol);
+            if (!m_colRight.empty()) {
+                prim::Label(px + pw - padX, colY, colRightW, m_colRight.c_str(),
+                            1, th.fontColX * xScale, th.fontColY * sy, 2, th.textCol);
+            }
+            prim::Divider(px + 3.0f * xScale, listTop - 0.8f * sy, pw - 6.0f * xScale, 0.8f * sy, th.divider);
+        }
 
+        // 4. List Row primitives
         const sa::CRGBA selFill = m_useCustomAccent ? m_accent : th.selectFill;
         for (int i = 0; i < visible; ++i) {
             int idx = scrollTop + i;
             const auto& r = m_rows[idx];
-            const float ry = listTop + i * rowH;
-            const bool isSel = (idx == m_selected);
-
-            if (isSel) {
-                sa::font::DrawRect({px + 2.0f * xScale, ry + rowH - 0.4f * sy, px + pw - 2.0f * xScale, ry + 0.4f * sy}, selFill);
-            }
-
-            const float rightReserve = r.rightGame.empty() ? 0.0f : (pw * 0.38f);
-            const float leftMaxW     = pw - padX * 2.0f - rightReserve - (r.rightGame.empty() ? 0.0f : 4.0f * xScale);
-
-            sa::CRGBA leftCol = isSel ? th.textSelected : (r.enabled ? th.textNormal : th.textDisabled);
-            PrintFittedText(px + padX, ry + 1.5f * sy, leftMaxW, r.leftGame.c_str(),
-                            1, th.fontRowX * xScale, th.fontRowY * sy, 1, leftCol);
-
-            if (!r.rightGame.empty()) {
-                sa::CRGBA rightCol = isSel ? th.textSelected : (r.enabled ? r.rightColor : th.textDisabled);
-                PrintFittedText(px + pw - padX, ry + 1.5f * sy, rightReserve, r.rightGame.c_str(),
-                                1, th.fontRowX * xScale, th.fontRowY * sy, 2, rightCol);
-            }
+            prim::Row(px, listTop + i * rowH, pw, rowH, padX,
+                      r.leftGame, r.rightGame, (idx == m_selected), r.enabled,
+                      th.fontRowX * xScale, th.fontRowY * sy, xScale, sy,
+                      selFill, th.textNormal, r.rightColor, th.textSelected, th.textDisabled);
         }
 
+        // 5. Footer primitive
         if (!m_footer.empty()) {
-            const float fy = py + bodyH + 2.5f * sy;
-            const float fh = th.menuFooterH * sy;
-            sa::font::DrawRect({px, fy + fh, px + pw, fy}, th.bgFooter);
-            PrintFittedText(px + padX, fy + 2.2f * sy, pw - padX * 2.0f, m_footer.c_str(),
-                            1, th.fontFooterX * xScale, th.fontFooterY * sy, 1, th.textFooter);
+            prim::Footer(px, py + bodyH + 2.5f * sy, pw, th.menuFooterH * sy, padX,
+                         m_footer, th.fontFooterX * xScale, th.fontFooterY * sy,
+                         xScale, sy, th.bgFooter, th.textFooter);
         }
     }
 
@@ -388,24 +601,25 @@ private:
     std::string          m_colRight;
     std::string          m_footer;
     std::vector<MenuRow> m_rows;
-    int                  m_selected      = 0;
-    int                  m_maxVisible    = 11;
-    float                m_x640          = 20.0f;
-    float                m_y448          = 68.0f;
-    float                m_w640          = 0.0f;
-    sa::CRGBA            m_accent        = {215, 215, 215, 62};
+    int                  m_selected        = 0;
+    int                  m_maxVisible      = 11;
+    float                m_x640            = 20.0f;
+    float                m_y448            = 68.0f;
+    float                m_w640            = 0.0f;
+    sa::CRGBA            m_accent          = {215, 215, 215, 62};
     bool                 m_useCustomAccent = false;
 };
 
 // ============================================================================
-// DUMB COMPONENT 2: StatsCard (Live Metric Bars + Auto-Fit Text)
+// TIER 2 — COMPOSITE COMPONENT 2: StatsCard (Built 100% from ui::prim::*)
 // ============================================================================
 struct StatBarRow {
     std::string labelGame;
-    int         curVal   = 0;
-    int         prevVal  = 0;
-    int         maxScale = 100;
+    int         curVal      = 0;
+    int         prevVal     = 0;
+    int         maxScale    = 100;
     std::string unitGame;
+    int         pristineVal = -1;
 };
 
 class StatsCard {
@@ -418,8 +632,9 @@ public:
     StatsCard& SetAnchor(bool bottomRight, float w640 = 0.0f, float rightMargin640 = 16.0f, float yOffset448 = 18.0f) {
         m_bottomRight = bottomRight; m_w640 = w640; m_rightMargin = rightMargin640; m_yOffset = yOffset448; return *this;
     }
-    StatsCard& AddBar(const std::string& labelGame, int curVal, int prevVal, int maxScale, const std::string& unitGame = "") {
-        m_rows.push_back({labelGame, curVal, prevVal, std::max(1, maxScale), unitGame});
+    StatsCard& AddBar(const std::string& labelGame, int curVal, int prevVal, int maxScale,
+                      const std::string& unitGame = "", int pristineVal = -1) {
+        m_rows.push_back({labelGame, curVal, prevVal, std::max(1, maxScale), unitGame, pristineVal});
         return *this;
     }
 
@@ -442,62 +657,51 @@ public:
 
         const float marginX = th.screenMarginX * xScale;
         const float marginY = th.screenMarginY * sy;
-        const float px = std::clamp(sw - pw - m_rightMargin * xScale, marginX, std::max(marginX, sw - pw - marginX));
-        const float pyRaw = m_bottomRight ? (sh - bodyH - m_yOffset * sy) : (m_yOffset * sy);
-        const float py = std::clamp(pyRaw, marginY, std::max(marginY, sh - bodyH - marginY));
+        const float px      = std::clamp(sw - pw - m_rightMargin * xScale, marginX, std::max(marginX, sw - pw - marginX));
+        const float pyRaw   = m_bottomRight ? (sh - bodyH - m_yOffset * sy) : (m_yOffset * sy);
+        const float py      = std::clamp(pyRaw, marginY, std::max(marginY, sh - bodyH - marginY));
 
-        sa::font::DrawRect({px, py + bodyH, px + pw, py}, th.bgBody);
-        sa::font::DrawRect({px, py + headerH, px + pw, py}, th.bgHeader);
-        sa::font::DrawRect({px + 3.0f * xScale, py + headerH, px + pw - 3.0f * xScale, py + headerH - 0.7f * sy}, th.divider);
+        // 1. Body Panel + Header primitives
+        prim::Panel(px, py, pw, bodyH, th.bgBody);
+        prim::Header(px, py, pw, headerH, padX, m_title, m_subtitle,
+                     0.29f * xScale, 0.56f * sy, th.fontStatX * xScale, th.fontStatY * sy,
+                     xScale, sy, th.bgHeader, th.divider, th.textTitle, th.textNormal, true, 0.52f);
 
-        const float subReserve = m_subtitle.empty() ? 0.0f : (pw * 0.54f);
-        PrintFittedText(px + padX, py + 2.2f * sy, pw - padX * 2.0f - subReserve, m_title.c_str(),
-                        2, 0.29f * xScale, 0.56f * sy, 1, th.textTitle);
-        if (!m_subtitle.empty()) {
-            PrintFittedText(px + pw - padX, py + 3.0f * sy, subReserve, m_subtitle.c_str(),
-                            1, th.fontStatX * xScale, th.fontStatY * sy, 2, th.textNormal);
-        }
-
+        // 2. Stat rows (Label + ProgressBar primitives)
         const float barX = px + padX;
         const float barW = pw - padX * 2.0f;
         const float barH = th.cardBarH * sy;
 
         for (size_t i = 0; i < m_rows.size(); ++i) {
-            const auto& it = m_rows[i];
-            const float ry = py + headerH + 2.0f * sy + static_cast<float>(i) * rowH;
-            const int delta = it.prevVal - it.curVal;
+            const auto& it     = m_rows[i];
+            const float ry     = py + headerH + 2.0f * sy + static_cast<float>(i) * rowH;
+            const int delta    = it.prevVal - it.curVal;
+            const int wearLoss = (it.pristineVal > it.curVal) ? (it.pristineVal - it.curVal) : 0;
 
-            char valBuf[64];
-            if (delta > 0)      std::snprintf(valBuf, sizeof(valBuf), "%d%s ~g~(+%d)", it.prevVal, it.unitGame.c_str(), delta);
-            else if (delta < 0) std::snprintf(valBuf, sizeof(valBuf), "%d%s ~r~(%d)", it.prevVal, it.unitGame.c_str(), delta);
-            else                std::snprintf(valBuf, sizeof(valBuf), "%d%s", it.curVal, it.unitGame.c_str());
+            char valBuf[80];
+            if (delta > 0)           std::snprintf(valBuf, sizeof(valBuf), "%d%s ~g~(+%d)", it.prevVal, it.unitGame.c_str(), delta);
+            else if (delta < 0)      std::snprintf(valBuf, sizeof(valBuf), "%d%s ~r~(%d)",  it.prevVal, it.unitGame.c_str(), delta);
+            else if (wearLoss > 0)   std::snprintf(valBuf, sizeof(valBuf), "%d%s ~r~(-%d)", it.curVal,  it.unitGame.c_str(), wearLoss);
+            else                     std::snprintf(valBuf, sizeof(valBuf), "%d%s",          it.curVal,  it.unitGame.c_str());
 
-            PrintFittedText(barX, ry, barW * 0.52f, it.labelGame.c_str(),
-                            1, th.fontStatX * xScale, th.fontStatY * sy, 1, th.textNormal);
-            PrintFittedText(px + pw - padX, ry, barW * 0.46f, valBuf,
-                            1, th.fontStatX * xScale, th.fontStatY * sy, 2, th.textSelected);
+            prim::Label(barX, ry, barW * 0.52f, it.labelGame.c_str(),
+                        1, th.fontStatX * xScale, th.fontStatY * sy, 1, th.textNormal);
+            prim::Label(px + pw - padX, ry, barW * 0.46f, valBuf,
+                        1, th.fontStatX * xScale, th.fontStatY * sy, 2, th.textSelected);
 
-            const float by = ry + 9.5f * sy;
-            sa::font::DrawRect({barX, by + barH, barX + barW, by}, th.barTrack);
-
-            float curFrac  = std::clamp(static_cast<float>(it.curVal)  / static_cast<float>(it.maxScale), 0.0f, 1.0f);
-            float prevFrac = std::clamp(static_cast<float>(it.prevVal) / static_cast<float>(it.maxScale), 0.0f, 1.0f);
-
-            if (delta > 0) {
-                sa::font::DrawRect({barX, by + barH, barX + barW * curFrac, by}, th.barFill);
-                sa::font::DrawRect({barX + barW * curFrac, by + barH, barX + barW * prevFrac, by}, th.barGain);
-            } else if (delta < 0) {
-                sa::font::DrawRect({barX, by + barH, barX + barW * prevFrac, by}, th.barFill);
-                sa::font::DrawRect({barX + barW * prevFrac, by + barH, barX + barW * curFrac, by}, th.barLoss);
-            } else {
-                sa::font::DrawRect({barX, by + barH, barX + barW * curFrac, by}, th.barFill);
-            }
+            const float curFrac  = static_cast<float>(it.curVal)  / static_cast<float>(it.maxScale);
+            const float prevFrac = static_cast<float>(it.prevVal) / static_cast<float>(it.maxScale);
+            const float prisFrac = (wearLoss > 0)
+                ? (static_cast<float>(it.pristineVal) / static_cast<float>(it.maxScale))
+                : curFrac;
+            prim::ProgressBar(barX, ry + 9.5f * sy, barW, barH, curFrac, prevFrac, prisFrac,
+                              delta, wearLoss, th.barTrack, th.barFill, th.barGain, th.barLoss);
         }
 
         if (!m_note.empty()) {
             const float ny = py + headerH + static_cast<float>(m_rows.size()) * rowH + 2.0f * sy;
-            PrintFittedText(barX, ny, barW, m_note.c_str(),
-                            1, th.fontFooterX * xScale, th.fontFooterY * sy, 1, {145, 225, 155, 255});
+            prim::Label(barX, ny, barW, m_note.c_str(),
+                        1, th.fontFooterX * xScale, th.fontFooterY * sy, 1, {145, 225, 155, 255});
         }
     }
 
@@ -513,13 +717,342 @@ private:
 };
 
 // ============================================================================
-// DUMB COMPONENT 3: RadialWheel (8-Sector Vanilla GTA SA Monochrome Wheel!)
-// Pure presentation component: Addon supplies icon textures & badges, Render() draws!
+// TIER 2 — COMPOSITE COMPONENT 3: PhoneFrame (1990s Keypad Handset from prim::*)
+// ============================================================================
+enum class PhoneTheme : uint8_t {
+    ClassicSA = 0,
+    Nokia92   = 1,
+    Amber90s  = 2,
+    NightBlue = 3,
+    Count
+};
+
+struct PhonePalette {
+    sa::CRGBA lcdBg, lcdTop, lcdSel, lcdBorder, lcdTitle, lcdText, lcdAccent;
+};
+
+inline PhonePalette GetPhonePalette(PhoneTheme theme) {
+    if (theme == PhoneTheme::Nokia92) {
+        return {{18, 30, 16, 225}, {12, 22, 10, 242}, {135, 195, 110, 78},
+                {120, 150, 110, 180}, {205, 245, 185, 255}, {172, 215, 152, 255}, {160, 245, 130, 255}};
+    }
+    if (theme == PhoneTheme::Amber90s) {
+        return {{26, 17, 6, 225}, {18, 11, 4, 242}, {235, 175, 70, 75},
+                {175, 135, 75, 180}, {255, 220, 145, 255}, {230, 188, 115, 255}, {255, 210, 110, 255}};
+    }
+    if (theme == PhoneTheme::NightBlue) {
+        return {{10, 18, 34, 225}, {6, 12, 24, 242}, {110, 165, 240, 76},
+                {115, 145, 195, 180}, {215, 235, 255, 255}, {180, 205, 238, 255}, {135, 205, 255, 255}};
+    }
+    return {{4, 4, 6, 218}, {12, 12, 15, 240}, {215, 215, 215, 62},
+            {145, 145, 150, 170}, {238, 238, 238, 255}, {200, 200, 200, 255}, {135, 230, 145, 255}};
+}
+
+class PhoneFrame {
+public:
+    PhoneFrame& Clear() { m_rows.clear(); m_banner.clear(); return *this; }
+    PhoneFrame& SetTheme(PhoneTheme t) { m_theme = t; return *this; }
+    PhoneFrame& SetHeader(const std::string& appTitleGame, const std::string& subTitleGame = "") {
+        m_title = appTitleGame; m_subtitle = subTitleGame; return *this;
+    }
+    PhoneFrame& SetStatusLine(const std::string& leftStatusGame, const std::string& clockStr) {
+        m_statusLeft = leftStatusGame; m_clockStr = clockStr; return *this;
+    }
+    PhoneFrame& SetBanner(const std::string& bannerGame, sa::CRGBA col = {120, 225, 130, 255}) {
+        m_banner = bannerGame; m_bannerCol = col; return *this;
+    }
+    PhoneFrame& SetFooter(const std::string& footerGame) { m_footer = footerGame; return *this; }
+    PhoneFrame& SetMaxVisible(int n) { m_maxVisible = std::max(1, n); return *this; }
+    PhoneFrame& SetSelected(int idx) { m_selected = idx; return *this; }
+    PhoneFrame& AddItem(const std::string& leftGame, const std::string& rightGame = "",
+                        sa::CRGBA rightCol = {200, 200, 200, 255}, bool enabled = true, int userId = 0) {
+        m_rows.push_back({leftGame, rightGame, enabled, false, rightCol, userId});
+        return *this;
+    }
+
+    void Render() const {
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f || sh < 100.0f) return;
+
+        const auto pal = GetPhonePalette(m_theme);
+        const auto& th = Theme();
+
+        const float pw       = 148.0f * xScale;
+        const float bezelX   = 4.5f * xScale;
+        const float bezelTop = 7.0f * sy;
+        const float keypadH  = 28.0f * sy;
+        const float statusH  = 11.0f * sy;
+        const float headerH  = 15.5f * sy;
+        const float subH     = m_subtitle.empty() ? 0.0f : (9.8f * sy);
+        const float bannerH  = m_banner.empty()   ? 0.0f : (12.5f * sy);
+        const float rowH     = 12.6f * sy;
+        const float footerH  = 13.0f * sy;
+        const float padX     = 5.0f * xScale;
+
+        const int totalRows = static_cast<int>(m_rows.size());
+        const int visible   = std::min(std::max(1, totalRows), m_maxVisible);
+        int sel             = (totalRows > 0) ? std::clamp(m_selected, 0, totalRows - 1) : 0;
+        int scrollTop       = (totalRows > visible) ? std::clamp(sel - (visible / 2), 0, totalRows - visible) : 0;
+
+        const float screenH = statusH + headerH + subH + bannerH + (visible * rowH) + 3.5f * sy + footerH;
+        const float totalW  = pw + bezelX * 2.0f;
+        const float totalH  = bezelTop + screenH + keypadH;
+
+        const float marginX = 16.0f * xScale;
+        const float marginY = 14.0f * sy;
+        const float ox = std::clamp(sw - totalW - marginX, marginX, std::max(marginX, sw - totalW - marginX));
+        const float oy = std::clamp(sh - totalH - marginY, marginY + 14.0f * sy, std::max(marginY + 14.0f * sy, sh - totalH - marginY));
+
+        // 1. 1990s stub antenna + rugged charcoal handset chassis + 3-dot earpiece (via prim::Panel/Rect)
+        const float antW = 5.5f * xScale, antH = 12.5f * sy;
+        const float antX = ox + totalW - 15.0f * xScale;
+        prim::Panel(antX, oy - antH, antW, antH, {24, 24, 28, 242}, {100, 100, 106, 175}, 0.6f * xScale, 0.5f * sy);
+        prim::Rect(antX - 0.8f * xScale, oy - antH - 1.2f * sy, antW + 1.6f * xScale, 3.4f * sy, {38, 38, 44, 245});
+
+        prim::Panel(ox, oy, totalW, totalH, {22, 22, 26, 242}, pal.lcdBorder, 0.9f * xScale, 0.9f * sy);
+        for (int d = -1; d <= 1; ++d) {
+            float dx = ox + totalW * 0.5f + d * 4.5f * xScale;
+            prim::Rect(dx - 1.1f * xScale, oy + 2.6f * sy, 2.2f * xScale, 1.6f * sy, {120, 120, 128, 210});
+        }
+
+        // 2. Recessed LCD screen Panel
+        const float sx = ox + bezelX, syTop = oy + bezelTop;
+        prim::Panel(sx, syTop, pw, screenH, pal.lcdBg, pal.lcdBorder, 0.7f * xScale, 0.7f * sy);
+
+        // 3. Status bar (Signal bars + Carrier + Clock + Battery)
+        prim::Rect(sx, syTop, pw, statusH, pal.lcdTop);
+        for (int b = 0; b < 4; ++b) {
+            float bh = (2.0f + b * 1.3f) * sy;
+            prim::Rect(sx + padX + b * 2.3f * xScale, syTop + statusH - 2.0f * sy - bh, 1.4f * xScale, bh, pal.lcdText);
+        }
+        if (!m_statusLeft.empty()) {
+            prim::Label(sx + padX + 11.5f * xScale, syTop + 1.4f * sy, pw * 0.44f, m_statusLeft.c_str(),
+                        1, 0.21f * xScale, 0.42f * sy, 1, pal.lcdText);
+        }
+        const float batW = 8.2f * xScale, batH = 4.4f * sy;
+        const float batX = sx + pw - padX - batW, batY = syTop + 3.2f * sy;
+        prim::Panel(batX + 0.9f * xScale, batY + 0.8f * sy, batW - 2.3f * xScale, batH - 1.6f * sy,
+                    pal.lcdAccent, pal.lcdBorder, 0.9f * xScale, 0.8f * sy);
+        if (!m_clockStr.empty()) {
+            prim::Label(batX - 3.2f * xScale, syTop + 1.4f * sy, 34.0f * xScale, m_clockStr.c_str(),
+                        1, 0.22f * xScale, 0.44f * sy, 2, pal.lcdTitle);
+        }
+
+        // 4. App Header primitive
+        float curY = syTop + statusH;
+        std::string cntBadge;
+        if (totalRows > visible) {
+            char cbuf[20];
+            std::snprintf(cbuf, sizeof(cbuf), "%d/%d", sel + 1, totalRows);
+            cntBadge = cbuf;
+        }
+        prim::Header(sx, curY, pw, headerH, padX, m_title, cntBadge,
+                     0.29f * xScale, 0.56f * sy, 0.21f * xScale, 0.42f * sy,
+                     xScale, sy, pal.lcdTop, pal.lcdBorder, pal.lcdTitle, pal.lcdText,
+                     m_subtitle.empty(), 0.20f);
+        curY += headerH;
+
+        if (!m_subtitle.empty()) {
+            prim::Label(sx + padX, curY + 0.8f * sy, pw - padX * 2.0f, m_subtitle.c_str(),
+                        1, 0.21f * xScale, 0.42f * sy, 1, pal.lcdText);
+            curY += subH;
+            prim::Divider(sx + 2.0f * xScale, curY - 0.6f * sy, pw - 4.0f * xScale, 0.6f * sy, pal.lcdBorder);
+        }
+
+        if (!m_banner.empty()) {
+            prim::Banner(sx, curY, pw, bannerH, padX, m_banner, 0.22f * xScale, 0.44f * sy,
+                         xScale, sy, {20, 32, 24, 210}, m_bannerCol);
+            curY += bannerH;
+        }
+
+        // 5. Row primitives
+        for (int i = 0; i < visible && (scrollTop + i) < totalRows; ++i) {
+            int idx = scrollTop + i;
+            const auto& r = m_rows[idx];
+            prim::Row(sx, curY + i * rowH, pw, rowH, padX,
+                      r.leftGame, r.rightGame, (idx == sel), r.enabled,
+                      0.25f * xScale, 0.50f * sy, xScale, sy,
+                      pal.lcdSel, pal.lcdText, r.rightColor, {255, 255, 255, 255}, th.textDisabled);
+        }
+
+        // 6. Softkey Footer primitive
+        prim::Footer(sx, syTop + screenH - footerH, pw, footerH, padX,
+                     m_footer, 0.20f * xScale, 0.40f * sy, xScale, sy,
+                     pal.lcdTop, pal.lcdText, pal.lcdBorder);
+
+        // 7. Physical 1990s keypad cluster (Green Call / Center Nav / Red End + 3x3 numeric keys)
+        const float kpTop = syTop + screenH + 3.2f * sy;
+        prim::Rect(sx + 8.0f * xScale, kpTop, 18.0f * xScale, 3.4f * sy, {65, 165, 80, 215});
+        prim::Rect(sx + pw * 0.5f - 14.0f * xScale, kpTop - 0.6f * sy, 28.0f * xScale, 4.8f * sy, {78, 78, 86, 220});
+        prim::Rect(sx + pw - 26.0f * xScale, kpTop, 18.0f * xScale, 3.4f * sy, {185, 65, 65, 215});
+
+        const float gridTop = kpTop + 6.8f * sy;
+        const float btnW = 24.0f * xScale, btnH = 3.2f * sy, gapX = 12.0f * xScale;
+        const float gx0 = sx + (pw - (btnW * 3.0f + gapX * 2.0f)) * 0.5f;
+        for (int r = 0; r < 3; ++r) {
+            float by = gridTop + r * (btnH + 2.2f * sy);
+            for (int c = 0; c < 3; ++c) {
+                prim::Rect(gx0 + c * (btnW + gapX), by, btnW, btnH, {52, 52, 58, 215});
+            }
+        }
+    }
+
+private:
+    PhoneTheme           m_theme = PhoneTheme::ClassicSA;
+    std::string          m_title;
+    std::string          m_subtitle;
+    std::string          m_statusLeft;
+    std::string          m_clockStr;
+    std::string          m_banner;
+    sa::CRGBA            m_bannerCol = {120, 225, 130, 255};
+    std::string          m_footer;
+    std::vector<MenuRow> m_rows;
+    int                  m_selected   = 0;
+    int                  m_maxVisible = 9;
+};
+
+// ============================================================================
+// TIER 2 — COMPOSITE COMPONENT 4: HelpToast (Vanilla Notifications / Phone / Q&A!)
+// Restyles ALL vanilla GTA SA CHud::DrawHelpText boxes using ui::prim::*
+// ============================================================================
+class HelpToast {
+public:
+    HelpToast& SetText(const std::string& gameEncodedText) { m_text = gameEncodedText; return *this; }
+    HelpToast& SetAlpha(float alpha01) { m_alpha = std::clamp(alpha01, 0.0f, 1.0f); return *this; }
+    HelpToast& SetWidth640(float w640) { m_w640 = std::clamp(w640, 145.0f, 260.0f); return *this; }
+
+    void Render() const {
+        if (m_text.empty() || m_alpha <= 0.01f) return;
+
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f || sh < 100.0f) return;
+
+        const auto& th = Theme();
+        const float accentW = 2.6f * xScale;
+        const float padX    = 6.5f * xScale;
+        const float padY    = 5.0f * sy;
+        const float pw      = m_w640 * xScale;
+        const float textW   = pw - accentW - padX * 2.0f;
+
+        const float px    = 20.0f * xScale;
+        const float py    = 22.0f * sy;
+        const float fontX = th.fontToastX * xScale;
+        const float fontY = th.fontToastY * sy;
+
+        const float textX = px + accentW + padX;
+        const float textY = py + padY;
+        const int   lines = prim::MeasureWrappedLines(textX, textY, textW, m_text.c_str(), 1, fontX, fontY);
+        const float lineH = 11.4f * sy;
+        const float boxH  = padY * 2.0f + static_cast<float>(lines) * lineH + 2.0f * sy;
+
+        // Semantic left accent strip matching GTA SA color codes (~r~ error, ~g~ success, ~y~ action/prompt)
+        sa::CRGBA accent = th.textTitle;
+        if (m_text.find("~r~") != std::string::npos)      accent = th.barLoss;
+        else if (m_text.find("~g~") != std::string::npos) accent = th.barGain;
+        else if (m_text.find("~y~") != std::string::npos) accent = th.accentWarn;
+
+        prim::Panel(px, py, pw, boxH, WithAlpha(th.bgBody, m_alpha), WithAlpha(th.borderSubtle, m_alpha),
+                    0.6f * xScale, 0.6f * sy);
+        prim::AccentStrip(px, py, accentW, boxH, WithAlpha(accent, m_alpha));
+        prim::WrappedText(textX, textY, textW, m_text.c_str(), 1, fontX, fontY, WithAlpha(th.textSelected, m_alpha));
+    }
+
+private:
+    std::string m_text;
+    float       m_alpha = 1.0f;
+    float       m_w640  = 196.0f;
+};
+
+// ============================================================================
+// TIER 2 — COMPOSITE COMPONENT 5: ColorGrid (Vanilla DisplayGridMenu Restyler!)
+// ============================================================================
+class ColorGrid {
+public:
+    ColorGrid& SetTitle(const std::string& titleGame) { m_title = titleGame; return *this; }
+    ColorGrid& SetFooter(const std::string& footerGame) { m_footer = footerGame; return *this; }
+    ColorGrid& SetGrid(int cols, int rows, int selectedIdx) {
+        m_cols = std::clamp(cols, 1, 8);
+        m_rows = std::clamp(rows, 1, 8);
+        m_selected = selectedIdx;
+        return *this;
+    }
+    ColorGrid& SetColors(const sa::CRGBA* colors, int count) {
+        m_colors.assign(colors, colors + std::max(0, count));
+        return *this;
+    }
+    ColorGrid& SetPosition(float x640, float y448) { m_x640 = x640; m_y448 = y448; return *this; }
+
+    void Render() const {
+        if (m_colors.empty()) return;
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f || sh < 100.0f) return;
+
+        const auto& th   = Theme();
+        const float padX = th.menuPadX * xScale;
+        const float cell = 17.0f * xScale;
+        const float cellH= 15.0f * sy;
+        const float gapX = 3.0f * xScale;
+        const float gapY = 3.0f * sy;
+        const float hdrH = th.menuHeaderH * sy;
+        const float gridW = m_cols * cell + (m_cols - 1) * gapX;
+        const float gridH = m_rows * cellH + (m_rows - 1) * gapY;
+        const float pw    = std::max(144.0f * xScale, gridW + padX * 2.0f);
+        const float bodyH = hdrH + gridH + 10.0f * sy;
+        const float footH = m_footer.empty() ? 0.0f : (th.menuFooterH * sy + 2.5f * sy);
+
+        const float marginX = th.screenMarginX * xScale;
+        const float marginY = th.screenMarginY * sy;
+        const float px = std::clamp(m_x640 * xScale, marginX, std::max(marginX, sw - pw - marginX));
+        const float py = std::clamp(m_y448 * sy,     marginY, std::max(marginY, sh - (bodyH + footH) - marginY));
+
+        prim::Panel(px, py, pw, bodyH, th.bgBody);
+        char idxBuf[24];
+        std::snprintf(idxBuf, sizeof(idxBuf), "#%d", std::max(0, m_selected) + 1);
+        prim::Header(px, py, pw, hdrH, padX, m_title, idxBuf,
+                     th.fontTitleX * xScale, th.fontTitleY * sy,
+                     th.fontColX * xScale, th.fontColY * sy,
+                     xScale, sy, th.bgHeader, th.divider, th.textTitle, th.textCol, true, 0.25f);
+
+        const float gx0 = px + (pw - gridW) * 0.5f;
+        const float gy0 = py + hdrH + 5.0f * sy;
+        const int total = static_cast<int>(m_colors.size());
+        for (int r = 0; r < m_rows; ++r) {
+            for (int c = 0; c < m_cols; ++c) {
+                int idx = r * m_cols + c;
+                if (idx >= total) break;
+                prim::Swatch(gx0 + c * (cell + gapX), gy0 + r * (cellH + gapY), cell, cellH,
+                             m_colors[idx], idx == m_selected, xScale, sy);
+            }
+        }
+
+        if (!m_footer.empty()) {
+            prim::Footer(px, py + bodyH + 2.5f * sy, pw, th.menuFooterH * sy, padX,
+                         m_footer, th.fontFooterX * xScale, th.fontFooterY * sy,
+                         xScale, sy, th.bgFooter, th.textFooter);
+        }
+    }
+
+private:
+    std::string            m_title;
+    std::string            m_footer;
+    std::vector<sa::CRGBA> m_colors;
+    int                    m_cols     = 8;
+    int                    m_rows     = 8;
+    int                    m_selected = 0;
+    float                  m_x640     = 24.0f;
+    float                  m_y448     = 72.0f;
+};
+
+// ============================================================================
+// TIER 2 — COMPOSITE COMPONENT 6: RadialWheel (8-Sector Monochrome GTA SA Wheel)
 // ============================================================================
 struct WheelSectorProps {
     bool        hasItems   = false;
     bool        isEquipped = false;
-    void*       iconTex    = nullptr; // Native GTA SA RwTexture* (drawn via CSprite2d::Draw!)
+    void*       iconTex    = nullptr;
     std::string ammoGame;
     int         subIndex   = 0;
     int         subCount   = 0;
@@ -552,7 +1085,6 @@ public:
         const float gapRad  = 0.032f;
         const float stepRad = kPi2 / 8.0f;
 
-        // Save RenderWare 2D states
         uintptr_t sTex, sZT, sZW, sVA, sSB, sDB, sSh, sCu;
         sa::rw::RenderStateGet(sa::rw::STATE_TEXTURERASTER,     &sTex);
         sa::rw::RenderStateGet(sa::rw::STATE_ZTESTENABLE,       &sZT);
@@ -597,7 +1129,6 @@ public:
             sa::rw::Im2DRenderPrimitive(sa::rw::PRIM_TRIFAN, v.data(), static_cast<int32_t>(v.size()));
         };
 
-        // Draw 8 authentic vanilla GTA SA monochrome black/grey/white sectors
         for (int i = 0; i < 8; ++i) {
             const float mid = -kPi * 0.5f + static_cast<float>(i) * stepRad;
             const float a0  = mid - stepRad * 0.5f + gapRad;
@@ -617,11 +1148,9 @@ public:
             drawArc(outerR, hov ? rimR : (outerR + 1.6f * sy), a0, a1, 14, rim);
         }
 
-        // Center disc (pure black + thin silver border)
         drawDisc(innerR - 2.0f * sy, 36, sa::rw::PackColor(0, 0, 0, 212));
         drawArc(innerR - 3.2f * sy, innerR - 2.0f * sy, 0.0f, kPi2, 40, sa::rw::PackColor(180, 180, 180, 140));
 
-        // Restore RW states BEFORE drawing native CSprite2d icons & CFont text!
         sa::rw::RenderStateSet(sa::rw::STATE_TEXTURERASTER,     sTex);
         sa::rw::RenderStateSet(sa::rw::STATE_ZTESTENABLE,       sZT);
         sa::rw::RenderStateSet(sa::rw::STATE_ZWRITEENABLE,      sZW);
@@ -631,7 +1160,6 @@ public:
         sa::rw::RenderStateSet(sa::rw::STATE_SHADEMODE,         sSh);
         sa::rw::RenderStateSet(sa::rw::STATE_CULLMODE,          sCu);
 
-        // Draw native GTA SA HUD weapon icons via CSprite2d::Draw (0x00728350)!
         for (int i = 0; i < 8; ++i) {
             const auto& s = m_sectors[i];
             if (!s.hasItems) continue;
@@ -648,29 +1176,28 @@ public:
             }
 
             if (!s.ammoGame.empty()) {
-                PrintFittedText(ix, iy + half - 1.5f * sy, 44.0f * xScale, s.ammoGame.c_str(),
-                                1, 0.22f * xScale, 0.44f * sy, 0,
-                                (s.ammoGame == "0") ? sa::CRGBA{230, 80, 80, 240} : sa::CRGBA{220, 220, 220, 240});
+                prim::Label(ix, iy + half - 1.5f * sy, 44.0f * xScale, s.ammoGame.c_str(),
+                            1, 0.22f * xScale, 0.44f * sy, 0,
+                            (s.ammoGame == "0") ? sa::CRGBA{230, 80, 80, 240} : sa::CRGBA{220, 220, 220, 240});
             }
             if (s.subCount > 1) {
                 char cbuf[16];
                 std::snprintf(cbuf, sizeof(cbuf), "<%d/%d>", s.subIndex + 1, s.subCount);
-                PrintFittedText(ix, iy + half + 6.5f * sy, 44.0f * xScale, cbuf,
-                                1, 0.20f * xScale, 0.40f * sy, 0,
-                                hov ? sa::CRGBA{135, 230, 145, 255} : sa::CRGBA{175, 175, 175, 210});
+                prim::Label(ix, iy + half + 6.5f * sy, 44.0f * xScale, cbuf,
+                            1, 0.20f * xScale, 0.40f * sy, 0,
+                            hov ? sa::CRGBA{135, 230, 145, 255} : sa::CRGBA{175, 175, 175, 210});
             }
         }
 
-        // Minimalist auto-fitted center hub (GUARANTEED to stay cleanly inside the inner circle!)
         const float hubMaxW = (innerR - 7.0f * sy) * 1.85f;
         if (!m_centerName.empty()) {
-            PrintFittedText(cx, cy - (m_centerAmmo.empty() ? 5.5f : 11.0f) * sy, hubMaxW, m_centerName.c_str(),
-                            2, 0.27f * xScale, 0.54f * sy, 0, {255, 255, 255, 255});
+            prim::Label(cx, cy - (m_centerAmmo.empty() ? 5.5f : 11.0f) * sy, hubMaxW, m_centerName.c_str(),
+                        2, 0.27f * xScale, 0.54f * sy, 0, {255, 255, 255, 255});
         }
         if (!m_centerAmmo.empty()) {
-            PrintFittedText(cx, cy + 4.5f * sy, hubMaxW, m_centerAmmo.c_str(),
-                            1, 0.23f * xScale, 0.46f * sy, 0,
-                            (m_centerAmmo == "0") ? sa::CRGBA{230, 80, 80, 255} : sa::CRGBA{205, 205, 205, 255});
+            prim::Label(cx, cy + 4.5f * sy, hubMaxW, m_centerAmmo.c_str(),
+                        1, 0.23f * xScale, 0.46f * sy, 0,
+                        (m_centerAmmo == "0") ? sa::CRGBA{230, 80, 80, 255} : sa::CRGBA{205, 205, 205, 255});
         }
     }
 
@@ -682,7 +1209,59 @@ private:
 };
 
 // ============================================================================
-// Compatibility Wrappers (Delegate straight into the new auto-fitting Dumb Components!)
+// TIER 2 — COMPOSITE COMPONENT 7: TextInputModal (Built 100% from ui::prim::*)
+// ============================================================================
+struct TextInputBoxSpec {
+    std::string titleGame;
+    std::string badgeGame;
+    std::string text;
+    std::string placeholderGame;
+    int         maxLen = 8;
+    std::string line1HintGame;
+    std::string line2HintGame;
+    bool        plateStyle = false;
+};
+
+inline void DrawTextInputBox(const TextInputBoxSpec& spec) {
+    float sw, sh, xScale, sy;
+    GetScreenScales(sw, sh, xScale, sy);
+    if (sw < 100.0f || sh < 100.0f) return;
+
+    const auto& th    = Theme();
+    const float padX  = th.menuPadX * xScale;
+    const float pw    = 176.0f * xScale;
+    const float hdrH  = th.menuHeaderH * sy;
+    const float inpH  = 26.0f * sy;
+    const float subH  = spec.line2HintGame.empty() ? 0.0f : (11.0f * sy);
+    const float bodyH = hdrH + inpH + subH + 8.0f * sy;
+    const float footH = spec.line1HintGame.empty() ? 0.0f : (th.menuFooterH * sy);
+
+    const float px = (sw - pw) * 0.5f;
+    const float py = std::clamp(sh * 0.68f, th.screenMarginY * sy, sh - (bodyH + footH + 4.0f * sy) - th.screenMarginY * sy);
+
+    prim::Panel(px, py, pw, bodyH, th.bgBody);
+    prim::Header(px, py, pw, hdrH, padX, spec.titleGame, spec.badgeGame,
+                 0.30f * xScale, 0.58f * sy, th.fontColX * xScale, th.fontColY * sy,
+                 xScale, sy, th.bgHeader, th.divider, th.textTitle, {125, 235, 135, 255}, true, 0.25f);
+
+    const float bx = px + padX, bw = pw - padX * 2.0f, bh = 19.5f * sy, by = py + hdrH + 5.0f * sy;
+    prim::TextField(bx, by, bw, bh, spec.text, spec.placeholderGame, spec.maxLen,
+                    xScale, sy, th.divider, th.bgInput, th.textSelected, {125, 125, 130, 255}, th.textCol);
+
+    if (!spec.line2HintGame.empty()) {
+        prim::Label(bx, by + bh + 2.5f * sy, bw, spec.line2HintGame.c_str(),
+                    1, 0.22f * xScale, 0.44f * sy, 1, th.textCol);
+    }
+
+    if (!spec.line1HintGame.empty()) {
+        prim::Footer(px, py + bodyH + 2.5f * sy, pw, footH, padX,
+                     spec.line1HintGame, th.fontFooterX * xScale, th.fontFooterY * sy,
+                     xScale, sy, th.bgFooter, th.textFooter);
+    }
+}
+
+// ============================================================================
+// Compatibility Wrappers (Delegate straight into Tier 2 Composite Components!)
 // ============================================================================
 struct MenuDrawSpec {
     std::string          titleGame;
@@ -732,65 +1311,9 @@ inline void DrawStatsPanel(const StatsPanelSpec& spec) {
      .SetAnchor(spec.anchorBottomRight, spec.w640, spec.rightMargin640,
                 spec.anchorBottomRight ? spec.bottomMargin448 : spec.yTop448);
     for (const auto& r : spec.rows) {
-        c.AddBar(r.labelGame, r.curVal, r.prevVal, r.maxScale, r.unitGame);
+        c.AddBar(r.labelGame, r.curVal, r.prevVal, r.maxScale, r.unitGame, r.pristineVal);
     }
     c.Render();
-}
-
-struct TextInputBoxSpec {
-    std::string titleGame;
-    std::string text;
-    int         maxLen = 8;
-    std::string line1HintGame;
-    std::string line2HintGame;
-    bool        plateStyle = true;
-};
-
-inline void DrawTextInputBox(const TextInputBoxSpec& spec) {
-    float sw, sh, xScale, sy;
-    GetScreenScales(sw, sh, xScale, sy);
-    if (sw < 100.0f || sh < 100.0f) return;
-
-    const auto& th = Theme();
-    const float pw = 196.0f * xScale;
-    const float ph = 78.0f * sy;
-    const float px = (sw - pw) * 0.5f;
-    const float py = sh * 0.60f;
-
-    sa::font::DrawRect({px, py + ph, px + pw, py}, {0, 0, 0, 215});
-    sa::font::DrawRect({px, py + 16.5f * sy, px + pw, py}, {0, 0, 0, 238});
-
-    PrintFittedText(px + pw * 0.5f, py + 2.5f * sy, pw - 10.0f * xScale, spec.titleGame.c_str(),
-                    2, 0.30f * xScale, 0.58f * sy, 0, th.textTitle);
-
-    const float boxW = 130.0f * xScale;
-    const float boxH = 23.0f * sy;
-    const float bx   = px + (pw - boxW) * 0.5f;
-    const float by   = py + 22.0f * sy;
-    if (spec.plateStyle) {
-        sa::font::DrawRect({bx, by + boxH, bx + boxW, by}, {235, 232, 218, 245});
-        sa::font::DrawRect({bx + 1.5f * xScale, by + boxH - 1.5f * sy, bx + boxW - 1.5f * xScale, by + 1.5f * sy}, {25, 45, 90, 230});
-    } else {
-        sa::font::DrawRect({bx, by + boxH, bx + boxW, by}, {170, 170, 170, 220});
-        sa::font::DrawRect({bx + 1.5f * xScale, by + boxH - 1.5f * sy, bx + boxW - 1.5f * xScale, by + 1.5f * sy}, {15, 15, 15, 245});
-    }
-
-    bool blink = ((GetTickCount() / 400) % 2) == 0;
-    std::string shown = spec.text;
-    if (static_cast<int>(shown.size()) < spec.maxLen && blink) shown.push_back('_');
-    if (shown.empty()) shown = "_";
-
-    PrintFittedText(px + pw * 0.5f, by + 3.0f * sy, boxW - 8.0f * xScale, shown.c_str(),
-                    2, 0.48f * xScale, 0.88f * sy, 0, {245, 245, 250, 255});
-
-    if (!spec.line1HintGame.empty()) {
-        PrintFittedText(px + pw * 0.5f, py + 52.0f * sy, pw - 10.0f * xScale, spec.line1HintGame.c_str(),
-                        1, th.fontFooterX * xScale, th.fontFooterY * sy, 0, th.textFooter);
-    }
-    if (!spec.line2HintGame.empty()) {
-        PrintFittedText(px + pw * 0.5f, py + 63.5f * sy, pw - 10.0f * xScale, spec.line2HintGame.c_str(),
-                        1, th.fontFooterX * xScale, th.fontFooterY * sy, 0, th.textCol);
-    }
 }
 
 } // namespace ui

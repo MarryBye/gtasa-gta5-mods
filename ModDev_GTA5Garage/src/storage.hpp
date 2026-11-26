@@ -8,35 +8,23 @@
 #include <shlobj.h>
 #include "config.hpp"
 #include "log.hpp"
+#include "mod_bus.hpp"
+#include "sa_sdk.hpp"
 #include "vehicle_data.hpp"
 
 namespace storage {
 
-// Store per-save garage files right alongside GTASAsf*.b in Documents\GTA San Andreas User Files\GTA5GarageSaves!
-// Completely immune to ModLoader virtual filesystem / directory locks!
-inline std::string GetSaveDir() {
-    char docs[MAX_PATH] = {};
-    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, docs)) && docs[0]) {
-        std::string userFiles = std::string(docs) + "\\GTA San Andreas User Files";
-        CreateDirectoryA(userFiles.c_str(), nullptr);
-        std::string dir = userFiles + "\\GTA5GarageSaves";
-        CreateDirectoryA(dir.c_str(), nullptr);
-        return dir;
-    }
-    std::string fallback = mod::Config().gameDir + "\\GTA5GarageSaves";
-    CreateDirectoryA(fallback.c_str(), nullptr);
-    return fallback;
+inline const char* GetCoopOverride() {
+    if (auto* b = modbus::GetBus(); b && b->coopProfileName[0]) return b->coopProfileName;
+    return nullptr;
 }
 
-// slotIndex: 1..8 for GTASAsf1.b..GTASAsf8.b, or 0 for unsaved/NewGame/SA-COOP session
-inline std::string GetSlotFilePath(int slotIndex) {
-    char name[64];
-    if (slotIndex >= 1 && slotIndex <= 8) {
-        std::snprintf(name, sizeof(name), "\\garage_slot_%d.ini", slotIndex);
-    } else {
-        std::snprintf(name, sizeof(name), "\\garage_autosave.ini");
+// slotIndex: 1..8 for GTASAsf1..8.b (SP or SA-COOP Host), or 0 for SA-COOP Client per-player profile!
+inline std::string GetSlotFilePath(int slotIndex, bool forLoading = false) {
+    if (forLoading) {
+        return sa::ResolveExistingLoadPath("GTA5GarageSaves", mod::Config().gameDir, "garage", slotIndex, GetCoopOverride());
     }
-    return GetSaveDir() + name;
+    return sa::BuildSaveProfilePath("GTA5GarageSaves", mod::Config().gameDir, "garage", slotIndex, GetCoopOverride());
 }
 
 inline std::string HexEncode(const std::string& raw) {
@@ -68,7 +56,7 @@ inline std::string HexDecode(const char* hex) {
 }
 
 inline bool SaveGarageToSlot(int slotIndex, const std::array<mod::OwnedVehicle, mod::MAX_OWNED_VEHICLES>& slots) {
-    std::string path = GetSlotFilePath(slotIndex);
+    std::string path = GetSlotFilePath(slotIndex, false);
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
         modlog::Info("[Storage] Failed to open %s for writing", path.c_str());
@@ -109,7 +97,13 @@ inline bool SaveGarageToSlot(int slotIndex, const std::array<mod::OwnedVehicle, 
         std::fprintf(f, "Xenon=%d\n", v.tuning.xenonLights ? 1 : 0);
         std::fprintf(f, "Neon=%u\n", static_cast<unsigned>(v.tuning.neonColor));
         std::fprintf(f, "Horn=%u\n", v.tuning.hornType);
-        std::fprintf(f, "Plate=%s\n\n", v.tuning.plateText);
+        std::fprintf(f, "Plate=%s\n", v.tuning.plateText);
+        std::fprintf(f, "WearEngine=%.2f\n", v.wear.engine);
+        std::fprintf(f, "WearTrans=%.2f\n", v.wear.transmission);
+        std::fprintf(f, "WearBrakes=%.2f\n", v.wear.brakes);
+        std::fprintf(f, "WearTires=%.2f\n", v.wear.tires);
+        std::fprintf(f, "WearSusp=%.2f\n", v.wear.suspension);
+        std::fprintf(f, "WearChassis=%.2f\n\n", v.wear.chassis);
     }
 
     std::fclose(f);
@@ -120,7 +114,7 @@ inline bool SaveGarageToSlot(int slotIndex, const std::array<mod::OwnedVehicle, 
 inline bool LoadGarageFromSlot(int slotIndex, std::array<mod::OwnedVehicle, mod::MAX_OWNED_VEHICLES>& slots) {
     for (auto& v : slots) v = mod::OwnedVehicle{};
 
-    std::string path = GetSlotFilePath(slotIndex);
+    std::string path = GetSlotFilePath(slotIndex, true);
     DWORD attr = GetFileAttributesA(path.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES) {
         modlog::Info("[Storage] No saved garage file for slot %d (%s) -> starting fresh", slotIndex, path.c_str());
@@ -176,6 +170,19 @@ inline bool LoadGarageFromSlot(int slotIndex, std::array<mod::OwnedVehicle, mod:
             std::memcpy(v.tuning.plateText, buf, len);
             v.tuning.plateText[len] = '\0';
         }
+
+        auto readFloat = [&](const char* key) -> float {
+            char fb[32] = {};
+            GetPrivateProfileStringA(sec, key, "0.0", fb, sizeof(fb), p);
+            return static_cast<float>(std::atof(fb));
+        };
+        v.wear.engine       = readFloat("WearEngine");
+        v.wear.transmission = readFloat("WearTrans");
+        v.wear.brakes       = readFloat("WearBrakes");
+        v.wear.tires        = readFloat("WearTires");
+        v.wear.suspension   = readFloat("WearSusp");
+        v.wear.chassis      = readFloat("WearChassis");
+        v.wear.ClampAll();
     }
 
     modlog::Info("[Storage] Loaded garage from %s", path.c_str());

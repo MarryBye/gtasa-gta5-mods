@@ -3,10 +3,12 @@
 #include <windows.h>
 #include "audio.hpp"
 #include "config.hpp"
+#include "dealership.hpp"
 #include "delivery.hpp"
 #include "garage.hpp"
 #include "log.hpp"
 #include "memory.hpp"
+#include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "tuning_physics.hpp"
 #include "ui_menu.hpp"
@@ -33,24 +35,47 @@ bool g_loadedSaveThisBoot  = false;
 bool g_initializedInWorld  = false;
 int  g_lastGameState       = -1;
 
-// Parse slot number 1..8 from GTA SA save filename buffer (e.g., "...\GTASAsf3.b")
+// Bus callbacks exported cleanly to GTA5Phone & GTA5UIKit!
+void __cdecl BusOpenMechanic(bool fromPhone)   { delivery::OpenMechanicMenu(fromPhone); }
+void __cdecl BusOpenDealership(bool fromPhone) { dealership::OpenRemote(fromPhone); }
+void __cdecl BusOpenInsurance(bool fromPhone)  { delivery::OpenInsuranceMenu(fromPhone); }
+bool __cdecl BusIsAnyGarageMenuOpen()          { return workshop::IsWorkshopActive() || delivery::IsMenuOpen() || dealership::IsActive(); }
+bool __cdecl BusIsWorkshopClaimed()            { return workshop::IsCustomWorkshopMenuDrawing(); }
+int  __cdecl BusGetOwnedCount()                { return garage::CountOccupied(); }
+int  __cdecl BusGetWreckedCount() {
+    int n = 0;
+    const auto& slots = garage::Slots();
+    int lim = std::min(mod::Config().maxVehicles, mod::MAX_OWNED_VEHICLES);
+    for (int i = 0; i < lim; ++i) {
+        if (slots[i].occupied && slots[i].destroyed) ++n;
+    }
+    return n;
+}
+
+void RegisterWithBus() {
+    if (auto* b = modbus::GetBus()) {
+        b->garageInstalled       = true;
+        b->garageOpenMechanic    = &BusOpenMechanic;
+        b->garageOpenDealership  = &BusOpenDealership;
+        b->garageOpenInsurance   = &BusOpenInsurance;
+        b->garageIsAnyMenuOpen   = &BusIsAnyGarageMenuOpen;
+        b->garageGetOwnedCount   = &BusGetOwnedCount;
+        b->garageGetWreckedCount = &BusGetWreckedCount;
+    }
+    modbus::RegisterPanelClaim("UPGRADE", &BusIsWorkshopClaimed);
+}
+
 int ParseSaveSlotFromPath(const char* path) {
     if (!path) return 0;
     const char* p = std::strstr(path, "GTASAsf");
     if (!p) p = std::strstr(path, "gtasasf");
-    if (p && p[7] >= '1' && p[7] <= '8') {
-        return p[7] - '0';
-    }
+    if (p && p[7] >= '1' && p[7] <= '8') return p[7] - '0';
     return 0;
 }
 
 void __cdecl HookedMakeValidSaveName(int32_t slot0to7) {
-    if (slot0to7 >= 0 && slot0to7 <= 7) {
-        g_pendingSaveSlot1to8 = slot0to7 + 1;
-    }
-    if (g_origMakeSaveName) {
-        g_origMakeSaveName(slot0to7);
-    }
+    if (slot0to7 >= 0 && slot0to7 <= 7) g_pendingSaveSlot1to8 = slot0to7 + 1;
+    if (g_origMakeSaveName) g_origMakeSaveName(slot0to7);
 }
 
 bool __cdecl HookedGenericSave(int32_t arg) {
@@ -71,7 +96,6 @@ bool __cdecl HookedGenericLoad(char* outFlag) {
     if (ok) {
         int slot = ParseSaveSlotFromPath(reinterpret_cast<const char*>(0x00C16F18));
         if (slot < 1 || slot > 8) {
-            // Fallback: FrontEndMenuManager selected save slot (0..7)
             int8_t menuSlot = *reinterpret_cast<const int8_t*>(0x00BA6748 + 0x15F);
             if (menuSlot >= 0 && menuSlot <= 7) slot = menuSlot + 1;
         }
@@ -79,6 +103,7 @@ bool __cdecl HookedGenericLoad(char* outFlag) {
         g_initializedInWorld = true;
         workshop::Reset();
         delivery::Reset();
+        dealership::Reset();
         modlog::Info("[SaveHook] GenericLoad succeeded -> loading garage for slot %d", slot);
         garage::OnGameLoad(slot);
     }
@@ -92,28 +117,26 @@ void __cdecl HookedScriptsProcess() {
             g_initializedInWorld = true;
             if (!g_loadedSaveThisBoot) {
                 if (sa::IsCoopModLoaded()) {
-                    // Joined SA-COOP without local save load -> load coop/autosave slot 0
                     garage::OnGameLoad(0);
                 } else {
-                    // Fresh Singleplayer New Game -> start with an empty garage!
                     garage::OnNewGame();
                 }
             }
         }
 
-        // Handle game reload / restart transitions cleanly
         if (g_lastGameState != 9 && g_lastGameState != -1) {
             workshop::Reset();
             delivery::Reset();
+            dealership::Reset();
             audio::StopAll();
         }
 
         ui::Keys().Update();
         workshop::PreScriptsTick();
     } else if (g_lastGameState == 9 && gs != 9) {
-        // Returning to main menu / loading screen
         workshop::Reset();
         delivery::Reset();
+        dealership::Reset();
         tuning::ResetAll();
         g_initializedInWorld = false;
         g_loadedSaveThisBoot = false;
@@ -126,6 +149,7 @@ void __cdecl HookedScriptsProcess() {
 
     if (gs == 9) {
         workshop::PostScriptsTick();
+        dealership::Tick();
         delivery::Tick();
         garage::Tick();
         tuning::TickAll();
@@ -138,11 +162,11 @@ void __cdecl HookedDrawAfterFade() {
     }
     if (sa::GetGameState() == 9) {
         workshop::Render2D();
+        dealership::Render2D();
         delivery::Render2D();
     }
 }
 
-// Runs EVERY frame inside Idle() — INCLUDING Pause Menu & unfocused window!
 void __cdecl HookedIdleAfterFade() {
     if (g_origIdleAfterFade) {
         g_origIdleAfterFade();
@@ -158,19 +182,12 @@ void InstallAllHooks() {
         return;
     }
 
-    // 1. CGame::Process -> CTheScripts::Process (0x0053BFC7: CALL 0x0046A000)
     g_origScriptsProcess = reinterpret_cast<FnVoid>(
         mem::HookCall(0x0053BFC7, reinterpret_cast<uintptr_t>(&HookedScriptsProcess)));
-
-    // 2. Render2dStuff -> CHud::DrawAfterFade (0x0053E4FF: CALL 0x0058FAE0)
     g_origDrawAfterFade = reinterpret_cast<FnVoid>(
         mem::HookCall(0x0053E4FF, reinterpret_cast<uintptr_t>(&HookedDrawAfterFade)));
-
-    // 2b. Idle -> Render2dStuffAfterFade (0x0053EB9D: CALL 0x0053E600) — runs in Pause Menu too!
     g_origIdleAfterFade = reinterpret_cast<FnVoid>(
         mem::HookCall(0x0053EB9D, reinterpret_cast<uintptr_t>(&HookedIdleAfterFade)));
-
-    // 3. Per-save slot hooks (C_PcSave::SaveSlot & GenericLoad)
     g_origMakeSaveName = reinterpret_cast<FnIntArg>(
         mem::HookCall(0x00619066, reinterpret_cast<uintptr_t>(&HookedMakeValidSaveName)));
     g_origGenericSave = reinterpret_cast<FnGenericOp>(
@@ -178,14 +195,10 @@ void InstallAllHooks() {
     g_origGenericLoad = reinterpret_cast<FnLoadOp>(
         mem::HookCall(0x0053C70B, reinterpret_cast<uintptr_t>(&HookedGenericLoad)));
 
-    // 4. Workshop CMenuSystem::Process hook (0x0058FCDB)
     workshop::InstallHooks();
+    RegisterWithBus();
 
-    modlog::Info("[Init] All hooks installed successfully! (Scripts=0x%08X, Draw=0x%08X, Save=0x%08X, Load=0x%08X)",
-                 reinterpret_cast<uintptr_t>(g_origScriptsProcess),
-                 reinterpret_cast<uintptr_t>(g_origDrawAfterFade),
-                 reinterpret_cast<uintptr_t>(g_origGenericSave),
-                 reinterpret_cast<uintptr_t>(g_origGenericLoad));
+    modlog::Info("[Init] GTA5GarageAndTuning v2.0 hooks & Bus registered (Tuning + Wear + Dealership + Mechanic)!");
 }
 
 } // namespace
@@ -199,7 +212,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpRese
             ui::SetUseRussian(mod::Config().useRussian);
             modlog::Enabled() = mod::Config().enableLog;
             modlog::Init(hModule, "GTA5GarageAndTuning");
-            modlog::Info("GTA5GarageAndTuning v1.1 attached (Shared UI Kit, SA 1.0 US, SA-COOP & Proper Shaders compatible).");
+            modlog::Info("GTA5GarageAndTuning v2.0 attached (UIKit Bus, Wear & Tear, Official Dealership, Mechanic).");
             InstallAllHooks();
             break;
         case DLL_PROCESS_DETACH:

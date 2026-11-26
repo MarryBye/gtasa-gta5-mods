@@ -17,6 +17,7 @@ void PostScriptsTick();
 void Render2D();
 
 bool          IsWorkshopActive();
+bool          IsCustomWorkshopMenuDrawing();
 sa::CVehicle* GetWorkshopVehicle();
 
 void Reset();

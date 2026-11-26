@@ -26,6 +26,8 @@ struct TrackedVehicle {
     sa::tHandlingData      baseHandling{};   // Clean snapshot of stock handling
     sa::tHandlingData      customHandling{}; // Isolated per-vehicle handling instance!
     mod::PerformanceTuning cfg{};
+    mod::VehicleWear       wear{};
+    mod::VehicleWear       lastAppliedWear{};
 
     // Live runtime state
     float    lastHealth   = 1000.0f;
@@ -35,6 +37,7 @@ struct TrackedVehicle {
     uint8_t  prevGear     = 0;
     uint32_t lastBovMs    = 0;
     uint32_t lastPopMs    = 0;
+    uint32_t lastSputterMs= 0;
 };
 
 TrackedVehicle g_tracked[MAX_TRACKED_VEHICLES];
@@ -174,12 +177,13 @@ TrackedVehicle* AllocSlot(sa::CVehicle* veh) {
     return nullptr;
 }
 
-// Compute tuned handling from a clean base handling snapshot
-void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel, const mod::PerformanceTuning& c, sa::tHandlingData& out) {
+// Compute tuned handling from a clean base handling snapshot + ETS 2 wear penalties
+void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
+                        const mod::PerformanceTuning& c, const mod::VehicleWear& wear,
+                        sa::tHandlingData& out) {
     std::memcpy(&out, &base, sizeof(sa::tHandlingData));
 
     // 1. Engine (0..4): balanced, noticeably stronger acceleration + higher top speed + lower aero drag!
-    // Reducing m_fDragMult ensures heavier sedans (like Tahoma) actually reach their new top speed!
     static constexpr float kEngAccel[5] = {1.00f, 1.18f, 1.38f, 1.60f, 1.85f};
     static constexpr float kEngTop[5]   = {1.00f, 1.11f, 1.23f, 1.36f, 1.50f};
     static constexpr float kEngDrag[5]  = {1.00f, 0.92f, 0.84f, 0.75f, 0.66f};
@@ -238,9 +242,6 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel, const m
     out.m_fTractionLoss       *= kTracLoss[gIdx];
 
     // 6. Armor / Body (0..5 = 0..100%)
-    // Compatible with Proper Vehicle Damage v0.3.7:
-    // - Strong m_fCollisionDamageMultiplier reduction protects panels, doors, bumpers & glass
-    // - Progressive chassis mass/rigidity reinforcement reduces impact delta-V (less body crumpling in collisions!)
     static constexpr float kCollDmg[6]  = {1.00f, 0.78f, 0.58f, 0.40f, 0.25f, 0.14f};
     static constexpr float kArmorMass[6] = {1.00f, 1.12f, 1.25f, 1.40f, 1.56f, 1.74f};
     int aIdx = std::clamp<int>(c.armorLevel, 0, 5);
@@ -251,13 +252,53 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel, const m
         out.m_fInvMass   = 1.0f / out.m_fMass;
         out.m_fTurnMass *= (1.0f + (mm - 1.0f) * 0.50f);
     }
+
+    // 7. ETS 2-Style Mechanical Wear Degradation (Strongly degrades real vehicle performance!)
+    if (mod::Config().enableWearSystem && wear.HasAnyWear()) {
+        const float wE  = std::clamp(wear.engine,       0.0f, 100.0f) * 0.01f;
+        const float wTr = std::clamp(wear.transmission, 0.0f, 100.0f) * 0.01f;
+        const float wB  = std::clamp(wear.brakes,       0.0f, 100.0f) * 0.01f;
+        const float wTi = std::clamp(wear.tires,        0.0f, 100.0f) * 0.01f;
+        const float wS  = std::clamp(wear.suspension,   0.0f, 100.0f) * 0.01f;
+        const float wC  = std::clamp(wear.chassis,      0.0f, 100.0f) * 0.01f;
+
+        // Engine + Transmission wear kill Top Speed & Acceleration
+        float wearTopMult   = std::max(0.58f, 1.0f - 0.36f * wE - 0.06f * wTr);
+        float wearAccelMult = std::max(0.38f, (1.0f - 0.44f * wE) * (1.0f - 0.28f * wTr));
+        out.m_fDragMult *= (1.0f + 0.30f * wE + 0.12f * wTi);
+        out.m_transmissionData.m_fEngineAcceleration *= wearAccelMult;
+        out.m_transmissionData.m_fEngineInertia      *= (1.0f + 0.75f * wTr);
+        out.m_transmissionData.m_fMaxGearVelocity    *= wearTopMult;
+        for (int g = 1; g < 6; ++g) {
+            out.m_transmissionData.m_aGears[g].m_fMaxVelocity        *= wearTopMult;
+            out.m_transmissionData.m_aGears[g].m_fChangeUpVelocity   *= wearTopMult;
+            out.m_transmissionData.m_aGears[g].m_fChangeDownVelocity *= wearTopMult;
+        }
+
+        // Brakes wear weakens deceleration strongly
+        out.m_fBrakeDeceleration *= std::max(0.38f, 1.0f - 0.58f * wB);
+
+        // Tires + Suspension wear ruin traction & cornering stability
+        out.m_fTractionMultiplier *= std::max(0.45f, (1.0f - 0.40f * wTi) * (1.0f - 0.15f * wS));
+        out.m_fTractionLoss       *= std::max(0.50f, 1.0f - 0.36f * wTi);
+        if (isFourWheel && wS > 0.005f) {
+            out.m_fSuspensionForceLevel         *= std::max(0.60f, 1.0f - 0.35f * wS);
+            out.m_fSuspensionDampingLevel       *= std::max(0.48f, 1.0f - 0.48f * wS);
+            out.m_fSuspensionAntiDiveMultiplier *= std::max(0.50f, 1.0f - 0.45f * wS);
+        }
+
+        // Chassis wear makes body take heavier impact damage
+        out.m_fCollisionDamageMultiplier *= (1.0f + 0.85f * wC);
+    }
 }
 
 void RebuildHandling(TrackedVehicle& tv) {
     if (!tv.origHandling || !sa::IsVehicleValid(tv.veh)) return;
 
-    BuildTunedHandling(tv.baseHandling, tv.veh->IsFourWheelLike(), tv.cfg, tv.customHandling);
+    tv.wear.ClampAll();
+    BuildTunedHandling(tv.baseHandling, tv.veh->IsFourWheelLike(), tv.cfg, tv.wear, tv.customHandling);
     tv.veh->HandlingData() = &tv.customHandling;
+    tv.lastAppliedWear = tv.wear;
 
     // Bulletproof Tires flag
     tv.veh->SetTyresDontBurst(tv.cfg.bulletproofTires);
@@ -266,13 +307,12 @@ void RebuildHandling(TrackedVehicle& tv) {
     }
 }
 
-VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, bool isFourWheel, const mod::PerformanceTuning& cfg) {
+VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, bool isFourWheel,
+                                      const mod::PerformanceTuning& cfg, const mod::VehicleWear& wear) {
     VehicleStats st{};
     sa::tHandlingData sim{};
-    BuildTunedHandling(base, isFourWheel, cfg, sim);
+    BuildTunedHandling(base, isFourWheel, cfg, wear, sim);
 
-    // Calibrated achievable top speed matching GTA SA's real physics & SA Styled Speedometer!
-    // GTA SA stores m_fMaxGearVelocity in units/step (1 unit/step = 50 m/s = 180 km/h = 111.847 mph).
     float rawMax = sim.m_transmissionData.m_fMaxGearVelocity;
     if (rawMax < 0.08f) {
         float gearMax = std::max(sim.m_transmissionData.m_aGears[5].m_fMaxVelocity,
@@ -285,37 +325,36 @@ VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, bool isFour
     float safeDrag = std::clamp(std::isfinite(sim.m_fDragMult) ? sim.m_fDragMult : 2.0f, 0.5f, 8.0f);
     float dragFactor = 1.0f / (1.0f + std::max(0.0f, safeDrag - 0.85f) * 0.085f);
     float kmh = rawMax * 180.0f * dragFactor;
-    if (cfg.turbo) kmh += 9.0f; // Active turbo boost thrust
-    st.topSpeedKmh = std::clamp(static_cast<int>(std::round(kmh)), 40, 380);
-    st.topSpeedMph = std::clamp(static_cast<int>(std::round(kmh * 0.621371f)), 25, 240);
+    if (cfg.turbo) kmh += 9.0f * (1.0f - 0.40f * std::clamp(wear.engine, 0.0f, 100.0f) * 0.01f);
+    st.topSpeedKmh = std::clamp(static_cast<int>(std::round(kmh)), 25, 380);
+    st.topSpeedMph = std::clamp(static_cast<int>(std::round(kmh * 0.621371f)), 16, 240);
 
-    // Acceleration rating (scaled cleanly around GTA SA's m_fEngineAcceleration ~ 0.0004..0.0025 + inertia)
     float rawAccel = sim.m_transmissionData.m_fEngineAcceleration * 1000.0f;
     float inertiaBonus = (base.m_transmissionData.m_fEngineInertia > 0.1f)
         ? (base.m_transmissionData.m_fEngineInertia / std::max(1.0f, sim.m_transmissionData.m_fEngineInertia))
         : 1.0f;
     float accelScore = rawAccel * 185.0f * (0.75f + 0.25f * inertiaBonus);
-    if (cfg.turbo) accelScore += 9.0f;
-    st.accelRating = std::clamp(static_cast<int>(std::round(accelScore)), 10, 150);
+    if (cfg.turbo) accelScore += 9.0f * (1.0f - 0.45f * std::clamp(wear.engine, 0.0f, 100.0f) * 0.01f);
+    st.accelRating = std::clamp(static_cast<int>(std::round(accelScore)), 6, 150);
 
-    // Braking rating (GTA SA stores m_fBrakeDeceleration scaled by 1/2500 -> ~0.002..0.008)
     float brakeScore = sim.m_fBrakeDeceleration * 11500.0f;
-    st.brakeRating = std::clamp(static_cast<int>(std::round(brakeScore)), 10, 150);
+    st.brakeRating = std::clamp(static_cast<int>(std::round(brakeScore)), 6, 150);
 
-    // Handling / Grip rating (traction multiplier + traction loss + suspension stability)
-    float suspBonus = 1.0f + static_cast<float>(cfg.suspensionLevel) * 0.055f;
+    float wS = std::clamp(wear.suspension, 0.0f, 100.0f) * 0.01f;
+    float suspBonus = (1.0f + static_cast<float>(cfg.suspensionLevel) * 0.055f) * (1.0f - 0.22f * wS);
     float handScore = (sim.m_fTractionMultiplier * 52.0f + sim.m_fTractionLoss * 28.0f) * suspBonus;
-    st.handlingRating = std::clamp(static_cast<int>(std::round(handScore)), 15, 150);
+    st.handlingRating = std::clamp(static_cast<int>(std::round(handScore)), 8, 150);
 
-    // Effective body durability (100% stock -> 200% at Armor 100%)
-    st.armorPercent = 100 + std::clamp<int>(cfg.armorLevel, 0, 5) * 20;
+    float wC = std::clamp(wear.chassis, 0.0f, 100.0f) * 0.01f;
+    int baseArmor = 100 + std::clamp<int>(cfg.armorLevel, 0, 5) * 20;
+    st.armorPercent = std::clamp(static_cast<int>(std::round(static_cast<float>(baseArmor) * (1.0f - 0.48f * wC))), 20, 200);
 
     return st;
 }
 
 } // namespace
 
-VehicleStats ComputeStats(sa::CVehicle* veh, const mod::PerformanceTuning& cfg) {
+VehicleStats ComputeStats(sa::CVehicle* veh, const mod::PerformanceTuning& cfg, const mod::VehicleWear& wear) {
     if (!sa::IsVehicleValid(veh)) return VehicleStats{};
 
     const sa::tHandlingData* base = nullptr;
@@ -326,10 +365,10 @@ VehicleStats ComputeStats(sa::CVehicle* veh, const mod::PerformanceTuning& cfg) 
         CacheModelHandling(veh->GetModelIndex(), veh->IsFourWheelLike(), base);
     }
     if (!base) return VehicleStats{};
-    return ComputeStatsFromHandling(*base, veh->IsFourWheelLike(), cfg);
+    return ComputeStatsFromHandling(*base, veh->IsFourWheelLike(), cfg, wear);
 }
 
-VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning& cfg) {
+VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning& cfg, const mod::VehicleWear& wear) {
     if (modelId < 400 || modelId > 611) return VehicleStats{};
 
     // Tier 1: Live tracked vehicle of this model (100% exact clean base handling snapshot!)
@@ -337,7 +376,7 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
         if (g_tracked[i].inUse && g_tracked[i].modelId == modelId && IsHandlingSane(&g_tracked[i].baseHandling)) {
             bool is4w = sa::IsVehicleValid(g_tracked[i].veh) ? g_tracked[i].veh->IsFourWheelLike() : true;
             CacheModelHandling(modelId, is4w, &g_tracked[i].baseHandling);
-            return ComputeStatsFromHandling(g_tracked[i].baseHandling, is4w, cfg);
+            return ComputeStatsFromHandling(g_tracked[i].baseHandling, is4w, cfg, wear);
         }
     }
 
@@ -351,7 +390,7 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
                 if (auto* tv = FindSlot(v)) h = &tv->baseHandling;
                 if (IsHandlingSane(h)) {
                     CacheModelHandling(modelId, v->IsFourWheelLike(), h);
-                    return ComputeStatsFromHandling(*h, v->IsFourWheelLike(), cfg);
+                    return ComputeStatsFromHandling(*h, v->IsFourWheelLike(), cfg, wear);
                 }
             }
         }
@@ -360,7 +399,7 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
     // Tier 3: Previously cached live handling snapshot for this model
     if (g_modelBaseCache[modelId - 400].valid) {
         const auto& c = g_modelBaseCache[modelId - 400];
-        return ComputeStatsFromHandling(c.handling, c.isFourWheel, cfg);
+        return ComputeStatsFromHandling(c.handling, c.isFourWheel, cfg, wear);
     }
 
     // Tier 4: Runtime-patched gHandlingDataMgr lookup (follows Open Limit Adjuster if relocated!)
@@ -371,9 +410,6 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
 
     uint8_t* mi = modelInfoPtrs ? modelInfoPtrs[modelId] : nullptr;
     if (mi) {
-        // Verified in gta_sa.exe @ 0x004C89BF, 0x006F608B, 0x006F0D4D, 0x006B0B97:
-        //   CVehicleModelInfo + 0x4A = uint8_t m_nHandlingId (0..209)
-        //   CVehicleModelInfo + 0x3C = int32_t m_nVehicleType (0=car, 1=mtruck, 2=quad)
         uint8_t hid = *reinterpret_cast<const uint8_t*>(mi + 0x4A);
         int32_t vtype = *reinterpret_cast<const int32_t*>(mi + 0x3C);
         bool isFourWheel = (vtype == 0 || vtype == 1 || vtype == 2);
@@ -383,11 +419,10 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
                 handlingTbl + static_cast<uintptr_t>(hid) * 0xE0u);
             if (IsHandlingSane(base)) {
                 CacheModelHandling(modelId, isFourWheel, base);
-                return ComputeStatsFromHandling(*base, isFourWheel, cfg);
+                return ComputeStatsFromHandling(*base, isFourWheel, cfg, wear);
             }
         }
 
-        // Secondary memory lookup via cHandlingDataMgr::GetHandlingId(gxtKey) @ 0x006F4FD0
         char gxt[12] = {};
         std::memcpy(gxt, mi + 0x32, 8);
         gxt[8] = '\0';
@@ -399,26 +434,26 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
                     handlingTbl + static_cast<uintptr_t>(hid2) * 0xE0u);
                 if (IsHandlingSane(base2)) {
                     CacheModelHandling(modelId, isFourWheel, base2);
-                    return ComputeStatsFromHandling(*base2, isFourWheel, cfg);
+                    return ComputeStatsFromHandling(*base2, isFourWheel, cfg, wear);
                 }
             }
         }
     }
 
-    // Tier 5: Direct data\vehicles.ide + data\handling.cfg file fallback (100% immune to any memory relocation!)
+    // Tier 5: Direct data\vehicles.ide + data\handling.cfg file fallback
     sa::tHandlingData cfgFallback{};
     bool fbFourWheel = true;
     if (LoadHandlingFromCfgFallback(modelId, cfgFallback, fbFourWheel)) {
         CacheModelHandling(modelId, fbFourWheel, &cfgFallback);
         modlog::Info("[Tuning] Used handling.cfg fallback for model %d (maxVel=%.2f).",
                      modelId, cfgFallback.m_transmissionData.m_fMaxGearVelocity * 180.0f);
-        return ComputeStatsFromHandling(cfgFallback, fbFourWheel, cfg);
+        return ComputeStatsFromHandling(cfgFallback, fbFourWheel, cfg, wear);
     }
 
     return VehicleStats{};
 }
 
-void ApplyTuning(sa::CVehicle* veh, const mod::PerformanceTuning& cfg) {
+void ApplyTuning(sa::CVehicle* veh, const mod::PerformanceTuning& cfg, const mod::VehicleWear* wearOverride) {
     if (!sa::IsVehicleValid(veh)) return;
     TrackedVehicle* tv = AllocSlot(veh);
     if (!tv) {
@@ -426,7 +461,25 @@ void ApplyTuning(sa::CVehicle* veh, const mod::PerformanceTuning& cfg) {
         return;
     }
     tv->cfg = cfg;
+    if (wearOverride) {
+        tv->wear = *wearOverride;
+        tv->wear.ClampAll();
+    }
     RebuildHandling(*tv);
+}
+
+void SetLiveWear(sa::CVehicle* veh, const mod::VehicleWear& wear) {
+    if (!sa::IsVehicleValid(veh)) return;
+    TrackedVehicle* tv = AllocSlot(veh);
+    if (!tv) return;
+    tv->wear = wear;
+    tv->wear.ClampAll();
+    RebuildHandling(*tv);
+}
+
+mod::VehicleWear GetLiveWear(const sa::CVehicle* veh) {
+    if (auto* tv = FindSlot(veh)) return tv->wear;
+    return mod::VehicleWear{};
 }
 
 const mod::PerformanceTuning* GetLiveTuning(const sa::CVehicle* veh) {
@@ -514,28 +567,91 @@ void TickAll() {
             }
         }
 
-        // 2. Armor / Body damage mitigation (0..5 -> 0%, 20%, 35%, 50%, 62%, 74% reduction)
+        // 2. Armor / Body damage mitigation + Impact Mechanical Wear!
         float curHp = v->Health();
-        if (c.armorLevel > 0 && curHp > 0.0f && curHp < tv.lastHealth && tv.lastHealth <= 1050.0f) {
+        if (curHp > 0.0f && curHp < tv.lastHealth && tv.lastHealth <= 1050.0f) {
             float dmg = tv.lastHealth - curHp;
             if (dmg > 0.1f && dmg < 650.0f) {
-                static constexpr float kReduce[6] = {0.0f, 0.20f, 0.35f, 0.50f, 0.62f, 0.74f};
-                int aIdx = std::clamp<int>(c.armorLevel, 0, 5);
-                float refunded = dmg * kReduce[aIdx];
-                curHp = std::min(1000.0f, curHp + refunded);
-                v->Health() = curHp;
+                // Accumulate crash wear onto mechanical subsystems (ETS 2 style!)
+                if (mod::Config().enableWearSystem && dmg > 4.0f) {
+                    const float rate = mod::Config().wearRateMult;
+                    const float armorShield = 1.0f - static_cast<float>(std::clamp<int>(c.armorLevel, 0, 5)) * 0.08f;
+                    const float s = (dmg * 0.01f) * rate * armorShield;
+                    tv.wear.chassis      += s * 4.8f;
+                    tv.wear.engine       += s * 3.8f;
+                    tv.wear.suspension   += s * 3.4f;
+                    tv.wear.transmission += s * 2.2f;
+                    tv.wear.tires        += s * 2.0f;
+                    tv.wear.brakes       += s * 1.4f;
+                    tv.wear.ClampAll();
+                }
+
+                if (c.armorLevel > 0) {
+                    static constexpr float kReduce[6] = {0.0f, 0.20f, 0.35f, 0.50f, 0.62f, 0.74f};
+                    int aIdx = std::clamp<int>(c.armorLevel, 0, 5);
+                    float chassisIntegrity = mod::Config().enableWearSystem
+                        ? (1.0f - 0.60f * (tv.wear.chassis * 0.01f))
+                        : 1.0f;
+                    float refunded = dmg * kReduce[aIdx] * std::clamp(chassisIntegrity, 0.30f, 1.0f);
+                    curHp = std::min(1000.0f, curHp + refunded);
+                    v->Health() = curHp;
+                }
             }
         }
         tv.lastHealth = curHp;
 
-        // 3. Active Driving Physics + Expressive Engine Tone + Subtle Turbo + Custom Horn
+        // 3. Active Driving Physics + Passive Mechanical Wear + Expressive Engine Tone + Turbo + Horn
         if (playerDriving && v == playerVeh && v->Health() > 0.0f && !playerPed->IsInWater()) {
             float gas    = std::fabs(v->GasPedal());
+            float brake  = std::fabs(v->BrakePedal());
             float speed  = v->Speed();
             uint8_t gear = v->GetCurrentGear();
 
             // Detect airborne vehicle via native IS_CAR_IN_AIR_PROPER (0x01F3) so audio/boost NEVER sticks in mid-air!
             bool inAir = (tv.handle > 0) && sa::ScriptCmd(0x01F3).Int(tv.handle).Run();
+
+            // Passive driving wear (distance & load based)
+            if (mod::Config().enableWearSystem && speed > 0.025f) {
+                const float km   = (speed * dt * 50.0f) * 0.001f;
+                const float rate = mod::Config().wearRateMult;
+                tv.wear.tires        += km * (0.90f + 0.50f * gas + (c.tiresGripLevel >= 3 ? 0.25f : 0.0f)) * (c.bulletproofTires ? 0.72f : 1.0f) * rate;
+                tv.wear.engine       += km * (0.60f + 0.70f * gas * (c.turbo ? 1.25f : 1.0f)) * rate;
+                tv.wear.transmission += km * (0.45f + 0.32f * gas) * rate;
+                tv.wear.suspension   += km * (0.50f + (inAir ? 2.0f : 0.0f)) * rate;
+                tv.wear.brakes       += ((brake > 0.12f) ? (km * 2.8f + dt * 0.14f) : (km * 0.10f)) * rate;
+                tv.wear.chassis      += km * 0.18f * rate;
+                tv.wear.ClampAll();
+            }
+
+            // Rebuild live handling whenever any part wears by >= 1% so degradation is felt immediately!
+            if (mod::Config().enableWearSystem) {
+                float maxDelta = std::max({
+                    std::fabs(tv.wear.engine       - tv.lastAppliedWear.engine),
+                    std::fabs(tv.wear.transmission - tv.lastAppliedWear.transmission),
+                    std::fabs(tv.wear.brakes       - tv.lastAppliedWear.brakes),
+                    std::fabs(tv.wear.tires        - tv.lastAppliedWear.tires),
+                    std::fabs(tv.wear.suspension   - tv.lastAppliedWear.suspension),
+                    std::fabs(tv.wear.chassis      - tv.lastAppliedWear.chassis)
+                });
+                if (maxDelta >= 1.0f) {
+                    RebuildHandling(tv);
+                }
+
+                // Severe wear symptoms (>85% Engine sputter, >92% non-BP Tire blowout risk)
+                if (!inAir && tv.wear.engine >= 85.0f && gas > 0.55f && speed > 0.18f && (nowMs - tv.lastSputterMs > 4200)) {
+                    v->MoveSpeed().x *= 0.94f;
+                    v->MoveSpeed().y *= 0.94f;
+                    tv.lastSputterMs = nowMs;
+                }
+                if (!inAir && !c.bulletproofTires && tv.wear.tires >= 92.0f && speed > 0.38f && (nowMs - tv.lastSputterMs > 9500)) {
+                    if (v->IsFourWheelLike()) {
+                        v->AutoWheelStatus()[(nowMs / 100) % 4] = 1;
+                    } else if (v->IsBikeLike()) {
+                        v->BikeWheelStatus()[(nowMs / 100) % 2] = 1;
+                    }
+                    tv.lastSputterMs = nowMs;
+                }
+            }
 
             // Estimate smooth in-gear RPM (0..1) so engine tone sweeps naturally with every shift!
             float rawRpm = 0.08f;

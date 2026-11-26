@@ -126,11 +126,13 @@ void SnapshotVehicleToSlot(sa::CVehicle* veh, int slotIdx) {
         dst.visuals.upgrades[i] = upgs[i];
     }
 
-    // GTA 5 performance & visual tuning
+    // GTA 5 performance & visual tuning + ETS 2 wear state
     if (const auto* live = tuning::GetLiveTuning(veh)) {
         dst.tuning = *live;
+        dst.wear   = tuning::GetLiveWear(veh);
     } else {
         dst.tuning = mod::PerformanceTuning{};
+        dst.wear   = mod::VehicleWear{};
     }
 }
 
@@ -148,6 +150,8 @@ int RegisterVehicle(sa::CVehicle* veh) {
     if (freeSlot < 0) return -1;
 
     SnapshotVehicleToSlot(veh, freeSlot);
+    // Ensure live ETS 2 wear tracking begins immediately even on stock-tuned personal vehicles!
+    tuning::ApplyTuning(veh, g_slots[freeSlot].tuning, &g_slots[freeSlot].wear);
 
     // Make this vehicle the active tracked personal vehicle
     ClearDeliveryBlip();
@@ -227,8 +231,8 @@ void ApplySavedVehicleConfig(sa::CVehicle* veh, const mod::OwnedVehicle& data) {
         sa::ApplyLiveCustomPlate(veh, data.tuning.plateText);
     }
 
-    // 6. Apply all GTA 5 performance tuning
-    tuning::ApplyTuning(veh, data.tuning);
+    // 6. Apply all GTA 5 performance tuning + persisted mechanical wear!
+    tuning::ApplyTuning(veh, data.tuning, &data.wear);
 }
 
 sa::CVehicle* GetActivePersonalVehicle() {
@@ -267,8 +271,11 @@ void DismissCurrentPersonalVehicle(bool deleteEntity) {
             SaveNow();
         }
         int32_t h = g_activeVehHandle;
+        // SA-COOP safety: never DELETE_CAR out from under a co-op teammate driving our personal vehicle!
+        sa::CPed* driver = v->GetDriver();
+        bool occupiedByOther = (driver != nullptr && driver != sa::FindPlayerPed(0));
         tuning::DetachVehicle(v);
-        if (deleteEntity && h > 0) {
+        if (deleteEntity && !occupiedByOther && h > 0) {
             sa::ScriptCmd(0x00A6).Int(h).Run(); // DELETE_CAR
         } else if (h > 0) {
             sa::ScriptCmd(0x01C3).Int(h).Run(); // MARK_CAR_AS_NO_LONGER_NEEDED
@@ -308,19 +315,32 @@ void Tick() {
     if (dead || hp <= 0.0f || (inWater && hp < 260.0f)) {
         if (!slot.destroyed) {
             slot.destroyed = true;
+            // Sync latest pre-explosion wear AND apply heavy explosion wear penalty!
+            slot.wear = tuning::GetLiveWear(g_activeVeh);
+            if (mod::Config().enableWearSystem) {
+                slot.wear.ApplyExplosionPenalty();
+            }
             ClearDeliveryBlip();
             SaveNow();
             ui::ShowHelp(
-                "~r~Ваш личный транспорт уничтожен!~w~ Вы можете восстановить его в меню ~y~F6~w~.",
-                "~r~Your personal vehicle was destroyed!~w~ Restore it via ~y~F6~w~.",
+                "~r~Ваш личный транспорт уничтожен!~w~ Вы можете восстановить его в меню ~y~F6~w~ (износ сильно вырос!).",
+                "~r~Your personal vehicle was destroyed!~w~ Restore it via ~y~F6~w~ (heavy mechanical wear incurred!).",
                 true);
-            modlog::Info("[Garage] Slot %d vehicle destroyed!", g_activeSlot);
+            modlog::Info("[Garage] Slot %d vehicle destroyed! Avg wear now %.1f%%.", g_activeSlot, slot.wear.Average());
         }
         tuning::DetachVehicle(g_activeVeh);
         g_activeVeh = nullptr;
         g_activeVehHandle = -1;
         g_activeSlot = -1;
         return;
+    }
+
+    // Periodically sync live mechanical wear back into the personal garage slot!
+    static uint32_t s_lastWearSyncMs = 0;
+    uint32_t nowMs = sa::GetTimeMs();
+    if (mod::Config().enableWearSystem && (nowMs - s_lastWearSyncMs >= 2000)) {
+        s_lastWearSyncMs = nowMs;
+        slot.wear = tuning::GetLiveWear(g_activeVeh);
     }
 
     // Clear delivery radar blip once the local player enters the vehicle!
