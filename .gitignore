@@ -9,6 +9,10 @@ dist/
 *.log
 *.zip
 
+# Machine-local config & local agent instructions
+local.config.ps1
+GEMINI.md
+
 # Editor / OS clutter
 .vscode/
 .vs/

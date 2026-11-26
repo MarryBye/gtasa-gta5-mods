@@ -44,11 +44,22 @@ Grand Theft Auto San Andreas/
 
 ## Сборка из исходников / Building
 
-Требуется 32-битный MinGW-w64 (`pacman -S mingw-w64-i686-gcc` в MSYS2):
+Требуется 32-битный MinGW-w64 (`pacman -S mingw-w64-i686-gcc` в MSYS2).
+
+1. *(Опционально, для автоустановки в `modloader`)* Скопируйте `local.config.example.ps1` в `local.config.ps1` и укажите путь к вашей папке GTA San Andreas (`$GameDir`). Также можно задать переменную окружения `GTASA_DIR` или передать `-GameDir`.
+2. Соберите все 6 плагинов:
 ```powershell
+# Сборка всех 6 .asi, автодеплой в modloader и упаковка релизных ZIP в dist\
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-all.ps1
+
+# Быстрая сборка и деплой в modloader без упаковки ZIP
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-all.ps1 -SkipZip
+
+# Только сборка и упаковка ZIP без деплоя в игру
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-all.ps1 -NoDeploy
 ```
-Соберёт все 6 `.asi` плагинов и упакует отдельные архивы + общий бандл в `dist\`.
+
+Также доступен скрипт `publish-release.ps1` для единого цикла: сборка → автодеплой в `modloader` → `git push` → публикация GitHub Release.
 
 ## Лицензия / License
 
