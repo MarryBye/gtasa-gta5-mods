@@ -37,15 +37,48 @@ struct CMenuScreen {
 static_assert(sizeof(CMenuScreen) == 0xE2, "CMenuScreen must be 226 bytes");
 #pragma pack(pop)
 
-constexpr int MAX_MENU_PAGES = 44;
+constexpr int VANILLA_MENU_PAGES = 44;
+constexpr int RELOC_MENU_PAGES   = 127;
 
+// Dynamically reads the LIVE aScreens[] pointer (automatically picks up ModLoader's relocated
+// 127-page aScreens[] heap array patched into 0x00577017, or vanilla 0x008CE008 if absent!).
 inline CMenuScreen* GetScreens() {
+    uintptr_t imm = 0;
+    std::memcpy(&imm, reinterpret_cast<const void*>(0x00577017), sizeof(uintptr_t));
+    if (imm > 0x00400000u && imm != 0x008CE012u) {
+        return reinterpret_cast<CMenuScreen*>(imm - 0x0Au);
+    }
     return reinterpret_cast<CMenuScreen*>(0x008CE008);
 }
 
+inline bool IsScreensRelocated() {
+    return reinterpret_cast<uintptr_t>(GetScreens()) != 0x008CE008u;
+}
+
+inline int GetMaxMenuPages() {
+    return IsScreensRelocated() ? RELOC_MENU_PAGES : VANILLA_MENU_PAGES;
+}
+
 inline const CMenuScreen* GetScreen(int page) {
-    if (page < 0 || page >= MAX_MENU_PAGES) return nullptr;
+    if (page < 0 || page >= GetMaxMenuPages()) return nullptr;
     return &GetScreens()[page];
+}
+
+// Detects ModLoader's root configuration page (e.g. page 44 "ML_F0HH") inside relocated aScreens[33]
+inline int8_t GetModLoaderRootPage() {
+    if (!IsScreensRelocated()) return -1;
+    const auto* opt = GetScreen(33);
+    if (!opt) return -1;
+    for (int i = 0; i < 12; ++i) {
+        if (opt->items[i].actionType == 5 && opt->items[i].targetMenu >= 44) {
+            char key[9] = {};
+            std::memcpy(key, opt->items[i].gxtKey, 8);
+            if (std::strncmp(key, "ML_", 3) == 0) {
+                return opt->items[i].targetMenu;
+            }
+        }
+    }
+    return -1;
 }
 
 // Verified CMenuManager (0x00BA6748) accessors
@@ -121,16 +154,23 @@ inline void BeginKeybindCapture(uint8_t* mm, int32_t rowIdx, int32_t controllerA
     KeybindWaitFlag(mm)    = 1;
     KeybindDebounce(mm)    = 1;
     KeybindActiveFlag(mm)  = 1;
-    *reinterpret_cast<void**>(mm + 0xF0)    = mm + 0x38;
+    *reinterpret_cast<void**>(mm + 0xF0)     = mm + 0x38;
     *reinterpret_cast<int32_t*>(mm + 0x1B00) = 16;
 }
 
+// Verified against 0x0057E4D0..0x0057E6D6: CheckRedefineControlInput returns 1 (blocking ALL
+// ProcessUserInput calls!) whenever mm[0x1B09], mm[0xEC], or mm[0xF0] is nonzero!
 inline void CancelKeybindCapture(uint8_t* mm) {
     if (!mm) return;
     KeybindWaitFlag(mm)   = 0;
     KeybindDebounce(mm)   = 0;
     KeybindActiveFlag(mm) = 0;
     KeybindDeleteMode(mm) = 0;
+    *reinterpret_cast<int32_t*>(mm + 0xEC)   = 0;
+    *reinterpret_cast<void**>(mm + 0xF0)     = nullptr;
+    *reinterpret_cast<int32_t*>(mm + 0x1AE0) = 0;
+    *reinterpret_cast<int32_t*>(mm + 0x1AE4) = 0;
+    *reinterpret_cast<int32_t*>(mm + 0x1B00) = 0;
 }
 
 // Verified CControllerConfigManager::GetControllerSettingTextKey @ 0x00531E20 (this = 0x00B70198)
@@ -140,6 +180,39 @@ inline std::string GetBoundKeyName(int32_t controllerActionId, int32_t order1to4
     const char* s = reinterpret_cast<Fn>(0x00531E20)(
         reinterpret_cast<void*>(0x00B70198), controllerActionId, order1to4);
     return (s && s[0]) ? std::string(s) : "";
+}
+
+// Verified CControllerConfigManager slot helpers (0=KEY1, 1=KEY2, 2=MOUSE, 3=JOY)
+// Action table at 0x00B70198 + 0xB74 + actionId*32: 4x { int32_t priority(1..4); int32_t keyCode; }
+inline std::string GetSlotBoundKeyName(int32_t controllerActionId, int32_t slot0to3) {
+    if (controllerActionId < 0 || controllerActionId >= 59 || slot0to3 < 0 || slot0to3 > 3) return "";
+    const uintptr_t entryAddr = 0x00B70198u + 0xB74u +
+                                static_cast<uintptr_t>(controllerActionId) * 32u +
+                                static_cast<uintptr_t>(slot0to3) * 8u;
+    int32_t prio = 0;
+    std::memcpy(&prio, reinterpret_cast<const void*>(entryAddr), sizeof(int32_t));
+    if (prio < 1 || prio > 4) return "";
+    return GetBoundKeyName(controllerActionId, prio);
+}
+
+inline void ClearControllerSlot(int32_t controllerActionId, int32_t slot0to3) {
+    if (controllerActionId < 0 || controllerActionId >= 59 || slot0to3 < 0 || slot0to3 > 3) return;
+    using Fn = void(__thiscall*)(void*, int32_t, int32_t);
+    reinterpret_cast<Fn>(0x0052FD70)(
+        reinterpret_cast<void*>(0x00B70198), controllerActionId, slot0to3);
+}
+
+inline void ClearAllControllerSlots(int32_t controllerActionId) {
+    for (int s = 0; s < 4; ++s) {
+        ClearControllerSlot(controllerActionId, s);
+    }
+}
+
+// Returns true when D3D9 device is running in exclusive fullscreen (D3DPRESENT_PARAMETERS.Windowed == 0)
+inline bool IsExclusiveFullscreen() {
+    uint32_t windowed = 1;
+    std::memcpy(&windowed, reinterpret_cast<const void*>(0x00C9C040 + 8 * 4), sizeof(uint32_t));
+    return windowed == 0;
 }
 
 // Verified External Settings Globals

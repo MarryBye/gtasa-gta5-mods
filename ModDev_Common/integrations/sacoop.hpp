@@ -665,16 +665,15 @@ inline bool ReloadCoopConfigInMemory() {
     void* cfg = reinterpret_cast<CfgFn>(fnCfg)();
     if (!cfg) return false;
 
-    std::string pathA = GetCoopIniPath();
-    std::wstring pathW;
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, pathA.c_str(), -1, nullptr, 0);
-    if (wlen > 1) {
-        pathW.resize(static_cast<size_t>(wlen - 1));
-        MultiByteToWideChar(CP_UTF8, 0, pathA.c_str(), -1, pathW.data(), wlen);
-    } else {
-        return false;
-    }
-    detail::LibCxxConstStrView<wchar_t> view(pathW.c_str(), pathW.size());
+    // CRITICAL: coop::ClientConfig::Load expects the coop\ DIRECTORY with trailing backslash
+    // (it stores it at cfg+0xD4 and appends "coop.ini" / "coop-server.exe" directly!)
+    wchar_t exeBufW[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, exeBufW, MAX_PATH) == 0) return false;
+    std::wstring dirW(exeBufW);
+    size_t slashW = dirW.find_last_of(L"\\/");
+    dirW = (slashW != std::wstring::npos) ? dirW.substr(0, slashW) : L".";
+    dirW += L"\\coop\\";
+    detail::LibCxxConstStrView<wchar_t> view(dirW.c_str(), dirW.size());
     reinterpret_cast<LoadFn>(fnLoad)(cfg, &view);
     return true;
 }

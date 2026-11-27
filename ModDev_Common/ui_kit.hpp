@@ -2520,11 +2520,12 @@ private:
     std::vector<MenuOptionItem> m_items;
 };
 
-// 4. MenuInfoCard: Clean right-hand contextual detail / stats / brief card
+// 4. MenuInfoCard: Clean right-hand contextual detail / stats / brief / clickable rows card
 struct MenuInfoRow {
     std::string leftGame;
     std::string rightGame;
     sa::CRGBA   rightColor = {204, 204, 208, 255};
+    bool        clickable  = false;
 };
 
 struct MenuInfoBar {
@@ -2553,9 +2554,13 @@ public:
         m_note = noteGame;
         return *this;
     }
+    MenuInfoCard& SetHoveredRow(int rowIdx) {
+        m_hoveredRow = rowIdx;
+        return *this;
+    }
     MenuInfoCard& AddRow(const std::string& leftGame, const std::string& rightGame,
-                         sa::CRGBA rightColor = {204, 204, 208, 255}) {
-        m_rows.push_back({leftGame, rightGame, rightColor});
+                         sa::CRGBA rightColor = {204, 204, 208, 255}, bool clickable = false) {
+        m_rows.push_back({leftGame, rightGame, rightColor, clickable});
         return *this;
     }
     MenuInfoCard& AddBar(const std::string& labelGame, const std::string& valueGame,
@@ -2566,6 +2571,45 @@ public:
     MenuInfoCard& AddParagraph(const std::string& paraGame) {
         if (!paraGame.empty()) m_paragraphs.push_back(paraGame);
         return *this;
+    }
+
+    int HitTestRow(float mouseX, float mouseY) const {
+        if (m_rows.empty()) return -1;
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f || sh < 100.0f) return -1;
+        if (mouseX < m_x + 2.0f * xScale || mouseX > m_x + m_w - 2.0f * xScale) return -1;
+
+        const auto& th    = Theme();
+        const float padX  = 9.0f * xScale;
+        const float hdrH  = m_title.empty() ? 0.0f : (17.0f * sy);
+        const float noteH = m_note.empty() ? 0.0f : (14.0f * sy);
+        float curY        = m_y + hdrH + 7.0f * sy;
+        const float maxY  = m_y + m_h - noteH - 5.0f * sy;
+        const float innerW = std::max(20.0f, m_w - padX * 2.0f);
+
+        if (!m_desc.empty() && curY < maxY) {
+            const float fx = th.fontSubX * 0.96f * xScale;
+            const float fy = th.fontSubY * 0.96f * sy;
+            int lines = prim::MeasureWrappedLines(m_x + padX, curY, innerW, m_desc.c_str(), 1, fx, fy);
+            curY += static_cast<float>(lines) * (10.5f * sy) + 6.0f * sy;
+            if (!m_rows.empty() || !m_bars.empty() || !m_paragraphs.empty()) {
+                curY += 3.0f * sy;
+            }
+        }
+        for (size_t i = 0; i < m_bars.size(); ++i) {
+            if (curY + 17.0f * sy > maxY) break;
+            curY += 17.5f * sy;
+        }
+        for (size_t i = 0; i < m_rows.size(); ++i) {
+            const float rowH = m_rows[i].clickable ? (16.5f * sy) : (13.5f * sy);
+            if (curY + rowH > maxY) break;
+            if (m_rows[i].clickable && mouseY >= curY - 1.5f * sy && mouseY <= curY + rowH - 1.5f * sy) {
+                return static_cast<int>(i);
+            }
+            curY += rowH;
+        }
+        return -1;
     }
 
     void Render() const {
@@ -2632,20 +2676,32 @@ public:
         }
         if (!m_bars.empty()) prim::FlushText();
 
-        // Key-value detail rows
+        // Key-value detail rows (optional clickable button-row presentation!)
         for (size_t i = 0; i < m_rows.size(); ++i) {
-            if (curY + 13.5f * sy > maxY) break;
-            const auto& r = m_rows[i];
-            if ((i & 1u) == 1u) {
-                prim::Rect(m_x + 2.0f * xScale, curY - 1.2f * sy, m_w - 4.0f * xScale, 13.5f * sy,
+            const auto& r    = m_rows[i];
+            const float rowH = r.clickable ? (16.5f * sy) : (13.5f * sy);
+            if (curY + rowH > maxY) break;
+            const bool isHov = r.clickable && (static_cast<int>(i) == m_hoveredRow);
+
+            if (r.clickable) {
+                sa::CRGBA bg  = isHov ? th.selectFill : th.bgHeader;
+                sa::CRGBA brd = isHov ? th.textSelected : WithAlpha(th.borderSubtle, 0.72f);
+                prim::Panel(m_x + padX - 2.0f * xScale, curY - 1.2f * sy,
+                            innerW + 4.0f * xScale, rowH - 2.0f * sy, bg, brd,
+                            0.55f * xScale, 0.55f * sy);
+            } else if ((i & 1u) == 1u) {
+                prim::Rect(m_x + 2.0f * xScale, curY - 1.2f * sy, m_w - 4.0f * xScale, rowH,
                            {255, 255, 255, 8});
             }
-            prim::Label(m_x + padX, curY + 0.6f * sy, innerW * 0.62f, r.leftGame.c_str(),
-                        1, th.fontSubX * 0.92f * xScale, th.fontSubY * 0.92f * sy, 1, th.textNormal);
-            prim::Label(m_x + m_w - padX, curY + 0.6f * sy, innerW * 0.36f, r.rightGame.c_str(),
-                        1, th.fontSubX * 0.92f * xScale, th.fontSubY * 0.92f * sy, 2, r.rightColor);
+            const float txtY = curY + (r.clickable ? 1.4f : 0.6f) * sy;
+            sa::CRGBA lCol = isHov ? th.textSelected : th.textNormal;
+            sa::CRGBA rCol = isHov ? th.textSelected : r.rightColor;
+            prim::Label(m_x + padX + (r.clickable ? 2.0f * xScale : 0.0f), txtY, innerW * 0.60f, r.leftGame.c_str(),
+                        1, th.fontSubX * 0.92f * xScale, th.fontSubY * 0.92f * sy, 1, lCol);
+            prim::Label(m_x + m_w - padX - (r.clickable ? 2.0f * xScale : 0.0f), txtY, innerW * 0.36f, r.rightGame.c_str(),
+                        1, th.fontSubX * 0.92f * xScale, th.fontSubY * 0.92f * sy, 2, rCol);
             if ((i & 3u) == 3u) prim::FlushText();
-            curY += 13.5f * sy;
+            curY += rowH;
         }
         if (!m_rows.empty()) prim::FlushText();
 
@@ -2681,6 +2737,7 @@ private:
     std::string              m_badge;
     std::string              m_desc;
     std::string              m_note;
+    int                      m_hoveredRow = -1;
     std::vector<MenuInfoRow> m_rows;
     std::vector<MenuInfoBar> m_bars;
     std::vector<std::string> m_paragraphs;

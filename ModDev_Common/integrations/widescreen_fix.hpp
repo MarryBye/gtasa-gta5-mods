@@ -51,30 +51,44 @@ inline bool IsCutsceneBordersActive() {
     return (*reinterpret_cast<const uint8_t*>(0x0057706B) == 0xE9);
 }
 
-inline std::string FormatFrameLimiterValue(uint8_t rawVal, bool useRus) {
+struct LocalizedPair {
+    const char* rus;
+    const char* eng;
+};
+
+inline LocalizedPair GetFrameLimiterLabelPair(uint8_t rawVal) {
     if (!IsFrameLimiterExtended()) {
-        return rawVal ? (useRus ? "ВКЛ" : "ON") : (useRus ? "ВЫКЛ" : "OFF");
+        return rawVal ? LocalizedPair{"ВКЛ", "ON"} : LocalizedPair{"ВЫКЛ", "OFF"};
     }
     static constexpr const char* kFpsLabels[12] = {
         nullptr, "30 FPS", "40 FPS", "50 FPS", "60 FPS", "75 FPS",
         "100 FPS", "120 FPS", "144 FPS", "165 FPS", "200 FPS", "240 FPS"
     };
     if (rawVal == 0 || rawVal >= 12) {
-        return useRus ? "ВЫКЛ" : "OFF";
+        return {"ВЫКЛ", "OFF"};
     }
-    return kFpsLabels[rawVal];
+    return {kFpsLabels[rawVal], kFpsLabels[rawVal]};
 }
 
-inline std::string FormatCutsceneBordersValue(uint8_t rawVal, bool useRus) {
+inline LocalizedPair GetCutsceneBordersLabelPair(uint8_t rawVal) {
     if (!IsCutsceneBordersActive()) {
-        return rawVal ? (useRus ? "ВКЛ" : "ON") : (useRus ? "ВЫКЛ" : "OFF");
+        return rawVal ? LocalizedPair{"ВКЛ", "ON"} : LocalizedPair{"ВЫКЛ", "OFF"};
     }
     switch (rawVal) {
-        case 1:  return useRus ? "Сверху и снизу" : "Letterbox";
-        case 2:  return useRus ? "По бокам"       : "Pillarbox";
-        case 3:  return useRus ? "Со всех сторон" : "Letterbox + Pillarbox";
-        default: return useRus ? "ВЫКЛ"           : "OFF";
+        case 1:  return {"Сверху и снизу", "Letterbox"};
+        case 2:  return {"По бокам",       "Pillarbox"};
+        case 3:  return {"Со всех сторон", "Letterbox + Pillarbox"};
+        default: return {"ВЫКЛ",           "OFF"};
     }
+}
+
+// ASCII-safe English helper for diagnostic logs
+inline std::string FormatFrameLimiterValue(uint8_t rawVal, bool /*useRus*/ = false) {
+    return GetFrameLimiterLabelPair(rawVal).eng;
+}
+
+inline std::string FormatCutsceneBordersValue(uint8_t rawVal, bool /*useRus*/ = false) {
+    return GetCutsceneBordersLabelPair(rawVal).eng;
 }
 
 struct WsfIniSummary {
