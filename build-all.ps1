@@ -27,6 +27,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 
 $AllMods = @(
     @{ Folder = "ModDev_UIKit";       Name = "GTA5UIKit" },
+    @{ Folder = "ModDev_ModernMenu";  Name = "GTA5ModernMenu" },
     @{ Folder = "ModDev_Progression"; Name = "GTA5Progression" },
     @{ Folder = "ModDev_GTA5Weapons"; Name = "GTA5AmmuNation" },
     @{ Folder = "ModDev_GTA5Garage";  Name = "GTA5GarageAndTuning" },

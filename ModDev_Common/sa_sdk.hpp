@@ -1197,6 +1197,10 @@ namespace font {
     inline int16_t GetNumberLines(float x, float y, const char* text) {
         return reinterpret_cast<int16_t(__cdecl*)(float, float, const char*)>(0x0071A5E0)(x, y, text);
     }
+    // Verified at 0x0071A210 -> 0x00719840 (and 0x0057BF70): flushes CFont's 944-byte deferred render buffer!
+    inline void RenderFontBuffer() {
+        reinterpret_cast<void(__cdecl*)()>(0x00719840)();
+    }
     inline void DrawRect(const CRect& r, const CRGBA& c) { reinterpret_cast<void(__cdecl*)(const CRect&, const CRGBA&)>(0x00727B60)(r, c); }
 }
 

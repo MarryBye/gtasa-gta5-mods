@@ -673,6 +673,12 @@ inline void WrappedText(float x, float y, float maxWidthPx, const char* gameText
     sa::font::SetWrapx(static_cast<float>(std::max(640, sa::GetScreenWidth())));
 }
 
+// 7b. FlushText: Immediately flushes GTA SA's 944-byte CFont deferred buffer so dense screens never drop strings
+// and subsequent Rect/Panel calls composite in exact painter's-algorithm Z-order!
+inline void FlushText() {
+    sa::font::RenderFontBuffer();
+}
+
 // 8. Icon: Textured sprite atom (wraps CSprite2d::Draw)
 inline void Icon(void* rwTex, float cx, float cy, float halfW, float halfH, sa::CRGBA tint) {
     if (!rwTex || tint.a == 0) return;
@@ -2096,5 +2102,721 @@ private:
     RankBarProps                m_props{};
     std::vector<RankPopupProps> m_popups;
 };
+
+// ============================================================================
+// TIER 2 — FRONTEND MENU COMPONENTS (Dedicated Dumb Components for Game Menus)
+// Modernized Classic GTA SA + Definitive Edition + GTA V Top-Tab Layout
+// Strictly composed from Tier 1 prim::* + widget::* + ThemeTokens (ZERO logic!)
+// ============================================================================
+struct MenuShellMetrics {
+    float sw        = 0.0f;
+    float sh        = 0.0f;
+    float xScale    = 1.0f;
+    float sy        = 1.0f;
+    float frameX    = 0.0f; // Left edge of centered content frame
+    float frameW    = 0.0f; // Responsive centered width (clean across 4:3, 16:9, 21:9!)
+    float mastY     = 0.0f;
+    float mastH     = 0.0f;
+    float tabsY     = 0.0f;
+    float tabsH     = 0.0f;
+    float crumbY    = 0.0f;
+    float contentY  = 0.0f;
+    float contentH  = 0.0f;
+    float footerY   = 0.0f;
+    float footerH   = 0.0f;
+    float colGap    = 0.0f;
+    float leftColW  = 0.0f;
+    float rightColX = 0.0f;
+    float rightColW = 0.0f;
+};
+
+inline MenuShellMetrics ComputeMenuShellMetrics(bool hasTabs = true, bool hasBreadcrumb = false) {
+    MenuShellMetrics m{};
+    GetScreenScales(m.sw, m.sh, m.xScale, m.sy);
+    if (m.sw < 100.0f || m.sh < 100.0f) return m;
+
+    // Responsive centered frame: fills ~86% on 16:9, capped nicely on ultrawide so tabs never sprawl
+    const float marginX = std::max(28.0f * m.xScale, (m.sw - 580.0f * m.xScale) * 0.5f);
+    m.frameX   = marginX;
+    m.frameW   = std::max(300.0f * m.xScale, m.sw - marginX * 2.0f);
+    m.mastY    = 13.0f * m.sy;
+    m.mastH    = 14.5f * m.sy;
+    m.tabsY    = m.mastY + m.mastH + 4.0f * m.sy;
+    m.tabsH    = hasTabs ? (19.5f * m.sy) : 0.0f;
+    m.crumbY   = m.tabsY + m.tabsH + (hasTabs ? 5.5f * m.sy : 2.0f * m.sy);
+    m.contentY = m.crumbY + (hasBreadcrumb ? 14.5f * m.sy : 4.5f * m.sy);
+    m.footerH  = 18.0f * m.sy;
+    m.footerY  = m.sh - m.footerH - 10.0f * m.sy;
+    m.contentH = std::max(120.0f * m.sy, m.footerY - m.contentY - 10.0f * m.sy);
+    m.colGap   = 10.0f * m.xScale;
+    m.leftColW = m.frameW * 0.45f;
+    m.rightColX = m.frameX + m.leftColW + m.colGap;
+    m.rightColW = m.frameW - m.leftColW - m.colGap;
+    return m;
+}
+
+// 1. MenuBackdrop: Sleek dark scrim + top/bottom subtle vignette bands over live 3D world, title art, or Map
+inline void RenderMenuBackdrop(uint8_t baseAlpha = 178, bool drawVignetteBands = true) {
+    // Flush any previously queued engine text (e.g. native DrawMap labels) BEFORE painting scrim/bands!
+    prim::FlushText();
+    const auto m = ComputeMenuShellMetrics(true, false);
+    if (m.sw < 100.0f || m.sh < 100.0f) return;
+    if (baseAlpha > 0) {
+        prim::Rect(0.0f, 0.0f, m.sw, m.sh, {5, 6, 9, baseAlpha});
+    }
+    if (drawVignetteBands) {
+        const uint8_t bandAlpha = (baseAlpha > 0)
+                                      ? static_cast<uint8_t>(std::min(238, static_cast<int>(baseAlpha) + 42))
+                                      : static_cast<uint8_t>(224);
+        prim::Rect(0.0f, 0.0f, m.sw, m.tabsY + m.tabsH + 6.0f * m.sy, {4, 5, 8, bandAlpha});
+        const float botTop = m.footerY - 5.5f * m.sy;
+        prim::Rect(0.0f, botTop, m.sw, m.sh - botTop, {4, 5, 8, bandAlpha});
+    }
+}
+
+// 2. MenuTopBar: GTA V / Definitive Edition horizontal top tab bar + masthead + breadcrumb
+struct MenuTabItem {
+    std::string labelGame;
+    bool        active  = false;
+    bool        hovered = false;
+    bool        enabled = true;
+};
+
+class MenuTopBar {
+public:
+    MenuTopBar& SetMasthead(const std::string& leftGame, const std::string& rightGame = "",
+                            sa::CRGBA rightColor = {175, 175, 180, 255}) {
+        m_mastLeft  = leftGame;
+        m_mastRight = rightGame;
+        m_mastRightCol = rightColor;
+        return *this;
+    }
+    MenuTopBar& SetBreadcrumb(const std::string& crumbGame) {
+        m_breadcrumb = crumbGame;
+        return *this;
+    }
+    MenuTopBar& SetShowSwitchHints(bool show) {
+        m_showHints = show;
+        return *this;
+    }
+    MenuTopBar& ClearTabs() {
+        m_tabs.clear();
+        return *this;
+    }
+    MenuTopBar& AddTab(const std::string& labelGame, bool active = false, bool hovered = false, bool enabled = true) {
+        m_tabs.push_back({labelGame, active, hovered, enabled});
+        return *this;
+    }
+
+    int HitTestTab(float mouseX, float mouseY) const {
+        if (m_tabs.empty()) return -1;
+        const auto m = ComputeMenuShellMetrics(true, !m_breadcrumb.empty());
+        if (m.sw < 100.0f) return -1;
+        if (mouseY < m.tabsY || mouseY > m.tabsY + m.tabsH) return -1;
+
+        const float hintW = (m_showHints && m_tabs.size() > 1) ? (18.0f * m.xScale) : 0.0f;
+        const float stripX = m.frameX + hintW;
+        const float stripW = std::max(40.0f, m.frameW - hintW * 2.0f);
+        if (mouseX < stripX || mouseX > stripX + stripW) return -1;
+
+        const float tabW = stripW / static_cast<float>(m_tabs.size());
+        int idx = static_cast<int>((mouseX - stripX) / tabW);
+        if (idx < 0 || idx >= static_cast<int>(m_tabs.size())) return -1;
+        return m_tabs[idx].enabled ? idx : -1;
+    }
+
+    void Render() const {
+        const bool hasTabs = !m_tabs.empty();
+        const auto m = ComputeMenuShellMetrics(hasTabs, !m_breadcrumb.empty());
+        if (m.sw < 100.0f || m.sh < 100.0f) return;
+
+        const auto& th = Theme();
+
+        // 1. Sleek Masthead row (Title on left, status/money/rank/clock on right)
+        if (!m_mastLeft.empty()) {
+            prim::Label(m.frameX, m.mastY, m.frameW * 0.56f, m_mastLeft.c_str(),
+                        2, th.fontTitleX * 0.90f * m.xScale, th.fontTitleY * 0.90f * m.sy, 1, th.textTitle);
+        }
+        if (!m_mastRight.empty()) {
+            prim::Label(m.frameX + m.frameW, m.mastY + 2.2f * m.sy, m.frameW * 0.44f, m_mastRight.c_str(),
+                        1, th.fontRowX * 0.92f * m.xScale, th.fontRowY * 0.92f * m.sy, 2, m_mastRightCol);
+        }
+
+        // 2. Horizontal Top Tab Bar
+        if (hasTabs) {
+            prim::Panel(m.frameX, m.tabsY, m.frameW, m.tabsH,
+                        th.bgHeader, th.borderSubtle,
+                        th.borderThickness * m.xScale, th.borderThickness * m.sy);
+
+            const bool drawHints = m_showHints && m_tabs.size() > 1;
+            const float hintW    = drawHints ? (18.0f * m.xScale) : 0.0f;
+            const float stripX   = m.frameX + hintW;
+            const float stripW   = std::max(40.0f, m.frameW - hintW * 2.0f);
+            const float tabW     = stripW / static_cast<float>(m_tabs.size());
+
+            if (drawHints) {
+                prim::Rect(m.frameX, m.tabsY, hintW, m.tabsH, th.bgFooter);
+                prim::Rect(m.frameX + m.frameW - hintW, m.tabsY, hintW, m.tabsH, th.bgFooter);
+                prim::Label(m.frameX + hintW * 0.5f, m.tabsY + 4.8f * m.sy, hintW - 2.0f * m.xScale, "Q",
+                            1, th.fontFooterX * 0.96f * m.xScale, th.fontFooterY * 0.96f * m.sy, 0, th.textCol);
+                prim::Label(m.frameX + m.frameW - hintW * 0.5f, m.tabsY + 4.8f * m.sy, hintW - 2.0f * m.xScale, "E",
+                            1, th.fontFooterX * 0.96f * m.xScale, th.fontFooterY * 0.96f * m.sy, 0, th.textCol);
+                prim::Rect(stripX, m.tabsY + 2.0f * m.sy, 0.65f * m.xScale, m.tabsH - 4.0f * m.sy, th.divider);
+                prim::Rect(stripX + stripW, m.tabsY + 2.0f * m.sy, 0.65f * m.xScale, m.tabsH - 4.0f * m.sy, th.divider);
+            }
+
+            for (size_t i = 0; i < m_tabs.size(); ++i) {
+                const auto& t = m_tabs[i];
+                const float tx = stripX + static_cast<float>(i) * tabW;
+                if (t.active) {
+                    prim::Rect(tx, m.tabsY, tabW, m.tabsH, th.selectFill);
+                    // Clean Definitive Edition / GTA V top indicator strip
+                    prim::AccentStrip(tx, m.tabsY, tabW, 2.0f * m.sy, th.textSelected);
+                } else if (t.hovered && t.enabled) {
+                    prim::Rect(tx, m.tabsY, tabW, m.tabsH, th.selectMuted);
+                }
+                if (i > 0) {
+                    prim::Rect(tx, m.tabsY + 3.0f * m.sy, 0.55f * m.xScale, m.tabsH - 6.0f * m.sy,
+                               WithAlpha(th.divider, 0.65f));
+                }
+                sa::CRGBA col = !t.enabled ? th.textDisabled
+                              : (t.active || t.hovered ? th.textSelected : th.textNormal);
+                prim::Label(tx + tabW * 0.5f, m.tabsY + 4.8f * m.sy, tabW - 7.0f * m.xScale,
+                            t.labelGame.c_str(), 1,
+                            th.fontSubX * 0.98f * m.xScale, th.fontSubY * 0.98f * m.sy, 0, col);
+            }
+        }
+
+        // 3. Optional Breadcrumb Subheader ("SETTINGS / DISPLAY / ADVANCED")
+        if (!m_breadcrumb.empty()) {
+            prim::Label(m.frameX + 2.0f * m.xScale, m.crumbY, m.frameW - 4.0f * m.xScale,
+                        m_breadcrumb.c_str(), 1,
+                        th.fontFooterX * 0.96f * m.xScale, th.fontFooterY * 0.96f * m.sy, 1, th.textCol);
+        }
+        prim::FlushText();
+    }
+
+private:
+    std::string              m_mastLeft;
+    std::string              m_mastRight;
+    sa::CRGBA                m_mastRightCol = {175, 175, 180, 255};
+    std::string              m_breadcrumb;
+    bool                     m_showHints = true;
+    std::vector<MenuTabItem> m_tabs;
+};
+
+// 3. MenuOptionList: Sleek Definitive Edition action & settings list with inline sliders
+struct MenuOptionItem {
+    std::string labelGame;
+    std::string valueGame;
+    sa::CRGBA   valueColor   = {204, 204, 208, 255};
+    bool        hasSlider    = false;
+    float       sliderFrac01 = 0.0f;
+    bool        enabled      = true;
+    bool        isBack       = false;
+};
+
+class MenuOptionList {
+public:
+    MenuOptionList& SetBounds(float xPx, float yPx, float wPx, float maxHPx = 0.0f) {
+        m_x = xPx; m_y = yPx; m_w = wPx; m_maxH = maxHPx;
+        return *this;
+    }
+    MenuOptionList& SetHeader(const std::string& titleGame, const std::string& rightBadgeGame = "") {
+        m_title = titleGame;
+        m_badge = rightBadgeGame;
+        return *this;
+    }
+    MenuOptionList& SetSelection(int selectedIdx, int hoveredIdx = -1) {
+        m_selected = selectedIdx;
+        m_hovered  = hoveredIdx;
+        return *this;
+    }
+    MenuOptionList& ClearItems() {
+        m_items.clear();
+        return *this;
+    }
+    MenuOptionList& AddItem(const MenuOptionItem& item) {
+        m_items.push_back(item);
+        return *this;
+    }
+
+    int HitTestRow(float mouseX, float mouseY) const {
+        if (m_items.empty()) return -1;
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f) return -1;
+
+        const float hdrH = m_title.empty() ? 0.0f : (17.0f * sy);
+        const float rowH = 17.5f * sy;
+        const float topY = m_y + hdrH + 3.0f * sy;
+        if (mouseX < m_x || mouseX > m_x + m_w) return -1;
+        if (mouseY < topY) return -1;
+
+        int idx = static_cast<int>((mouseY - topY) / rowH);
+        if (idx < 0 || idx >= static_cast<int>(m_items.size())) return -1;
+        return m_items[idx].enabled ? idx : -1;
+    }
+
+    bool HitTestSlider(int rowIdx, float mouseX, float mouseY, float& outFrac01) const {
+        if (rowIdx < 0 || rowIdx >= static_cast<int>(m_items.size())) return false;
+        if (!m_items[rowIdx].hasSlider || !m_items[rowIdx].enabled) return false;
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f) return false;
+
+        const float hdrH = m_title.empty() ? 0.0f : (17.0f * sy);
+        const float rowH = 17.5f * sy;
+        const float ry   = m_y + hdrH + 3.0f * sy + static_cast<float>(rowIdx) * rowH;
+        if (mouseY < ry || mouseY > ry + rowH) return false;
+
+        const float padX   = 8.5f * xScale;
+        const float barW   = std::min(84.0f * xScale, m_w * 0.36f);
+        const float barX   = m_x + m_w - padX - barW;
+        if (mouseX < barX - 4.0f * xScale || mouseX > barX + barW + 4.0f * xScale) return false;
+
+        outFrac01 = std::clamp((mouseX - barX) / std::max(1.0f, barW), 0.0f, 1.0f);
+        return true;
+    }
+
+    void Render() const {
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f || sh < 100.0f) return;
+
+        const auto& th   = Theme();
+        const float padX = 8.5f * xScale;
+        const float hdrH = m_title.empty() ? 0.0f : (17.0f * sy);
+        const float rowH = 17.5f * sy;
+        const float padB = 5.0f * sy;
+        const float naturalH = hdrH + 3.0f * sy + static_cast<float>(m_items.size()) * rowH + padB;
+        const float panelH   = (m_maxH > 0.0f) ? std::min(m_maxH, std::max(naturalH, 48.0f * sy)) : naturalH;
+
+        prim::Panel(m_x, m_y, m_w, panelH,
+                    th.bgBody, th.borderSubtle,
+                    th.borderThickness * xScale, th.borderThickness * sy);
+
+        if (hdrH > 0.0f) {
+            widget::Header(m_x, m_y, m_w, hdrH, padX, m_title, m_badge,
+                           th.fontSubX * 1.02f * xScale, th.fontSubY * 1.02f * sy,
+                           th.fontBadgeX * 1.08f * xScale, th.fontBadgeY * 1.08f * sy,
+                           xScale, sy, th.bgHeader, th.divider, th.textTitle, th.textCol, true, 0.34f);
+            prim::FlushText();
+        }
+
+        const float topY = m_y + hdrH + 3.0f * sy;
+        const float fx   = th.fontRowX * 0.94f * xScale;
+        const float fy   = th.fontRowY * 0.94f * sy;
+        const float vfx  = th.fontSubX * 0.94f * xScale;
+        const float vfy  = th.fontSubY * 0.94f * sy;
+
+        for (size_t i = 0; i < m_items.size(); ++i) {
+            const float ry = topY + static_cast<float>(i) * rowH;
+            if (ry + rowH > m_y + panelH + 1.0f) break;
+
+            const auto& it   = m_items[i];
+            const bool isSel = (static_cast<int>(i) == m_selected);
+            const bool isHov = (static_cast<int>(i) == m_hovered) && !isSel && it.enabled;
+
+            if (isSel) {
+                prim::Rect(m_x + 1.0f * xScale, ry, m_w - 2.0f * xScale, rowH,
+                           it.enabled ? th.selectFill : th.selectMuted);
+                prim::AccentStrip(m_x + 1.0f * xScale, ry + 1.0f * sy, 2.2f * xScale, rowH - 2.0f * sy,
+                                  it.enabled ? th.textSelected : th.textDisabled);
+            } else if (isHov) {
+                prim::Rect(m_x + 1.0f * xScale, ry, m_w - 2.0f * xScale, rowH, th.selectMuted);
+            }
+
+            const bool hasRight = it.hasSlider || !it.valueGame.empty();
+            const float leftMaxW = hasRight ? (m_w * 0.56f - padX) : (m_w - padX * 2.0f);
+            sa::CRGBA leftCol = !it.enabled ? th.textDisabled
+                              : (isSel ? th.textSelected : (it.isBack ? th.textCol : th.textNormal));
+
+            prim::Label(m_x + padX + (isSel ? 2.5f * xScale : 0.0f), ry + 3.4f * sy, leftMaxW,
+                        it.labelGame.c_str(), 1, fx, fy, 1, leftCol);
+
+            if (it.hasSlider) {
+                const float barW = std::min(84.0f * xScale, m_w * 0.36f);
+                const float barH = 3.6f * sy;
+                const float barX = m_x + m_w - padX - barW;
+                const float barY = ry + (rowH - barH) * 0.5f;
+                const float f01  = std::clamp(it.sliderFrac01, 0.0f, 1.0f);
+                widget::ProgressBarProps bp{};
+                bp.curFrac  = f01;
+                bp.prevFrac = f01;
+                bp.trackCol = th.barTrack;
+                bp.fillCol  = isSel ? th.textSelected : th.barFill;
+                bp.gainCol  = th.barGain;
+                bp.lossCol  = th.barLoss;
+                bp.bonusCol = th.barBonus;
+                widget::ProgressBar(barX, barY, barW, barH, bp);
+            } else if (!it.valueGame.empty()) {
+                sa::CRGBA rCol = !it.enabled ? th.textDisabled
+                               : (isSel ? th.textSelected : it.valueColor);
+                prim::Label(m_x + m_w - padX, ry + 3.8f * sy, m_w * 0.42f - padX,
+                            it.valueGame.c_str(), 1, vfx, vfy, 2, rCol);
+            }
+            if ((i & 3u) == 3u) prim::FlushText();
+        }
+        prim::FlushText();
+    }
+
+private:
+    float                       m_x        = 0.0f;
+    float                       m_y        = 0.0f;
+    float                       m_w        = 200.0f;
+    float                       m_maxH     = 0.0f;
+    std::string                 m_title;
+    std::string                 m_badge;
+    int                         m_selected = 0;
+    int                         m_hovered  = -1;
+    std::vector<MenuOptionItem> m_items;
+};
+
+// 4. MenuInfoCard: Clean right-hand contextual detail / stats / brief card
+struct MenuInfoRow {
+    std::string leftGame;
+    std::string rightGame;
+    sa::CRGBA   rightColor = {204, 204, 208, 255};
+};
+
+struct MenuInfoBar {
+    std::string labelGame;
+    std::string valueGame;
+    float       frac01   = 0.0f;
+    sa::CRGBA   barColor = {225, 225, 230, 242};
+};
+
+class MenuInfoCard {
+public:
+    MenuInfoCard& SetBounds(float xPx, float yPx, float wPx, float hPx) {
+        m_x = xPx; m_y = yPx; m_w = wPx; m_h = hPx;
+        return *this;
+    }
+    MenuInfoCard& SetHeader(const std::string& titleGame, const std::string& badgeGame = "") {
+        m_title = titleGame;
+        m_badge = badgeGame;
+        return *this;
+    }
+    MenuInfoCard& SetDescription(const std::string& descGame) {
+        m_desc = descGame;
+        return *this;
+    }
+    MenuInfoCard& SetFooterNote(const std::string& noteGame) {
+        m_note = noteGame;
+        return *this;
+    }
+    MenuInfoCard& AddRow(const std::string& leftGame, const std::string& rightGame,
+                         sa::CRGBA rightColor = {204, 204, 208, 255}) {
+        m_rows.push_back({leftGame, rightGame, rightColor});
+        return *this;
+    }
+    MenuInfoCard& AddBar(const std::string& labelGame, const std::string& valueGame,
+                         float frac01, sa::CRGBA barColor = {225, 225, 230, 242}) {
+        m_bars.push_back({labelGame, valueGame, std::clamp(frac01, 0.0f, 1.0f), barColor});
+        return *this;
+    }
+    MenuInfoCard& AddParagraph(const std::string& paraGame) {
+        if (!paraGame.empty()) m_paragraphs.push_back(paraGame);
+        return *this;
+    }
+
+    void Render() const {
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f || sh < 100.0f) return;
+
+        const auto& th   = Theme();
+        const float padX = 9.0f * xScale;
+        const float hdrH = m_title.empty() ? 0.0f : (17.0f * sy);
+        const float noteH = m_note.empty() ? 0.0f : (14.0f * sy);
+
+        prim::Panel(m_x, m_y, m_w, m_h,
+                    th.bgBody, th.borderSubtle,
+                    th.borderThickness * xScale, th.borderThickness * sy);
+
+        if (hdrH > 0.0f) {
+            widget::Header(m_x, m_y, m_w, hdrH, padX, m_title, m_badge,
+                           th.fontSubX * 1.02f * xScale, th.fontSubY * 1.02f * sy,
+                           th.fontBadgeX * 1.08f * xScale, th.fontBadgeY * 1.08f * sy,
+                           xScale, sy, th.bgHeader, th.divider, th.textTitle, th.textCol, true, 0.34f);
+            prim::FlushText();
+        }
+
+        float curY   = m_y + hdrH + 7.0f * sy;
+        const float maxY = m_y + m_h - noteH - 5.0f * sy;
+        const float innerW = std::max(20.0f, m_w - padX * 2.0f);
+
+        // Optional summary description
+        if (!m_desc.empty() && curY < maxY) {
+            const float fx = th.fontSubX * 0.96f * xScale;
+            const float fy = th.fontSubY * 0.96f * sy;
+            int lines = prim::MeasureWrappedLines(m_x + padX, curY, innerW, m_desc.c_str(), 1, fx, fy);
+            prim::WrappedText(m_x + padX, curY, innerW, m_desc.c_str(), 1, fx, fy, th.textNormal);
+            prim::FlushText();
+            curY += static_cast<float>(lines) * (10.5f * sy) + 6.0f * sy;
+            if (!m_rows.empty() || !m_bars.empty() || !m_paragraphs.empty()) {
+                prim::Divider(m_x + padX, curY - 2.5f * sy, innerW, 0.6f * sy, th.divider);
+                curY += 3.0f * sy;
+            }
+        }
+
+        // Progress bars (e.g. Player Stats / Progression XP / Skills)
+        for (size_t i = 0; i < m_bars.size(); ++i) {
+            const auto& b = m_bars[i];
+            if (curY + 17.0f * sy > maxY) break;
+            prim::Label(m_x + padX, curY, innerW * 0.68f, b.labelGame.c_str(),
+                        1, th.fontSubX * 0.92f * xScale, th.fontSubY * 0.92f * sy, 1, th.textNormal);
+            if (!b.valueGame.empty()) {
+                prim::Label(m_x + m_w - padX, curY, innerW * 0.30f, b.valueGame.c_str(),
+                            1, th.fontSubX * 0.92f * xScale, th.fontSubY * 0.92f * sy, 2, th.textSelected);
+            }
+            widget::ProgressBarProps bp{};
+            bp.curFrac  = b.frac01;
+            bp.prevFrac = b.frac01;
+            bp.trackCol = th.barTrack;
+            bp.fillCol  = b.barColor;
+            bp.gainCol  = th.barGain;
+            bp.lossCol  = th.barLoss;
+            bp.bonusCol = th.barBonus;
+            widget::ProgressBar(m_x + padX, curY + 10.0f * sy, innerW, 3.6f * sy, bp);
+            if ((i % 3u) == 2u) prim::FlushText();
+            curY += 17.5f * sy;
+        }
+        if (!m_bars.empty()) prim::FlushText();
+
+        // Key-value detail rows
+        for (size_t i = 0; i < m_rows.size(); ++i) {
+            if (curY + 13.5f * sy > maxY) break;
+            const auto& r = m_rows[i];
+            if ((i & 1u) == 1u) {
+                prim::Rect(m_x + 2.0f * xScale, curY - 1.2f * sy, m_w - 4.0f * xScale, 13.5f * sy,
+                           {255, 255, 255, 8});
+            }
+            prim::Label(m_x + padX, curY + 0.6f * sy, innerW * 0.62f, r.leftGame.c_str(),
+                        1, th.fontSubX * 0.92f * xScale, th.fontSubY * 0.92f * sy, 1, th.textNormal);
+            prim::Label(m_x + m_w - padX, curY + 0.6f * sy, innerW * 0.36f, r.rightGame.c_str(),
+                        1, th.fontSubX * 0.92f * xScale, th.fontSubY * 0.92f * sy, 2, r.rightColor);
+            if ((i & 3u) == 3u) prim::FlushText();
+            curY += 13.5f * sy;
+        }
+        if (!m_rows.empty()) prim::FlushText();
+
+        // Wrapped paragraphs (e.g. Brief log entries)
+        for (size_t i = 0; i < m_paragraphs.size(); ++i) {
+            if (curY + 12.0f * sy > maxY) break;
+            const float fx = th.fontSubX * 0.92f * xScale;
+            const float fy = th.fontSubY * 0.92f * sy;
+            int lines = prim::MeasureWrappedLines(m_x + padX, curY, innerW, m_paragraphs[i].c_str(), 1, fx, fy);
+            float blockH = static_cast<float>(lines) * (10.2f * sy);
+            if (curY + blockH > maxY) break;
+            prim::WrappedText(m_x + padX, curY, innerW, m_paragraphs[i].c_str(), 1, fx, fy,
+                              (i == 0) ? th.textSelected : th.textNormal);
+            prim::FlushText();
+            curY += blockH + 5.5f * sy;
+            if (i + 1 < m_paragraphs.size() && curY < maxY) {
+                prim::Divider(m_x + padX, curY - 2.8f * sy, innerW, 0.55f * sy, WithAlpha(th.divider, 0.6f));
+            }
+        }
+
+        // Optional bottom status note
+        if (!m_note.empty()) {
+            prim::Divider(m_x + padX, m_y + m_h - noteH, innerW, 0.6f * sy, th.divider);
+            prim::Label(m_x + padX, m_y + m_h - noteH + 3.0f * sy, innerW, m_note.c_str(),
+                        1, th.fontBadgeX * 1.02f * xScale, th.fontBadgeY * 1.02f * sy, 1, th.textCol);
+            prim::FlushText();
+        }
+    }
+
+private:
+    float                    m_x = 0.0f, m_y = 0.0f, m_w = 240.0f, m_h = 200.0f;
+    std::string              m_title;
+    std::string              m_badge;
+    std::string              m_desc;
+    std::string              m_note;
+    std::vector<MenuInfoRow> m_rows;
+    std::vector<MenuInfoBar> m_bars;
+    std::vector<std::string> m_paragraphs;
+};
+
+// 5. MenuConfirmModal: Centered Definitive Edition Yes/No or OK dialog
+class MenuConfirmModal {
+public:
+    MenuConfirmModal& SetTitle(const std::string& titleGame) { m_title = titleGame; return *this; }
+    MenuConfirmModal& SetPrompt(const std::string& promptGame) { m_prompt = promptGame; return *this; }
+    MenuConfirmModal& ClearButtons() { m_buttons.clear(); return *this; }
+    MenuConfirmModal& AddButton(const std::string& labelGame, bool isDanger = false) {
+        m_buttons.push_back({labelGame, isDanger});
+        return *this;
+    }
+    MenuConfirmModal& SetSelection(int selectedIdx, int hoveredIdx = -1) {
+        m_selected = selectedIdx;
+        m_hovered  = hoveredIdx;
+        return *this;
+    }
+
+    int HitTestButton(float mouseX, float mouseY) const {
+        if (m_buttons.empty()) return -1;
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f) return -1;
+
+        float bx, by, bw, bh;
+        ComputeLayout(sw, sh, xScale, sy, bx, by, bw, bh);
+        const float padX   = 10.0f * xScale;
+        const float btnH   = 19.0f * sy;
+        const float btnY   = by + bh - btnH - 8.5f * sy;
+        if (mouseY < btnY || mouseY > btnY + btnH) return -1;
+
+        const int   n     = static_cast<int>(m_buttons.size());
+        const float gap   = 7.0f * xScale;
+        const float totW  = bw - padX * 2.0f;
+        const float eachW = (totW - gap * static_cast<float>(n - 1)) / static_cast<float>(n);
+        for (int i = 0; i < n; ++i) {
+            float x0 = bx + padX + static_cast<float>(i) * (eachW + gap);
+            if (mouseX >= x0 && mouseX <= x0 + eachW) return i;
+        }
+        return -1;
+    }
+
+    void Render() const {
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f || sh < 100.0f) return;
+
+        const auto& th = Theme();
+        float bx, by, bw, bh;
+        ComputeLayout(sw, sh, xScale, sy, bx, by, bw, bh);
+        const float padX = 10.0f * xScale;
+        const float hdrH = 18.0f * sy;
+
+        prim::Panel(bx, by, bw, bh, th.bgBody, th.borderSubtle,
+                    th.borderThickness * xScale, th.borderThickness * sy);
+        widget::Header(bx, by, bw, hdrH, padX, m_title, "",
+                       th.fontTitleX * 0.82f * xScale, th.fontTitleY * 0.82f * sy,
+                       th.fontBadgeX * xScale, th.fontBadgeY * sy,
+                       xScale, sy, th.bgHeader, th.divider, th.textTitle, th.textCol, true, 0.0f);
+        prim::FlushText();
+
+        if (!m_prompt.empty()) {
+            prim::WrappedText(bx + padX, by + hdrH + 9.0f * sy, bw - padX * 2.0f,
+                              m_prompt.c_str(), 1,
+                              th.fontRowX * 0.94f * xScale, th.fontRowY * 0.94f * sy, th.textNormal);
+            prim::FlushText();
+        }
+
+        if (!m_buttons.empty()) {
+            const int   n     = static_cast<int>(m_buttons.size());
+            const float btnH  = 19.0f * sy;
+            const float btnY  = by + bh - btnH - 8.5f * sy;
+            const float gap   = 7.0f * xScale;
+            const float totW  = bw - padX * 2.0f;
+            const float eachW = (totW - gap * static_cast<float>(n - 1)) / static_cast<float>(n);
+
+            for (int i = 0; i < n; ++i) {
+                const float x0   = bx + padX + static_cast<float>(i) * (eachW + gap);
+                const bool isSel = (i == m_selected);
+                const bool isHov = (i == m_hovered) && !isSel;
+                sa::CRGBA bg     = isSel ? th.selectFill : (isHov ? th.selectMuted : th.bgHeader);
+                sa::CRGBA border = isSel ? (m_buttons[i].isDanger ? th.textDanger : th.textSelected)
+                                         : th.borderSubtle;
+                prim::Panel(x0, btnY, eachW, btnH, bg, border, 0.7f * xScale, 0.7f * sy);
+                sa::CRGBA txtCol = isSel ? th.textSelected
+                                         : (m_buttons[i].isDanger ? th.textDanger : th.textNormal);
+                prim::Label(x0 + eachW * 0.5f, btnY + 4.3f * sy, eachW - 6.0f * xScale,
+                            m_buttons[i].labelGame.c_str(), 1,
+                            th.fontSubX * 0.98f * xScale, th.fontSubY * 0.98f * sy, 0, txtCol);
+            }
+            prim::FlushText();
+        }
+    }
+
+private:
+    struct Btn { std::string labelGame; bool isDanger = false; };
+
+    void ComputeLayout(float sw, float sh, float xScale, float sy,
+                       float& outX, float& outY, float& outW, float& outH) const {
+        const auto& th = Theme();
+        outW = std::min(256.0f * xScale, sw - 48.0f * xScale);
+        int lines = 1;
+        if (!m_prompt.empty()) {
+            lines = prim::MeasureWrappedLines(0.0f, 0.0f, outW - 20.0f * xScale,
+                                              m_prompt.c_str(), 1,
+                                              th.fontRowX * 0.94f * xScale, th.fontRowY * 0.94f * sy);
+        }
+        outH = (18.0f + 16.0f + static_cast<float>(lines) * 11.2f + 29.0f) * sy;
+        outX = (sw - outW) * 0.5f;
+        outY = (sh - outH) * 0.48f;
+    }
+
+    std::string      m_title;
+    std::string      m_prompt;
+    std::vector<Btn> m_buttons;
+    int              m_selected = 0;
+    int              m_hovered  = -1;
+};
+
+// 6. MenuFooterBar: Clean minimalist full-width footer control strip
+class MenuFooterBar {
+public:
+    MenuFooterBar& SetHints(const std::string& leftGame, const std::string& rightGame = "") {
+        m_left  = leftGame;
+        m_right = rightGame;
+        return *this;
+    }
+
+    void Render() const {
+        const auto m = ComputeMenuShellMetrics(false, false);
+        if (m.sw < 100.0f || m.sh < 100.0f) return;
+
+        const auto& th   = Theme();
+        const float padX = 8.0f * m.xScale;
+        prim::Panel(m.frameX, m.footerY, m.frameW, m.footerH,
+                    th.bgFooter, th.borderSubtle,
+                    th.borderThickness * m.xScale, th.borderThickness * m.sy);
+        if (!m_left.empty()) {
+            prim::Label(m.frameX + padX, m.footerY + 4.2f * m.sy, m.frameW * 0.62f, m_left.c_str(),
+                        1, th.fontFooterX * 0.98f * m.xScale, th.fontFooterY * 0.98f * m.sy, 1, th.textFooter);
+        }
+        if (!m_right.empty()) {
+            prim::Label(m.frameX + m.frameW - padX, m.footerY + 4.2f * m.sy, m.frameW * 0.34f, m_right.c_str(),
+                        1, th.fontFooterX * 0.96f * m.xScale, th.fontFooterY * 0.96f * m.sy, 2, th.textCol);
+        }
+        prim::FlushText();
+    }
+
+private:
+    std::string m_left;
+    std::string m_right;
+};
+
+// 7. MenuCursor: Crisp vector arrow pointer (never blurry or aspect-stretched!)
+inline void RenderMenuCursor(float mouseX, float mouseY) {
+    float sw, sh, xScale, sy;
+    GetScreenScales(sw, sh, xScale, sy);
+    if (sw < 100.0f || sh < 100.0f) return;
+
+    const float s   = 9.5f * sy;
+    const float z   = sa::rw::GetNearScreenZ();
+    const float rhw = sa::rw::GetRecipNearClip();
+    const uint32_t colFill = sa::rw::PackColor(250, 250, 252, 245);
+    const uint32_t colEdge = sa::rw::PackColor(8, 8, 12, 235);
+
+    auto makeTri = [&](float x0, float y0, float x1, float y1, float x2, float y2, uint32_t col) {
+        sa::rw::RwIm2DVertex v[3]{};
+        v[0] = {x0, y0, z, rhw, col, 0.0f, 0.0f};
+        v[1] = {x1, y1, z, rhw, col, 0.0f, 0.0f};
+        v[2] = {x2, y2, z, rhw, col, 0.0f, 0.0f};
+        sa::rw::Im2DRenderPrimitive(3 /*rwPRIMTYPETRILIST*/, v, 3);
+    };
+
+    integrations::proper_shaders::RwRenderStateGuard rwGuard;
+    rwGuard.Configure2DFlat();
+    // Subtle dark shadow backing + crisp white modern pointer arrow
+    makeTri(mouseX - 0.8f, mouseY - 0.8f, mouseX + s * 0.82f + 1.2f, mouseY + s * 0.56f + 0.8f,
+            mouseX + s * 0.24f + 0.6f, mouseY + s * 0.96f + 1.2f, colEdge);
+    makeTri(mouseX, mouseY, mouseX + s * 0.78f, mouseY + s * 0.52f,
+            mouseX + s * 0.22f, mouseY + s * 0.90f, colFill);
+}
 
 } // namespace ui
