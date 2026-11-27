@@ -3,7 +3,15 @@
 Modernized frontend Main Menu & Pause Menu overhaul for **GTA San Andreas 1.0 US (Hoodlum)** — blending the suite's clean dark UI Kit aesthetic with **Definitive Edition** two-column layouts and **GTA V**-style horizontal top navigation tabs.
 
 ## Features
-- **GTA V Horizontal Top Navigation Bar:** Switch effortlessly between `Pause`, `Map`, `Game`, `Stats`, `Brief`, `Options`, and `Quit` using `Q` / `E` or direct mouse click, with a sleek masthead displaying live player rank, cash, and in-game clock.
+- **GTA V Horizontal Top Navigation Bar:**
+  - **Main Menu (Title Screen):** `Main Menu`, `Start Game` (Singleplayer), `Multiplayer` (SA-COOP hub when `coop.asi` is installed), `Options`, and `Quit` — strictly hiding in-game-only tabs (`Map`, `Stats`, `Brief`, `Pause`) before gameplay starts.
+  - **In-Game Pause Menu:** `Pause`, `Map`, `Game`, `Stats`, `Brief`, `Options`, and `Quit` (switchable via `Q` / `E` or mouse click), displaying live rank, cash, clock, and active SA-COOP role in the masthead — with the `Multiplayer` tab removed in-game so Singleplayer and Co-op remain cleanly separated.
+- **Modernized Redefine Controls (`page 38`):** Scrollable two-column Foot & Vehicle keybinding list (`TAB` / `A` / `D` switches Foot <-> Vehicle inline), live bound-key preview card, and native `CControllerConfigManager` key capture & `gta_sa.set` persistence.
+- **Full ThirteenAG Widescreen Fix Integration:** Properly integrates with Widescreen Fix's extended **Frame Limiter** (`OFF / 30..240 FPS`) and **Cutscene Borders** (`OFF / Letterbox / Pillarbox / Letterbox + Pillarbox`) in `Advanced Display`, alongside live SMAA / Menu FPS Cap status on the detail card.
+- **Deep GTA SA COOP (`coop.asi`) Integration:**
+  - Suppresses SA-COOP's automatic startup popup on boot and moves multiplayer configuration & Host/Join launching into the dedicated Main-Menu **`Multiplayer`** tab (Player Name, Host Save Slot, Address/Code, Port, Password, Max Players, Friendly Fire, Partner Teleport, Shared Mission Life, Partner Cheats, Voice Chat, GPS).
+  - Restyles SA-COOP's native UI windows (`F9` Connect, `F2` Players, `F4` Skins, Animations) to match our dark UI Kit aesthetic (signature-verified for safety).
+  - Locks unsafe `New Game`, `Load Game`, and `Delete Game` options inside the Pause Menu during active SA-COOP multiplayer sessions.
 - **Definitive Edition Two-Column Layout:** Compact, non-bulky option lists on the left paired with a live contextual detail card on the right:
   - **Pause Overview:** Live Rank & XP bar (`GTA5Progression`), Cash, Health, Armor, Personal Vehicles (`GTA5GarageAndTuning`), Owned Arsenal (`GTA5AmmuNation`), and current region.
   - **Save / Load / Delete:** Instant slot preview with mission title and save timestamp.
@@ -12,7 +20,7 @@ Modernized frontend Main Menu & Pause Menu overhaul for **GTA San Andreas 1.0 US
   - **Settings & Sliders:** Interactive inline sliders (mouse drag/click or `A`/`D` / `Left`/`Right`) and live contextual descriptions for every Audio, Display, and Controller option.
 - **Framed Native Interactive Map:** Full native GTA SA map with pan, zoom, waypoint placement, and legend framed cleanly between the modern top tab bar and minimalist bottom footer.
 - **Centered Confirmation Modals:** Crisp Definitive Edition dialogs for Quit, Overwrite Save, Delete Save, Load, New Game, and Restore Defaults.
-- **Full Third-Party Mod Compatibility:** Preserves **ModLoader (`Mod Configuration`)**, **Redefine Controls**, **SA-COOP**, **SilentPatch**, **Widescreen Fix**, **Proper Shaders**, and **MSKL Russificator** with zero external mod dependencies beyond Ultimate ASI Loader.
+- **Full Third-Party Mod Compatibility:** Preserves **ModLoader (`Mod Configuration`)**, **SA-COOP 0.3.4+**, **SilentPatch**, **Widescreen Fix (latest)**, **Proper Shaders**, and **MSKL Russificator** with zero external mod dependencies beyond Ultimate ASI Loader.
 
 ## Controls
 - **Navigate List:** `Up` / `Down`, `W` / `S`, `Mouse Wheel`, or mouse hover

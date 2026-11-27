@@ -10,7 +10,8 @@
 
 // ============================================================================
 // Verified GTA SA 1.0 US (Hoodlum) Frontend Menu SDK (CMenuManager @ 0x00BA6748)
-// Every offset and function address below is verified directly against gta_sa.exe.
+// Every offset, jump table, and function address below is verified directly
+// against gta_sa.exe 1.0 US disassembly.
 // ============================================================================
 namespace modern_menu::sdk {
 
@@ -54,7 +55,14 @@ inline int8_t&   CurrentPage(uint8_t* mm)       { return *reinterpret_cast<int8_
 inline int8_t&   PreviousPage(uint8_t* mm)      { return *reinterpret_cast<int8_t*>(mm + 0x15E); }
 inline int32_t&  SelectedItem(uint8_t* mm)      { return *reinterpret_cast<int32_t*>(mm + 0x54); }
 inline uint8_t&  MenuActive(uint8_t* mm)        { return mm[0x5C]; }
-inline uint8_t&  InGame(uint8_t* mm)            { return mm[0xE9]; }
+
+// VERIFIED @ 0x0057C2E6 (DrawFrontEnd) & live Title Screen probe:
+// mm[0xE9] == 1 means Title / Main Menu (NOT in-game!); mm[0xE9] == 0 means In-Game Pause Menu!
+inline uint8_t&  MainMenuSwitch(uint8_t* mm)    { return mm[0xE9]; }
+inline bool      IsInGame(uint8_t* mm) {
+    return mm && (mm[0xE9] == 0) && (sa::GetGameState() == 9);
+}
+
 inline uint8_t&  AllowBack(uint8_t* mm)         { return mm[0x1AE9]; }
 inline uint8_t&  LoadingScreenFlag(uint8_t* mm) { return mm[0x1AEA]; }
 inline uint8_t&  DontDrawFrontEnd(uint8_t* mm)  { return mm[0x32]; }
@@ -65,31 +73,74 @@ inline int32_t&  MouseWinY(uint8_t* mm)         { return *reinterpret_cast<int32
 inline int32_t&  OldMouseWinX(uint8_t* mm)      { return *reinterpret_cast<int32_t*>(mm + 0x1AF8); }
 inline int32_t&  OldMouseWinY(uint8_t* mm)      { return *reinterpret_cast<int32_t*>(mm + 0x1AFC); }
 
-// Verified Option Fields on CMenuManager
-inline uint8_t&  HudOn(uint8_t* mm)             { return mm[0x21]; }
-inline int32_t&  RadarMode(uint8_t* mm)         { return *reinterpret_cast<int32_t*>(mm + 0x24); }
-inline int32_t&  Brightness(uint8_t* mm)        { return *reinterpret_cast<int32_t*>(mm + 0x3C); } // 0..384
-inline float&    DrawDistance(uint8_t* mm)      { return *reinterpret_cast<float*>(mm + 0x40); }   // 0.925..1.8
-inline uint8_t&  ShowSubtitles(uint8_t* mm)     { return mm[0x44]; }
-inline uint8_t&  FrameLimiter(uint8_t* mm)      { return mm[0x4A]; }
-inline uint8_t&  Widescreen(uint8_t* mm)        { return mm[0x4B]; }
-inline uint8_t&  MipMapping(uint8_t* mm)        { return mm[0x4C]; }
-inline uint8_t&  RadioEq(uint8_t* mm)           { return mm[0x4D]; }
-inline uint8_t&  SfxVolume(uint8_t* mm)         { return mm[0x4F]; } // 0..64
-inline uint8_t&  RadioVolume(uint8_t* mm)       { return mm[0x50]; } // 0..64
-inline uint8_t&  RadioAutoSelect(uint8_t* mm)   { return mm[0x51]; }
-inline uint8_t&  RadioStation(uint8_t* mm)      { return mm[0x52]; }
+// Verified Option Fields on CMenuManager (confirmed against ProcessMenuOptions 0x576FE0 & ProcessPCMenu 0x57CD50!)
+inline uint8_t&  HudOn(uint8_t* mm)             { return mm[0x21]; }                               // act 35 @ 0x577083
+inline int32_t&  RadarMode(uint8_t* mm)         { return *reinterpret_cast<int32_t*>(mm + 0x24); } // act 34 @ 0x57720C
+inline int32_t&  Brightness(uint8_t* mm)        { return *reinterpret_cast<int32_t*>(mm + 0x3C); } // act 27 (0..384)
+inline float&    DrawDistance(uint8_t* mm)      { return *reinterpret_cast<float*>(mm + 0x40); }   // act 61 (0.925..1.8)
+inline uint8_t&  ShowSubtitles(uint8_t* mm)     { return mm[0x44]; }                               // act 25 @ 0x577042
+inline uint8_t&  ShowLegend(uint8_t* mm)        { return mm[0x4A]; }                               // act 33 @ 0x57705A
+inline uint8_t&  Widescreen(uint8_t* mm)        { return mm[0x4B]; }                               // act 26 @ 0x57706B (WSF: Cutscene Borders 0..3)
+inline uint8_t&  FrameLimiter(uint8_t* mm)      { return mm[0x4C]; }                               // act 24 @ 0x57CEC7 (WSF: 0..11 = OFF, 30..240 FPS)
+inline uint8_t&  RadioAutoSelect(uint8_t* mm)   { return mm[0x4D]; }                               // act 31 @ 0x5770C2
+inline uint8_t&  SfxVolume(uint8_t* mm)         { return mm[0x4F]; }                               // act 29 (0..64)
+inline uint8_t&  RadioVolume(uint8_t* mm)       { return mm[0x50]; }                               // act 28 (0..64)
+inline uint8_t&  RadioEq(uint8_t* mm)           { return mm[0x51]; }                               // act 30 @ 0x5770E5
+inline uint8_t&  RadioStation(uint8_t* mm)      { return mm[0x52]; }                               // act 32 @ 0x5771AA
 inline uint8_t&  MapLoaded(uint8_t* mm)         { return mm[0x78]; }
 inline int8_t&   Language(uint8_t* mm)          { return *reinterpret_cast<int8_t*>(mm + 0x84); }
 inline int8_t&   RadioMode(uint8_t* mm)         { return *reinterpret_cast<int8_t*>(mm + 0xB0); }
 inline uint8_t&  JoypadFlag(uint8_t* mm, int i) { return mm[0xB1 + std::clamp(i, 0, 5)]; }
-inline uint8_t&  SavePhotos(uint8_t* mm)        { return mm[0xC4]; }
-inline uint8_t&  ShowLegend(uint8_t* mm)        { return mm[0xC5]; }
-inline int32_t&  PrefsAntialiasing(uint8_t* mm) { return *reinterpret_cast<int32_t*>(mm + 0xCC); } // 1..4
-inline uint8_t&  ControlMethod(uint8_t* mm)     { return mm[0xD0]; } // 0=Mouse+Keys, 1=Joypad
+inline uint8_t&  MipMapping(uint8_t* mm)        { return mm[0xC4]; }                               // act 43 @ 0x57CEE1 (Main Menu only!)
+inline uint8_t&  SavePhotos(uint8_t* mm)        { return mm[0xC5]; }                               // act 65 @ 0x57CF1B
+inline int32_t&  CurrentAntialiasing(uint8_t* mm){ return *reinterpret_cast<int32_t*>(mm + 0xC8); }
+inline int32_t&  PrefsAntialiasing(uint8_t* mm) { return *reinterpret_cast<int32_t*>(mm + 0xCC); } // act 44 (1..4)
+inline uint8_t&  ControlMethod(uint8_t* mm)     { return mm[0xD0]; }                               // 0=Mouse+Keys, 1=Joypad
 inline int32_t&  DisplayVideoMode(uint8_t* mm)  { return *reinterpret_cast<int32_t*>(mm + 0xD4); }
 inline int32_t&  PrefsVideoMode(uint8_t* mm)    { return *reinterpret_cast<int32_t*>(mm + 0xD8); }
 inline uint8_t&  RadioAutoScan(uint8_t* mm)     { return mm[0xE8]; }
+
+// Verified Redefine Controls (page 38) fields on CMenuManager (0x57B644, 0x57E4D0, 0x57E6E0)
+inline uint8_t&  ControlSubMode(uint8_t* mm)     { return mm[0xB7]; }                               // 0=Foot, 1=Vehicle
+inline int32_t&  SelectedControlRow(uint8_t* mm) { return *reinterpret_cast<int32_t*>(mm + 0x90); }
+inline uint8_t&  KeybindWaitFlag(uint8_t* mm)    { return mm[0x1B09]; }
+inline uint8_t&  KeybindDebounce(uint8_t* mm)    { return mm[0x1B08]; }
+inline uint8_t&  KeybindDeleteMode(uint8_t* mm)  { return mm[0x1B0A]; }
+inline uint8_t&  KeybindClearFlash(uint8_t* mm)  { return mm[0x1B0B]; }
+inline int32_t&  KeybindActionId(uint8_t* mm)    { return *reinterpret_cast<int32_t*>(mm + 0x1B0C); }
+inline uint8_t&  KeybindActiveFlag(uint8_t* mm)  { return mm[0x1B14]; }
+
+inline bool IsWaitingForKeybind(uint8_t* mm) {
+    return mm && (KeybindWaitFlag(mm) != 0 || KeybindDebounce(mm) != 0);
+}
+
+inline void BeginKeybindCapture(uint8_t* mm, int32_t rowIdx, int32_t controllerActionId) {
+    if (!mm || controllerActionId < 0) return;
+    SelectedControlRow(mm) = rowIdx;
+    KeybindActionId(mm)    = controllerActionId;
+    KeybindWaitFlag(mm)    = 1;
+    KeybindDebounce(mm)    = 1;
+    KeybindActiveFlag(mm)  = 1;
+    *reinterpret_cast<void**>(mm + 0xF0)    = mm + 0x38;
+    *reinterpret_cast<int32_t*>(mm + 0x1B00) = 16;
+}
+
+inline void CancelKeybindCapture(uint8_t* mm) {
+    if (!mm) return;
+    KeybindWaitFlag(mm)   = 0;
+    KeybindDebounce(mm)   = 0;
+    KeybindActiveFlag(mm) = 0;
+    KeybindDeleteMode(mm) = 0;
+}
+
+// Verified CControllerConfigManager::GetControllerSettingTextKey @ 0x00531E20 (this = 0x00B70198)
+inline std::string GetBoundKeyName(int32_t controllerActionId, int32_t order1to4) {
+    if (controllerActionId < 0 || order1to4 < 1 || order1to4 > 4) return "";
+    using Fn = const char*(__thiscall*)(void*, int32_t, int32_t);
+    const char* s = reinterpret_cast<Fn>(0x00531E20)(
+        reinterpret_cast<void*>(0x00B70198), controllerActionId, order1to4);
+    return (s && s[0]) ? std::string(s) : "";
+}
 
 // Verified External Settings Globals
 inline bool&     InvertMouseY()    { return *reinterpret_cast<bool*>(0x00BA6745); }
@@ -127,15 +178,29 @@ inline void SwitchToNewScreen(uint8_t* mm, int8_t targetPage) {
     reinterpret_cast<Fn>(0x00573680)(mm, targetPage);
 }
 
-// Safely switches to ANY menu page including page 0 (MENUPAGE_STATS), where vanilla SwitchToNewScreen(0)
-// reads m_aItems[curSel].targetMenu instead of navigating to page 0!
+inline void SaveSettingsNative(uint8_t* mm) {
+    if (!mm) return;
+    using Fn = void(__thiscall*)(void*);
+    reinterpret_cast<Fn>(0x0057C660)(mm);
+}
+
+// Safely switches to ANY menu page with strict Main Menu vs In-Game safety guards!
 inline void NavigateToPage(uint8_t* mm, int8_t targetPage) {
     if (!mm) return;
+    const bool inGame = IsInGame(mm);
+
+    // HARD GUARD: In-game-only screens (Stats=0, Brief=2, Map=5, Pause=41) MUST NEVER open before game starts!
+    if (!inGame && (targetPage == 0 || targetPage == 2 || targetPage == 5 || targetPage == 41)) {
+        targetPage = 34;
+    }
+    if (inGame && targetPage == 34) {
+        targetPage = 41;
+    }
+
     if (targetPage == 0) {
-        // Run native SwitchToNewScreen cleanup first (saves settings, resets display preview, stops audio preview)
-        int8_t anchor = InGame(mm) ? 41 : 34;
-        if (CurrentPage(mm) != anchor) {
-            SwitchToNewScreen(mm, anchor);
+        // Native SwitchToNewScreen(0) reads m_aItems[curSel].targetMenu instead of navigating to page 0!
+        if (CurrentPage(mm) != 41) {
+            SwitchToNewScreen(mm, 41);
         }
         PreviousPage(mm)      = CurrentPage(mm);
         CurrentPage(mm)       = 0;
@@ -148,7 +213,7 @@ inline void NavigateToPage(uint8_t* mm, int8_t targetPage) {
 
 // Verified at 0x0057BA11..0x0057BA3F: saves & restores map zoom/pan fields around CMenuManager::DrawMap!
 inline void DrawMapNative(uint8_t* mm) {
-    if (!mm) return;
+    if (!mm || !IsInGame(mm) || !sa::FindPlayerPed(0)) return;
     float savedZoom = *reinterpret_cast<float*>(mm + 0x64);
     float savedX    = *reinterpret_cast<float*>(mm + 0x68);
     float savedY    = *reinterpret_cast<float*>(mm + 0x6C);
@@ -172,7 +237,6 @@ inline void DrawTitleBackgroundArt(uint8_t* mm, float sw, float sh) {
         }
     }
     if (!tex) return;
-    // Verified CRect layout: {left, bottom, right, top}
     sa::CRect fullRect{-4.0f, sh + 4.0f, sw + 4.0f, -4.0f};
     sa::CRGBA tint{255, 255, 255, 255};
     sa::DrawSpriteTexture(tex, fullRect, tint);
@@ -321,6 +385,82 @@ inline void GetPlayerRegionNames(const sa::CPed* ped, const char*& outRus, const
         outRus = "Пригород";
         outEng = "Countryside";
     }
+}
+
+// ============================================================================
+// Verified Redefine Controls (page 38) Action Tables (0x57F300 & 0x57EDF8/EEA4)
+// ============================================================================
+struct ControlRowDef {
+    int32_t     actionId;
+    const char* gxtKey;
+    const char* rusLabel;
+    const char* engLabel;
+};
+
+inline std::vector<ControlRowDef> BuildControlRows(bool isVehicle, bool isJoypad) {
+    if (isVehicle) {
+        return {
+            {18, "FEC_FIR", "Огонь",                "Fire"},
+            {19, "FEC_FIA", "Альтернативный огонь", "Secondary Fire"},
+            {24, "FEC_ACC", "Газ",                  "Accelerate"},
+            {25, "FEC_BRA", "Тормоз и задний ход",  "Brake / Reverse"},
+            {20, "FEC_LEF", "Поворот влево",        "Steer Left"},
+            {21, "FEC_RIG", "Поворот вправо",       "Steer Right"},
+            {22, "FEC_PLU", "Наклон вперед",        "Steer Forward / Down"},
+            {23, "FEC_PLD", "Наклон назад",         "Steer Back / Up"},
+            {10, "FEC_EEX", "Войти / выйти",        "Enter / Exit"},
+            {47, "FEC_TSK", "Пропуск поездки",      "Trip Skip"},
+            {26, "FEC_RSC", "След. радиостанция",   "Next Radio Station"},
+            {27, "FEC_RSP", "Пред. радиостанция",   "Prev Radio Station"},
+            {28, "FEC_RTS", "След. свой трек",      "User Track Skip"},
+            {29, "FEC_HRN", "Сигнал",               "Horn"},
+            {30, "FEC_SUB", "Доп. миссия",          "Sub-Mission"},
+            {11, "FEC_CMR", "Смена камеры",         "Change Camera"},
+            {31, "FEC_HND", "Ручной тормоз",        "Handbrake"},
+            {36, "FEC_LBA", "Взгляд назад",         "Look Behind"},
+            {37, "FEC_VML", "Обзор мышью",          "Mouse Look"},
+            {34, "FEC_LOL", "Взгляд влево",         "Look Left"},
+            {35, "FEC_LOR", "Взгляд вправо",        "Look Right"},
+            {38, "FEC_TFL", "Спец. влево",          "Special Ctrl Left"},
+            {39, "FEC_TFR", "Спец. вправо",         "Special Ctrl Right"},
+            {41, "FEC_TFU", "Спец. вверх",          "Special Ctrl Up"},
+            {40, "FEC_TFD", "Спец. вниз",           "Special Ctrl Down"},
+        };
+    }
+
+    std::vector<ControlRowDef> foot = {
+        {0,  "FEC_FIR", "Огонь",                "Fire"},
+        {2,  "FEC_NWE", "Следующее оружие",     "Next Weapon"},
+        {3,  "FEC_PWE", "Предыдущее оружие",    "Previous Weapon"},
+        {49, "FEC_GPF", "Отряд - вперед",       "Group Control Forward"},
+        {50, "FEC_GPB", "Отряд - назад",        "Group Control Back"},
+        {48, "FEC_CON", "Ответ - нет",          "Conversation No"},
+        {47, "FEC_COY", "Ответ - да",           "Conversation Yes"},
+        {4,  "FEC_FOR", "Вперед",               "Forwards"},
+        {5,  "FEC_BAC", "Назад",                "Backwards"},
+        {6,  "FEC_LEF", "Влево",                "Left"},
+        {7,  "FEC_RIG", "Вправо",               "Right"},
+        {8,  "FEC_ZIN", "Приблизить прицел",    "Zoom In"},
+        {9,  "FEC_ZOT", "Отдалить прицел",      "Zoom Out"},
+        {10, "FEC_EEX", "Войти / выйти",        "Enter / Exit"},
+        {11, "FEC_CMR", "Смена камеры",         "Change Camera"},
+        {12, "FEC_JMP", "Прыжок",               "Jump"},
+        {13, "FEC_SPN", "Бег",                  "Sprint"},
+        {45, "FEC_TAR", "Прицелиться",          "Aim Weapon"},
+        {15, "FEC_CRO", "Присесть",             "Crouch"},
+        {16, "FEC_ANS", "Действие / звонок",    "Action / Answer Phone"},
+        {17, "FEC_PDW", "Шаг",                  "Walk"},
+        {14, "FEC_LBA", "Взгляд назад",         "Look Behind"},
+    };
+    if (isJoypad) {
+        foot.push_back({32, "FEC_LOL", "Обзор влево",       "Look Left"});
+        foot.push_back({33, "FEC_LOR", "Обзор вправо",      "Look Right"});
+        foot.push_back({51, "FEC_LUD", "Обзор вверх",       "Look Up"});
+        foot.push_back({52, "FEC_LDU", "Обзор вниз",        "Look Down"});
+        foot.push_back({44, "FEC_CEN", "Центр камеры",      "Center Camera"});
+        foot.push_back({1,  "FEC_FIA", "Альт. огонь",       "Secondary Fire"});
+    }
+    return foot;
 }
 
 } // namespace modern_menu::sdk

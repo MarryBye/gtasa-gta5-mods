@@ -2305,7 +2305,7 @@ private:
     std::vector<MenuTabItem> m_tabs;
 };
 
-// 3. MenuOptionList: Sleek Definitive Edition action & settings list with inline sliders
+// 3. MenuOptionList: Sleek Definitive Edition action & settings list with inline sliders & scrolling
 struct MenuOptionItem {
     std::string labelGame;
     std::string valueGame;
@@ -2314,6 +2314,7 @@ struct MenuOptionItem {
     float       sliderFrac01 = 0.0f;
     bool        enabled      = true;
     bool        isBack       = false;
+    bool        isCapturing  = false;
 };
 
 class MenuOptionList {
@@ -2332,6 +2333,10 @@ public:
         m_hovered  = hoveredIdx;
         return *this;
     }
+    MenuOptionList& SetScrollOffset(int firstVisibleIdx) {
+        m_scrollOffset = std::max(0, firstVisibleIdx);
+        return *this;
+    }
     MenuOptionList& ClearItems() {
         m_items.clear();
         return *this;
@@ -2341,19 +2346,32 @@ public:
         return *this;
     }
 
+    int GetMaxVisibleRows() const {
+        float sw, sh, xScale, sy;
+        GetScreenScales(sw, sh, xScale, sy);
+        if (sw < 100.0f || sh < 100.0f || m_maxH <= 0.0f) return 32;
+        const float hdrH = m_title.empty() ? 0.0f : (17.0f * sy);
+        const float rowH = 17.5f * sy;
+        const float avail = m_maxH - hdrH - 8.0f * sy;
+        return std::max(1, static_cast<int>(avail / std::max(1.0f, rowH)));
+    }
+
     int HitTestRow(float mouseX, float mouseY) const {
         if (m_items.empty()) return -1;
         float sw, sh, xScale, sy;
         GetScreenScales(sw, sh, xScale, sy);
         if (sw < 100.0f) return -1;
 
-        const float hdrH = m_title.empty() ? 0.0f : (17.0f * sy);
-        const float rowH = 17.5f * sy;
-        const float topY = m_y + hdrH + 3.0f * sy;
+        const float hdrH   = m_title.empty() ? 0.0f : (17.0f * sy);
+        const float rowH   = 17.5f * sy;
+        const float topY   = m_y + hdrH + 3.0f * sy;
+        const int   maxVis = GetMaxVisibleRows();
         if (mouseX < m_x || mouseX > m_x + m_w) return -1;
         if (mouseY < topY) return -1;
 
-        int idx = static_cast<int>((mouseY - topY) / rowH);
+        int visRow = static_cast<int>((mouseY - topY) / rowH);
+        if (visRow < 0 || visRow >= maxVis) return -1;
+        int idx = m_scrollOffset + visRow;
         if (idx < 0 || idx >= static_cast<int>(m_items.size())) return -1;
         return m_items[idx].enabled ? idx : -1;
     }
@@ -2361,13 +2379,15 @@ public:
     bool HitTestSlider(int rowIdx, float mouseX, float mouseY, float& outFrac01) const {
         if (rowIdx < 0 || rowIdx >= static_cast<int>(m_items.size())) return false;
         if (!m_items[rowIdx].hasSlider || !m_items[rowIdx].enabled) return false;
+        const int visRow = rowIdx - m_scrollOffset;
+        if (visRow < 0 || visRow >= GetMaxVisibleRows()) return false;
         float sw, sh, xScale, sy;
         GetScreenScales(sw, sh, xScale, sy);
         if (sw < 100.0f) return false;
 
         const float hdrH = m_title.empty() ? 0.0f : (17.0f * sy);
         const float rowH = 17.5f * sy;
-        const float ry   = m_y + hdrH + 3.0f * sy + static_cast<float>(rowIdx) * rowH;
+        const float ry   = m_y + hdrH + 3.0f * sy + static_cast<float>(visRow) * rowH;
         if (mouseY < ry || mouseY > ry + rowH) return false;
 
         const float padX   = 8.5f * xScale;
@@ -2389,8 +2409,12 @@ public:
         const float hdrH = m_title.empty() ? 0.0f : (17.0f * sy);
         const float rowH = 17.5f * sy;
         const float padB = 5.0f * sy;
-        const float naturalH = hdrH + 3.0f * sy + static_cast<float>(m_items.size()) * rowH + padB;
-        const float panelH   = (m_maxH > 0.0f) ? std::min(m_maxH, std::max(naturalH, 48.0f * sy)) : naturalH;
+        const int   totalItems = static_cast<int>(m_items.size());
+        const int   maxVis     = GetMaxVisibleRows();
+        const bool  needsScroll = (totalItems > maxVis);
+        const int   shownCount = std::min(totalItems, maxVis);
+        const float naturalH   = hdrH + 3.0f * sy + static_cast<float>(shownCount) * rowH + padB;
+        const float panelH     = (m_maxH > 0.0f) ? std::min(m_maxH, std::max(naturalH, 48.0f * sy)) : naturalH;
 
         prim::Panel(m_x, m_y, m_w, panelH,
                     th.bgBody, th.borderSubtle,
@@ -2409,28 +2433,34 @@ public:
         const float fy   = th.fontRowY * 0.94f * sy;
         const float vfx  = th.fontSubX * 0.94f * xScale;
         const float vfy  = th.fontSubY * 0.94f * sy;
+        const float rightPad = needsScroll ? (padX + 4.5f * xScale) : padX;
 
-        for (size_t i = 0; i < m_items.size(); ++i) {
-            const float ry = topY + static_cast<float>(i) * rowH;
+        const int startIdx = std::clamp(m_scrollOffset, 0, std::max(0, totalItems - 1));
+        int drawn = 0;
+        for (int i = startIdx; i < totalItems && drawn < maxVis; ++i, ++drawn) {
+            const float ry = topY + static_cast<float>(drawn) * rowH;
             if (ry + rowH > m_y + panelH + 1.0f) break;
 
             const auto& it   = m_items[i];
-            const bool isSel = (static_cast<int>(i) == m_selected);
-            const bool isHov = (static_cast<int>(i) == m_hovered) && !isSel && it.enabled;
+            const bool isSel = (i == m_selected);
+            const bool isHov = (i == m_hovered) && !isSel && it.enabled;
 
             if (isSel) {
-                prim::Rect(m_x + 1.0f * xScale, ry, m_w - 2.0f * xScale, rowH,
-                           it.enabled ? th.selectFill : th.selectMuted);
-                prim::AccentStrip(m_x + 1.0f * xScale, ry + 1.0f * sy, 2.2f * xScale, rowH - 2.0f * sy,
-                                  it.enabled ? th.textSelected : th.textDisabled);
+                sa::CRGBA rowFill = it.isCapturing ? sa::CRGBA{95, 76, 26, 175}
+                                                   : (it.enabled ? th.selectFill : th.selectMuted);
+                sa::CRGBA barCol  = it.isCapturing ? th.textWarning
+                                                   : (it.enabled ? th.textSelected : th.textDisabled);
+                prim::Rect(m_x + 1.0f * xScale, ry, m_w - (needsScroll ? 5.5f : 2.0f) * xScale, rowH, rowFill);
+                prim::AccentStrip(m_x + 1.0f * xScale, ry + 1.0f * sy, 2.2f * xScale, rowH - 2.0f * sy, barCol);
             } else if (isHov) {
-                prim::Rect(m_x + 1.0f * xScale, ry, m_w - 2.0f * xScale, rowH, th.selectMuted);
+                prim::Rect(m_x + 1.0f * xScale, ry, m_w - (needsScroll ? 5.5f : 2.0f) * xScale, rowH, th.selectMuted);
             }
 
             const bool hasRight = it.hasSlider || !it.valueGame.empty();
-            const float leftMaxW = hasRight ? (m_w * 0.56f - padX) : (m_w - padX * 2.0f);
+            const float leftMaxW = hasRight ? (m_w * 0.56f - padX) : (m_w - padX - rightPad);
             sa::CRGBA leftCol = !it.enabled ? th.textDisabled
-                              : (isSel ? th.textSelected : (it.isBack ? th.textCol : th.textNormal));
+                              : (it.isCapturing ? th.textWarning
+                              : (isSel ? th.textSelected : (it.isBack ? th.textCol : th.textNormal)));
 
             prim::Label(m_x + padX + (isSel ? 2.5f * xScale : 0.0f), ry + 3.4f * sy, leftMaxW,
                         it.labelGame.c_str(), 1, fx, fy, 1, leftCol);
@@ -2438,7 +2468,7 @@ public:
             if (it.hasSlider) {
                 const float barW = std::min(84.0f * xScale, m_w * 0.36f);
                 const float barH = 3.6f * sy;
-                const float barX = m_x + m_w - padX - barW;
+                const float barX = m_x + m_w - rightPad - barW;
                 const float barY = ry + (rowH - barH) * 0.5f;
                 const float f01  = std::clamp(it.sliderFrac01, 0.0f, 1.0f);
                 widget::ProgressBarProps bp{};
@@ -2452,24 +2482,41 @@ public:
                 widget::ProgressBar(barX, barY, barW, barH, bp);
             } else if (!it.valueGame.empty()) {
                 sa::CRGBA rCol = !it.enabled ? th.textDisabled
-                               : (isSel ? th.textSelected : it.valueColor);
-                prim::Label(m_x + m_w - padX, ry + 3.8f * sy, m_w * 0.42f - padX,
+                               : (it.isCapturing ? th.textWarning
+                               : (isSel ? th.textSelected : it.valueColor));
+                prim::Label(m_x + m_w - rightPad, ry + 3.8f * sy, m_w * 0.42f - rightPad,
                             it.valueGame.c_str(), 1, vfx, vfy, 2, rCol);
             }
-            if ((i & 3u) == 3u) prim::FlushText();
+            if ((drawn & 3) == 3) prim::FlushText();
         }
         prim::FlushText();
+
+        // Subtle vertical scrollbar track & thumb when list exceeds visible capacity
+        if (needsScroll && totalItems > maxVis) {
+            const float sbW     = 2.2f * xScale;
+            const float sbX     = m_x + m_w - sbW - 2.0f * xScale;
+            const float sbY     = topY + 1.0f * sy;
+            const float sbH     = std::max(16.0f * sy, static_cast<float>(maxVis) * rowH - 2.0f * sy);
+            const float visFrac = static_cast<float>(maxVis) / static_cast<float>(totalItems);
+            const float thumbH  = std::max(10.0f * sy, sbH * visFrac);
+            const float maxScr  = static_cast<float>(std::max(1, totalItems - maxVis));
+            const float posFrac = std::clamp(static_cast<float>(startIdx) / maxScr, 0.0f, 1.0f);
+            const float thumbY  = sbY + (sbH - thumbH) * posFrac;
+            prim::Rect(sbX, sbY, sbW, sbH, th.barTrack);
+            prim::Rect(sbX, thumbY, sbW, thumbH, th.borderSubtle);
+        }
     }
 
 private:
-    float                       m_x        = 0.0f;
-    float                       m_y        = 0.0f;
-    float                       m_w        = 200.0f;
-    float                       m_maxH     = 0.0f;
+    float                       m_x            = 0.0f;
+    float                       m_y            = 0.0f;
+    float                       m_w            = 200.0f;
+    float                       m_maxH         = 0.0f;
     std::string                 m_title;
     std::string                 m_badge;
-    int                         m_selected = 0;
-    int                         m_hovered  = -1;
+    int                         m_selected     = 0;
+    int                         m_hovered      = -1;
+    int                         m_scrollOffset = 0;
     std::vector<MenuOptionItem> m_items;
 };
 

@@ -359,4 +359,377 @@ inline bool TriggerPlayerListKey(int vk) {
     return true;
 }
 
+// ============================================================================
+// Native SA-COOP 0.3.4 (coop.asi) Signature-Verified UI, Theme & Flow Bridge
+// Every RVA is verified against exact machine-code prologues / immediate bytes
+// before any call or patch — completely inert & safe on unknown versions!
+// ============================================================================
+namespace detail {
+
+inline uintptr_t GetCoopAsiBase() {
+    static uintptr_t s_base = 0;
+    static bool      s_checked = false;
+    if (!s_checked) {
+        s_checked = true;
+        s_base = reinterpret_cast<uintptr_t>(GetModuleHandleA("coop.asi"));
+    }
+    return s_base;
+}
+
+inline bool MatchBytes(uintptr_t addr, const uint8_t* pat, size_t len) {
+    if (!addr) return false;
+    const volatile uint8_t* p = reinterpret_cast<const volatile uint8_t*>(addr);
+    for (size_t i = 0; i < len; ++i) {
+        if (p[i] != pat[i]) return false;
+    }
+    return true;
+}
+
+inline bool MatchByte(uintptr_t addr, uint8_t expected) {
+    if (addr < 0x10000u) return false;
+    uint8_t val = 0;
+    std::memcpy(&val, reinterpret_cast<const void*>(addr), 1);
+    return val == expected;
+}
+
+inline bool PatchU32IfMatches(uintptr_t addr, uint32_t expected, uint32_t replacement) {
+    if (!addr) return false;
+    auto* p = reinterpret_cast<uint32_t*>(addr);
+    if (*p != expected) return false;
+    DWORD oldProt = 0;
+    if (!VirtualProtect(p, sizeof(uint32_t), PAGE_EXECUTE_READWRITE, &oldProt)) return false;
+    *p = replacement;
+    VirtualProtect(p, sizeof(uint32_t), oldProt, &oldProt);
+    return true;
+}
+
+// Read-only Clang 32-bit libc++ std::__1::basic_string<T> long-mode view (12 bytes):
+// Bit 0 of capFlags == 1 => long string; coop.asi only reads [size, data] for const ref args!
+template <typename CharT>
+struct LibCxxConstStrView {
+    uint32_t     capFlags;
+    uint32_t     size;
+    const CharT* data;
+
+    LibCxxConstStrView(const CharT* str, size_t len)
+        : capFlags(static_cast<uint32_t>((len + 16u) | 1u)),
+          size(static_cast<uint32_t>(len)),
+          data(str) {}
+};
+
+// Read a Clang 32-bit libc++ std::__1::string (handles both SSO and long-mode safely)
+inline std::string ReadLibCxxString(const void* ptr) {
+    if (!ptr) return "";
+    const auto* bytes = reinterpret_cast<const uint8_t*>(ptr);
+    if ((bytes[0] & 1u) != 0) {
+        uint32_t sz = *reinterpret_cast<const uint32_t*>(bytes + 4);
+        const char* data = *reinterpret_cast<const char* const*>(bytes + 8);
+        if (!data || sz == 0 || sz > 512) return "";
+        return std::string(data, sz);
+    } else {
+        uint32_t sz = static_cast<uint32_t>(bytes[0] >> 1);
+        if (sz == 0 || sz > 11) return "";
+        return std::string(reinterpret_cast<const char*>(bytes + 1), sz);
+    }
+}
+
+inline bool ReadBoolGetterAtRva(uintptr_t rva) {
+    uintptr_t base = GetCoopAsiBase();
+    if (!base) return false;
+    uintptr_t fn = base + rva;
+    // Expected: 0F B6 05 xx xx xx xx C3  (movzx eax, BYTE PTR [addr]; ret)
+    const auto* p = reinterpret_cast<const uint8_t*>(fn);
+    if (p[0] != 0x0F || p[1] != 0xB6 || p[2] != 0x05 || p[7] != 0xC3) return false;
+    using Fn = bool(__cdecl*)();
+    return reinterpret_cast<Fn>(fn)();
+}
+
+} // namespace detail
+
+inline bool IsConnectMenuVisible() { return detail::ReadBoolGetterAtRva(0x11DB90); }
+inline bool IsPlayersMenuVisible() { return detail::ReadBoolGetterAtRva(0x123520); }
+inline bool IsSkinsMenuVisible()   { return detail::ReadBoolGetterAtRva(0x127840); }
+inline bool IsAnimsMenuVisible()   { return detail::ReadBoolGetterAtRva(0x11A460); }
+
+inline bool IsAnyCoopMenuVisible() {
+    if (!IsLoaded()) return false;
+    return IsConnectMenuVisible() || IsPlayersMenuVisible() ||
+           IsSkinsMenuVisible()   || IsAnimsMenuVisible();
+}
+
+inline bool SetConnectMenuVisible(bool visible) {
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) return false;
+    uintptr_t fn = base + 0x11D910;
+    static constexpr uint8_t kSig[] = {0x57, 0x56, 0x83, 0xEC, 0x30, 0x0F, 0xB6, 0x44, 0x24, 0x3C};
+    if (!detail::MatchBytes(fn, kSig, sizeof(kSig))) return false;
+    using Fn = void(__cdecl*)(bool);
+    reinterpret_cast<Fn>(fn)(visible);
+    return true;
+}
+
+// Suppresses SA-COOP's automatic F9 connect popup on boot (sets s_didAutoOpen = 1 in ProcessConnectMenu)
+inline bool SuppressStartupConnectPopup() {
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) return false;
+    uintptr_t fn = base + 0x11DBA0;
+    const auto* p = reinterpret_cast<const uint8_t*>(fn);
+    // 1011dba0: 80 3d [addr4] 00 75 25 83 3d c0 d4 c8 00 07
+    if (p[0] != 0x80 || p[1] != 0x3D || p[6] != 0x00 ||
+        p[7] != 0x75 || p[8] != 0x25 || p[9] != 0x83 || p[10] != 0x3D) {
+        return false;
+    }
+    uintptr_t flagAddr = *reinterpret_cast<const uintptr_t*>(p + 2);
+    if (flagAddr > base && flagAddr < base + 0x00400000u) {
+        *reinterpret_cast<uint8_t*>(flagAddr) = 1;
+    }
+    if (IsConnectMenuVisible()) {
+        SetConnectMenuVisible(false);
+    }
+    return true;
+}
+
+// Live instantaneous multiplayer world checks (verified coop::flow::* functions)
+inline bool IsInSharedWorldLive() {
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) return false;
+    uintptr_t fn = base + 0x0334F0;
+    const auto* p = reinterpret_cast<const uint8_t*>(fn);
+    // E8 xx xx xx xx 83 B8 70 01 00 00 02
+    if (p[0] != 0xE8 || p[5] != 0x83 || p[6] != 0xB8 || p[7] != 0x70) return false;
+    using Fn = bool(__cdecl*)();
+    return reinterpret_cast<Fn>(fn)();
+}
+
+inline bool IsInHostWorldLive() {
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) return false;
+    uintptr_t fn = base + 0x033490;
+    const auto* p = reinterpret_cast<const uint8_t*>(fn);
+    // E8 xx xx xx xx 89 C1 31 C0
+    if (p[0] != 0xE8 || p[5] != 0x89 || p[6] != 0xC1 || p[7] != 0x31) return false;
+    using Fn = bool(__cdecl*)();
+    return reinterpret_cast<Fn>(fn)();
+}
+
+inline bool IsFollowerLive() {
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) return false;
+    uintptr_t fn = base + 0x033450;
+    const auto* p = reinterpret_cast<const uint8_t*>(fn);
+    // 80 3D xx xx xx xx 01 75 30
+    if (p[0] != 0x80 || p[1] != 0x3D || p[6] != 0x01 || p[7] != 0x75) return false;
+    using Fn = bool(__cdecl*)();
+    return reinterpret_cast<Fn>(fn)();
+}
+
+inline bool IsMultiplayerSessionActive() {
+    if (!IsLoaded()) return false;
+    return IsInSharedWorldLive() || IsInHostWorldLive() || IsFollowerLive() || IsInMultiplayer();
+}
+
+inline std::string GetLastFlowError() {
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) return "";
+    uintptr_t fn = base + 0x02CA70;
+    const auto* p = reinterpret_cast<const uint8_t*>(fn);
+    // B8 xx xx xx xx C3
+    if (p[0] != 0xB8 || p[5] != 0xC3) return "";
+    using Fn = const void*(__cdecl*)();
+    return detail::ReadLibCxxString(reinterpret_cast<Fn>(fn)());
+}
+
+// Restyles ALL SA-COOP UI widgets (w::Panel, w::MenuItem, w::Checkbox, w::TextBox, w::Selector)
+// from blue-slate to our sleek modernized classic dark GTA SA UI Kit palette (idempotent & sig-checked!)
+inline int ApplyDarkUiKitTheme() {
+    static int s_patched = -1;
+    if (s_patched >= 0) return s_patched;
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) { s_patched = 0; return 0; }
+
+    int count = 0;
+    // 1. coop::ui::w::Panel (fill & outline)
+    if (detail::MatchBytes(base + 0x1405A4, (const uint8_t*)"\xC7\x44\x24\x10", 4))
+        count += detail::PatchU32IfMatches(base + 0x1405A8, 0xFF000000u, 0xDC0A0A0Du) ? 1 : 0;
+    if (detail::MatchBytes(base + 0x1405F8, (const uint8_t*)"\xC7\x44\x24\x10", 4))
+        count += detail::PatchU32IfMatches(base + 0x1405FC, 0xFF26303Bu, 0x88B9B9C0u) ? 1 : 0;
+
+    // 2. coop::ui::w::MenuItem (Buttons & Tabs: active/hover, normal, disabled)
+    if (detail::MatchByte(base + 0x14088E, 0xB8))
+        count += detail::PatchU32IfMatches(base + 0x14088F, 0xFFACCBF1u, 0xFFFFFFFFu) ? 1 : 0;
+    if (detail::MatchByte(base + 0x140893, 0xB9))
+        count += detail::PatchU32IfMatches(base + 0x140894, 0xFF4A5A6Bu, 0xFFCCCCD0u) ? 1 : 0;
+    if (detail::MatchByte(base + 0x1408AB, 0xB8))
+        count += detail::PatchU32IfMatches(base + 0x1408AC, 0xFF353F4Au, 0xFF707076u) ? 1 : 0;
+
+    // 3. coop::ui::w::Checkbox (box fill & border)
+    if (detail::MatchBytes(base + 0x141BDE, (const uint8_t*)"\xC7\x44\x24\x10", 4))
+        count += detail::PatchU32IfMatches(base + 0x141BE2, 0xFF090C10u, 0xEB101014u) ? 1 : 0;
+    if (detail::MatchByte(base + 0x141BF0, 0xB8))
+        count += detail::PatchU32IfMatches(base + 0x141BF1, 0xFF4A5A6Bu, 0x90B9B9C0u) ? 1 : 0;
+
+    // 4. coop::ui::w::TextBox (borders, input fill, placeholder)
+    if (detail::MatchByte(base + 0x140AFC, 0xBB))
+        count += detail::PatchU32IfMatches(base + 0x140AFD, 0xFF26303Bu, 0x88B9B9C0u) ? 1 : 0;
+    if (detail::MatchByte(base + 0x140B36, 0xBB))
+        count += detail::PatchU32IfMatches(base + 0x140B37, 0xFF4A5A6Bu, 0xFFEBEBF0u) ? 1 : 0;
+    if (detail::MatchBytes(base + 0x140C2D, (const uint8_t*)"\xC7\x44\x24\x10", 4))
+        count += detail::PatchU32IfMatches(base + 0x140C31, 0xFF090C10u, 0xEB101014u) ? 1 : 0;
+    if (detail::MatchBytes(base + 0x14106F, (const uint8_t*)"\xC7\x44\x24\x14", 4))
+        count += detail::PatchU32IfMatches(base + 0x141073, 0xFF4A5A6Bu, 0xFF96969Cu) ? 1 : 0;
+
+    // 5. coop::ui::w::Selector (fill, border, arrows hover/normal)
+    if (detail::MatchBytes(base + 0x1417A2, (const uint8_t*)"\xC7\x44\x24\x10", 4))
+        count += detail::PatchU32IfMatches(base + 0x1417A6, 0xFF090C10u, 0xEB101014u) ? 1 : 0;
+    if (detail::MatchBytes(base + 0x1417FF, (const uint8_t*)"\xC7\x44\x24\x10", 4))
+        count += detail::PatchU32IfMatches(base + 0x141803, 0xFF26303Bu, 0x88B9B9C0u) ? 1 : 0;
+    if (detail::MatchBytes(base + 0x1418C5, (const uint8_t*)"\xC7\x44\x24\x14", 4))
+        count += detail::PatchU32IfMatches(base + 0x1418C9, 0xFFACCBF1u, 0xFFFFFFFFu) ? 1 : 0;
+    if (detail::MatchBytes(base + 0x14190B, (const uint8_t*)"\xC7\x44\x24\x14", 4))
+        count += detail::PatchU32IfMatches(base + 0x14190F, 0xFF4A5A6Bu, 0xFFCCCCD0u) ? 1 : 0;
+    if (detail::MatchBytes(base + 0x1419F4, (const uint8_t*)"\xC7\x44\x24\x14", 4))
+        count += detail::PatchU32IfMatches(base + 0x1419F8, 0xFFACCBF1u, 0xFFFFFFFFu) ? 1 : 0;
+    if (detail::MatchBytes(base + 0x141A40, (const uint8_t*)"\xC7\x44\x24\x14", 4))
+        count += detail::PatchU32IfMatches(base + 0x141A44, 0xFF4A5A6Bu, 0xFFCCCCD0u) ? 1 : 0;
+
+    s_patched = count;
+    return count;
+}
+
+// ============================================================================
+// SA-COOP Configuration (coop\coop.ini) + Native Host / Join Launchers
+// ============================================================================
+struct CoopSettings {
+    std::string playerName      = "Player";
+    std::string mode            = "host";
+    std::string host            = "127.0.0.1";
+    int         port            = 7788;
+    std::string password;
+    int         loadSlot        = 0; // 0 = New Game, 1..8 = Save Slot
+    int         maxPlayers      = 2;
+    bool        friendlyFire    = false;
+    bool        partnerTeleport = false;
+    bool        sharedLife      = false;
+    bool        partnerCheats   = false;
+    bool        voiceEnabled    = true;
+    bool        voiceProximity  = true;
+    bool        gps             = true;
+};
+
+inline std::string GetCoopIniPath() {
+    return GetGameExeDir() + "\\coop\\coop.ini";
+}
+
+inline CoopSettings LoadCoopSettings() {
+    CoopSettings s{};
+    std::string path = GetCoopIniPath();
+    if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return s;
+
+    auto readStr = [&](const char* sec, const char* key, const char* def) -> std::string {
+        char buf[128] = {};
+        GetPrivateProfileStringA(sec, key, def, buf, sizeof(buf), path.c_str());
+        return std::string(buf);
+    };
+    s.playerName      = readStr("player", "name", "Player");
+    s.mode            = readStr("connect", "mode", "host");
+    s.host            = readStr("connect", "host", "127.0.0.1");
+    s.port            = static_cast<int>(GetPrivateProfileIntA("connect", "port", 7788, path.c_str()));
+    s.password        = readStr("connect", "password", "");
+    s.loadSlot        = static_cast<int>(GetPrivateProfileIntA("connect", "load_slot", 0, path.c_str()));
+    s.maxPlayers      = static_cast<int>(GetPrivateProfileIntA("connect", "max_players", 2, path.c_str()));
+    s.friendlyFire    = GetPrivateProfileIntA("connect", "friendly_fire", 0, path.c_str()) != 0;
+    s.partnerTeleport = GetPrivateProfileIntA("connect", "partner_teleport", 0, path.c_str()) != 0;
+    s.sharedLife      = GetPrivateProfileIntA("connect", "shared_life", 0, path.c_str()) != 0;
+    s.partnerCheats   = GetPrivateProfileIntA("connect", "partner_cheats", 0, path.c_str()) != 0;
+    s.voiceEnabled    = GetPrivateProfileIntA("voice", "enabled", 1, path.c_str()) != 0;
+    s.voiceProximity  = GetPrivateProfileIntA("voice", "proximity", 1, path.c_str()) != 0;
+    s.gps             = GetPrivateProfileIntA("game", "gps", 1, path.c_str()) != 0;
+
+    if (s.port < 1 || s.port > 65535) s.port = 7788;
+    if (s.loadSlot < 0 || s.loadSlot > 8) s.loadSlot = 0;
+    if (s.maxPlayers < 2 || s.maxPlayers > 8) s.maxPlayers = 2;
+    return s;
+}
+
+inline bool ReloadCoopConfigInMemory() {
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) return false;
+    uintptr_t fnCfg  = base + 0x130000;
+    uintptr_t fnLoad = base + 0x130420;
+    // Verify Load prologue (push ebp/ebx/edi/esi)
+    static constexpr uint8_t kSigLoad[] = {0x55, 0x53, 0x57, 0x56};
+    if (!detail::MatchBytes(fnLoad, kSigLoad, sizeof(kSigLoad))) return false;
+
+    using CfgFn  = void*(__cdecl*)();
+    using LoadFn = void(__thiscall*)(void*, const void*);
+    void* cfg = reinterpret_cast<CfgFn>(fnCfg)();
+    if (!cfg) return false;
+
+    std::string pathA = GetCoopIniPath();
+    std::wstring pathW;
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, pathA.c_str(), -1, nullptr, 0);
+    if (wlen > 1) {
+        pathW.resize(static_cast<size_t>(wlen - 1));
+        MultiByteToWideChar(CP_UTF8, 0, pathA.c_str(), -1, pathW.data(), wlen);
+    } else {
+        return false;
+    }
+    detail::LibCxxConstStrView<wchar_t> view(pathW.c_str(), pathW.size());
+    reinterpret_cast<LoadFn>(fnLoad)(cfg, &view);
+    return true;
+}
+
+inline bool SaveCoopSettings(const CoopSettings& s) {
+    std::string path = GetCoopIniPath();
+    if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+    char portBuf[16], slotBuf[16], maxPBuf[16];
+    std::snprintf(portBuf, sizeof(portBuf), "%d", (s.port >= 1 && s.port <= 65535) ? s.port : 7788);
+    std::snprintf(slotBuf, sizeof(slotBuf), "%d", (s.loadSlot >= 0 && s.loadSlot <= 8) ? s.loadSlot : 0);
+    std::snprintf(maxPBuf, sizeof(maxPBuf), "%d", (s.maxPlayers >= 2 && s.maxPlayers <= 8) ? s.maxPlayers : 2);
+
+    WritePrivateProfileStringA("player",  "name",             s.playerName.c_str(), path.c_str());
+    WritePrivateProfileStringA("connect", "mode",             s.mode.c_str(), path.c_str());
+    WritePrivateProfileStringA("connect", "host",             s.host.c_str(), path.c_str());
+    WritePrivateProfileStringA("connect", "port",             portBuf, path.c_str());
+    WritePrivateProfileStringA("connect", "password",         s.password.c_str(), path.c_str());
+    WritePrivateProfileStringA("connect", "load_slot",        slotBuf, path.c_str());
+    WritePrivateProfileStringA("connect", "max_players",      maxPBuf, path.c_str());
+    WritePrivateProfileStringA("connect", "friendly_fire",    s.friendlyFire ? "1" : "0", path.c_str());
+    WritePrivateProfileStringA("connect", "partner_teleport", s.partnerTeleport ? "1" : "0", path.c_str());
+    WritePrivateProfileStringA("connect", "shared_life",      s.sharedLife ? "1" : "0", path.c_str());
+    WritePrivateProfileStringA("connect", "partner_cheats",   s.partnerCheats ? "1" : "0", path.c_str());
+    WritePrivateProfileStringA("voice",   "enabled",          s.voiceEnabled ? "1" : "0", path.c_str());
+    WritePrivateProfileStringA("voice",   "proximity",        s.voiceProximity ? "1" : "0", path.c_str());
+    WritePrivateProfileStringA("game",    "gps",              s.gps ? "1" : "0", path.c_str());
+
+    ReloadCoopConfigInMemory();
+    return true;
+}
+
+inline bool LaunchHost(int slot0to8, uint16_t port, const std::string& password) {
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) return false;
+    uintptr_t fn = base + 0x02D7E0;
+    static constexpr uint8_t kSig[] = {0x55, 0x89, 0xE5, 0x53, 0x57, 0x56, 0x83, 0xE4, 0xF0};
+    if (!detail::MatchBytes(fn, kSig, sizeof(kSig))) return false;
+    detail::LibCxxConstStrView<char> passView(password.c_str(), password.size());
+    using Fn = void(__cdecl*)(int, uint32_t, const void*);
+    reinterpret_cast<Fn>(fn)(slot0to8, static_cast<uint32_t>(port), &passView);
+    return true;
+}
+
+inline bool LaunchJoin(const std::string& host, uint16_t port, const std::string& password) {
+    uintptr_t base = detail::GetCoopAsiBase();
+    if (!base) return false;
+    uintptr_t fn = base + 0x0304D0;
+    static constexpr uint8_t kSig[] = {0x55, 0x53, 0x57, 0x56, 0x83, 0xEC, 0x6C};
+    if (!detail::MatchBytes(fn, kSig, sizeof(kSig))) return false;
+    detail::LibCxxConstStrView<char> hostView(host.c_str(), host.size());
+    detail::LibCxxConstStrView<char> passView(password.c_str(), password.size());
+    using Fn = void(__cdecl*)(const void*, uint32_t, const void*);
+    reinterpret_cast<Fn>(fn)(&hostView, static_cast<uint32_t>(port), &passView);
+    return true;
+}
+
 } // namespace integrations::sacoop

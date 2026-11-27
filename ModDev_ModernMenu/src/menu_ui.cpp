@@ -3,7 +3,9 @@
 #include "menu_sdk.hpp"
 #include "ui_kit.hpp"
 #include "mod_bus.hpp"
+#include "log.hpp"
 #include "integrations/sacoop.hpp"
+#include "integrations/widescreen_fix.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +20,8 @@ namespace {
 // ============================================================================
 // Page Classification & Top-Tab Definitions
 // ============================================================================
+constexpr int8_t kPageMultiplayer = -10; // Virtual Main-Menu-only SA-COOP hub!
+
 struct TopTabDef {
     int8_t      targetPage;
     const char* rus;
@@ -34,32 +38,53 @@ static constexpr TopTabDef kPauseTabs[] = {
     {35, "ВЫХОД",      "QUIT"}
 };
 
-static constexpr TopTabDef kMainTabs[] = {
+static constexpr TopTabDef kMainTabsSolo[] = {
     {34, "ГЛАВНОЕ МЕНЮ", "MAIN MENU"},
     {1,  "НАЧАТЬ ИГРУ",  "START GAME"},
     {33, "НАСТРОЙКИ",    "OPTIONS"},
     {35, "ВЫХОД",        "QUIT"}
 };
 
+static constexpr TopTabDef kMainTabsCoop[] = {
+    {34,               "ГЛАВНОЕ МЕНЮ", "MAIN MENU"},
+    {1,                "НАЧАТЬ ИГРУ",  "START GAME"},
+    {kPageMultiplayer, "МУЛЬТИПЛЕЕР",  "MULTIPLAYER"},
+    {33,               "НАСТРОЙКИ",    "OPTIONS"},
+    {35,               "ВЫХОД",        "QUIT"}
+};
+
+const TopTabDef* GetActiveTabs(bool inGame, int& outCount) {
+    if (inGame) {
+        outCount = static_cast<int>(std::size(kPauseTabs));
+        return kPauseTabs;
+    }
+    if (integrations::sacoop::IsLoaded()) {
+        outCount = static_cast<int>(std::size(kMainTabsCoop));
+        return kMainTabsCoop;
+    }
+    outCount = static_cast<int>(std::size(kMainTabsSolo));
+    return kMainTabsSolo;
+}
+
 bool IsModalPage(int8_t page) {
     switch (page) {
         case 6:  // NEW_GAME_ASK
-        case 8:  // LOAD_GAME_ASK
-        case 11: // DELETE_GAME_ASK
-        case 12: // LOAD_FIRST_SAVE
+        case 8:  // LOAD_MISSION_ASK
+        case 11: // LOAD_GAME_ASK (verified @ 0x005772E1 -> YES switches to page 13)
+        case 12: // DELETE_GAME_ASK (verified @ 0x005772BE -> YES switches to page 14)
         case 15: // DELETE_FINISHED
-        case 17: // SAVE_WRITE_ASK
+        case 17: // SAVE_WRITE_ASK (YES switches to page 18)
         case 19: // SAVE_DONE_1
         case 20: // SAVE_DONE_2
         case 21: // GAME_SAVED
-        case 22: // GAME_LOADED
-        case 23: // GAME_WARNING_DONT_SAVE
-        case 24: // ASK_DISPLAY_DEFAULT_SETS
-        case 25: // ASK_AUDIO_DEFAULT_SETS
-        case 29: // SAVE_GAME_DONE
-        case 30: // SAVE_GAME_OK
+        case 22: // CHEAT_WARNING
+        case 23: // ASK_DISPLAY_DEFAULT_SETS
+        case 24: // ASK_AUDIO_DEFAULT_SETS
+        case 25: // ASK_CONTROLS_DEFAULT_SETS
+        case 29: // SAVE_GAME_WARNING
+        case 30: // SAVE_GAME_UNSUCCESSFUL
         case 31: // LOAD_GAME_WARNING
-        case 32: // DELETE_GAME_WARNING
+        case 32: // LOAD_GAME_UNSUCCESSFUL
         case 35: // QUIT_GAME_ASK
             return true;
         default:
@@ -68,10 +93,10 @@ bool IsModalPage(int8_t page) {
 }
 
 bool IsDangerModalPage(int8_t page) {
-    return page == 6 || page == 11 || page == 17 || page == 23 || page == 24 || page == 25 || page == 35;
+    return page == 6 || page == 12 || page == 17 || page == 23 || page == 24 || page == 25 || page == 35;
 }
 
-bool ShouldShowTopTabs(uint8_t* mm, int8_t page) {
+bool ShouldShowTopTabs(int8_t page) {
     // Focused Safehouse Save Game flow hides pause tabs for a clean dedicated save screen
     if (page == 16 || page == 17 || page == 19 || page == 20 || page == 21 || page == 29 || page == 30) {
         return false;
@@ -79,34 +104,37 @@ bool ShouldShowTopTabs(uint8_t* mm, int8_t page) {
     return true;
 }
 
-int GetActiveTopTabIndex(bool inGame, int8_t page) {
+int GetActiveTopTabIndex(bool inGame, int8_t effectivePage) {
     if (inGame) {
-        if (page == 41) return 0;
-        if (page == 5)  return 1;
-        if (page == 1 || page == 6 || page == 8 || page == 9 || page == 10 ||
-            page == 11 || page == 12 || page == 15 || page == 22 ||
-            page == 31 || page == 32) {
+        if (effectivePage == 41) return 0;
+        if (effectivePage == 5)  return 1;
+        if (effectivePage == 1 || effectivePage == 6 || effectivePage == 8 || effectivePage == 9 ||
+            effectivePage == 10 || effectivePage == 11 || effectivePage == 12 || effectivePage == 15 ||
+            effectivePage == 22 || effectivePage == 31 || effectivePage == 32) {
             return 2;
         }
-        if (page == 0)  return 3;
-        if (page == 2)  return 4;
-        if (page == 35) return 6;
-        return 5; // Options & all settings subpages
-    } else {
-        if (page == 34) return 0;
-        if (page == 1 || page == 6 || page == 8 || page == 9 || page == 10 ||
-            page == 11 || page == 12 || page == 15 || page == 22 ||
-            page == 31 || page == 32) {
-            return 1;
-        }
-        if (page == 35) return 3;
-        return 2; // Options & subpages
+        if (effectivePage == 0)  return 3;
+        if (effectivePage == 2)  return 4;
+        if (effectivePage == 35) return 6;
+        return 5; // Options & all settings subpages (including page 38 Redefine Controls)
     }
+
+    const bool hasCoop = integrations::sacoop::IsLoaded();
+    if (effectivePage == 34) return 0;
+    if (effectivePage == 1 || effectivePage == 6 || effectivePage == 8 || effectivePage == 9 ||
+        effectivePage == 10 || effectivePage == 11 || effectivePage == 12 || effectivePage == 15 ||
+        effectivePage == 22 || effectivePage == 31 || effectivePage == 32) {
+        return 1;
+    }
+    if (hasCoop && effectivePage == kPageMultiplayer) return 2;
+    if (effectivePage == 35) return hasCoop ? 4 : 3;
+    return hasCoop ? 3 : 2; // Options & subpages
 }
 
-std::string GetPageBreadcrumb(bool inGame, int8_t page) {
+std::string GetPageBreadcrumb(bool inGame, int8_t effectivePage, uint8_t* mm) {
     const std::string sep = " / ";
-    switch (page) {
+    switch (effectivePage) {
+        case kPageMultiplayer: return ui::Loc("ГЛАВНОЕ МЕНЮ", "MAIN MENU") + sep + ui::Loc("МУЛЬТИПЛЕЕР", "MULTIPLAYER");
         case 9:  return ui::Loc("ИГРА", "GAME") + sep + ui::Loc("ЗАГРУЗИТЬ ИГРУ", "LOAD GAME");
         case 10: return ui::Loc("ИГРА", "GAME") + sep + ui::Loc("УДАЛИТЬ ИГРУ", "DELETE GAME");
         case 16: return ui::Loc("СОХРАНЕНИЕ ИГРЫ", "SAVE GAME");
@@ -117,6 +145,11 @@ std::string GetPageBreadcrumb(bool inGame, int8_t page) {
         case 28: return ui::Loc("НАСТРОЙКИ", "OPTIONS") + sep + ui::Loc("ЯЗЫК", "LANGUAGE");
         case 36: return ui::Loc("НАСТРОЙКИ", "OPTIONS") + sep + ui::Loc("УПРАВЛЕНИЕ", "CONTROLS");
         case 37: return ui::Loc("НАСТРОЙКИ", "OPTIONS") + sep + ui::Loc("УПРАВЛЕНИЕ", "CONTROLS") + sep + ui::Loc("НАЗНАЧЕНИЕ КЛАВИШ", "REDEFINE CONTROLS");
+        case 38: {
+            const bool isVeh = (mm && sdk::ControlSubMode(mm) != 0);
+            return ui::Loc("НАСТРОЙКИ", "OPTIONS") + sep + ui::Loc("УПРАВЛЕНИЕ", "CONTROLS") + sep +
+                   (isVeh ? ui::Loc("В ТРАНСПОРТЕ", "VEHICLE CONTROLS") : ui::Loc("ПЕШКОМ", "FOOT CONTROLS"));
+        }
         case 39: return ui::Loc("НАСТРОЙКИ", "OPTIONS") + sep + ui::Loc("УПРАВЛЕНИЕ", "CONTROLS") + sep + ui::Loc("МЫШЬ", "MOUSE");
         case 40: return ui::Loc("НАСТРОЙКИ", "OPTIONS") + sep + ui::Loc("УПРАВЛЕНИЕ", "CONTROLS") + sep + ui::Loc("ГЕЙМПАД", "JOYPAD");
         default:
@@ -125,8 +158,9 @@ std::string GetPageBreadcrumb(bool inGame, int8_t page) {
     }
 }
 
-std::string GetPageHeaderTitle(int8_t page) {
-    switch (page) {
+std::string GetPageHeaderTitle(int8_t effectivePage, uint8_t* mm = nullptr) {
+    switch (effectivePage) {
+        case kPageMultiplayer: return ui::Loc("МУЛЬТИПЛЕЕР SA-COOP", "SA-COOP MULTIPLAYER");
         case 41: return ui::Loc("ПАУЗА", "PAUSE");
         case 34: return ui::Loc("ГЛАВНОЕ МЕНЮ", "MAIN MENU");
         case 1:  return ui::Loc("НАЧАТЬ ИГРУ", "START GAME");
@@ -143,18 +177,24 @@ std::string GetPageHeaderTitle(int8_t page) {
         case 28: return ui::Loc("ЯЗЫК", "LANGUAGE");
         case 36: return ui::Loc("УПРАВЛЕНИЕ", "CONTROLS");
         case 37: return ui::Loc("НАЗНАЧЕНИЕ КЛАВИШ", "REDEFINE CONTROLS");
+        case 38:
+            return (mm && sdk::ControlSubMode(mm) != 0)
+                       ? ui::Loc("КЛАВИШИ В ТРАНСПОРТЕ", "VEHICLE CONTROLS")
+                       : ui::Loc("КЛАВИШИ ПЕШКОМ", "FOOT CONTROLS");
         case 39: return ui::Loc("НАСТРОЙКИ МЫШИ", "MOUSE SETTINGS");
         case 40: return ui::Loc("НАСТРОЙКИ ГЕЙМПАДА", "JOYPAD SETTINGS");
         case 35: return ui::Loc("ВЫХОД ИЗ ИГРЫ", "QUIT GAME");
         case 6:  return ui::Loc("НОВАЯ ИГРА", "NEW GAME");
-        case 8:  return ui::Loc("ЗАГРУЗКА", "LOAD GAME");
-        case 11: return ui::Loc("УДАЛЕНИЕ", "DELETE SAVE");
+        case 8:  return ui::Loc("ЗАГРУЗКА МИССИИ", "LOAD MISSION");
+        case 11: return ui::Loc("ЗАГРУЗКА СОХРАНЕНИЯ", "LOAD SAVE");
+        case 12: return ui::Loc("УДАЛЕНИЕ СОХРАНЕНИЯ", "DELETE SAVE");
+        case 15: return ui::Loc("УДАЛЕНИЕ ЗАВЕРШЕНО", "DELETE COMPLETE");
         case 17: return ui::Loc("ПЕРЕЗАПИСЬ", "OVERWRITE SAVE");
         case 23:
         case 24:
         case 25: return ui::Loc("СБРОС НАСТРОЕК", "RESTORE DEFAULTS");
         default: {
-            if (const auto* scr = sdk::GetScreen(page)) {
+            if (const auto* scr = sdk::GetScreen(effectivePage)) {
                 std::string k = sdk::ReadGxtKey8(scr->titleGxt);
                 std::string t = sdk::GetGxtText(k.c_str());
                 if (!t.empty()) return t;
@@ -166,18 +206,19 @@ std::string GetPageHeaderTitle(int8_t page) {
 
 // ============================================================================
 // Bilingual Clean Copywriting Lookup (Rule 1f: Russian MSKL + English, zero |)
-// Every GXT key below is verified directly against gta_sa.exe 1.0 US aScreens!
 // ============================================================================
 std::string GetCleanEntryLabel(uint8_t* mm, const std::string& gxtKey, uint8_t actionType) {
-    // Disambiguate entries that share a GXT key across actions
     if (actionType == 56) return ui::Loc("Разрешение экрана", "Resolution");
     if (actionType == 7) {
         return (sdk::ControlMethod(mm) == 0)
                    ? ui::Loc("Настройки мыши", "Mouse Settings")
                    : ui::Loc("Настройки геймпада", "Joypad Settings");
     }
+    // WidescreenFix replaces FED_WIS (Widescreen) with Cutscene Borders!
+    if (actionType == 26 && integrations::widescreen::IsCutsceneBordersActive()) {
+        return ui::Loc("Полосы в роликах", "Cutscene Borders");
+    }
 
-    // Pause / Main / Start Game
     if (gxtKey == "FEP_RES") return ui::Loc("Продолжить игру", "Resume Game");
     if (gxtKey == "FEP_STG" || gxtKey == "FEH_SGA") return ui::Loc("Начать игру", "Start Game");
     if (gxtKey == "FEP_MAP" || gxtKey == "FEH_MAP") return ui::Loc("Карта", "Map");
@@ -192,9 +233,8 @@ std::string GetCleanEntryLabel(uint8_t* mm, const std::string& gxtKey, uint8_t a
     if (gxtKey == "FESZ_CA") return ui::Loc("Отмена", "Cancel");
     if (gxtKey == "FEM_YES") return ui::Loc("Да", "Yes");
     if (gxtKey == "FEM_NO")  return ui::Loc("Нет", "No");
-    if (gxtKey == "FEM_OK")  return ui::Loc("ОК", "OK");
+    if (gxtKey == "FEM_OK" || gxtKey == "FEC_OKK") return ui::Loc("ОК", "OK");
 
-    // Options & Submenus
     if (gxtKey == "FEO_CON" || gxtKey == "FEC_CON") return ui::Loc("Управление", "Controller Setup");
     if (gxtKey == "FEO_AUD" || gxtKey == "FEA_AUD") return ui::Loc("Звук", "Audio Setup");
     if (gxtKey == "FEO_DIS" || gxtKey == "FED_DIS") return ui::Loc("Дисплей", "Display Setup");
@@ -208,7 +248,6 @@ std::string GetCleanEntryLabel(uint8_t* mm, const std::string& gxtKey, uint8_t a
     if (gxtKey == "FET_CFT" || gxtKey == "FEC_FT")  return ui::Loc("Пешком", "Foot Controls");
     if (gxtKey == "FET_CCR" || gxtKey == "FEC_VEH") return ui::Loc("В транспорте", "Vehicle Controls");
 
-    // Audio & User Tracks options
     if (gxtKey == "FEA_MUS" || gxtKey == "FEA_RDO") return ui::Loc("Громкость радио", "Radio");
     if (gxtKey == "FEA_SFX") return ui::Loc("Громкость эффектов", "SFX");
     if (gxtKey == "FEA_BAS" || gxtKey == "FEA_EQ")  return ui::Loc("Эквалайзер радио", "Radio EQ");
@@ -219,7 +258,6 @@ std::string GetCleanEntryLabel(uint8_t* mm, const std::string& gxtKey, uint8_t a
     if (gxtKey == "FEA_AMS" || gxtKey == "FEA_ASC") return ui::Loc("Автосканирование", "Automatic Media Scan");
     if (gxtKey == "FEA_SCN") return ui::Loc("Сканировать треки", "Scan User Tracks");
 
-    // Display & Advanced Display options
     if (gxtKey == "FED_BRI") return ui::Loc("Яркость", "Brightness");
     if (gxtKey == "MAP_LEG" || gxtKey == "FED_LGD") return ui::Loc("Легенда карты", "Legend");
     if (gxtKey == "FED_RDR") return ui::Loc("Режим радара", "Radar Mode");
@@ -234,7 +272,6 @@ std::string GetCleanEntryLabel(uint8_t* mm, const std::string& gxtKey, uint8_t a
     if (gxtKey == "FED_AAS") return ui::Loc("Сглаживание", "Anti Aliasing");
     if (gxtKey == "FED_RES" || gxtKey == "FED_RSL") return ui::Loc("Разрешение экрана", "Resolution");
 
-    // Mouse / Joypad options
     if (gxtKey == "FEC_MSH") return ui::Loc("Чувствительность мыши", "Mouse Sensitivity");
     if (gxtKey == "FEC_IVV") return ui::Loc("Инверсия мыши", "Invert Mouse Vertically");
     if (gxtKey == "FET_MST" || gxtKey == "FEC_SMW") return ui::Loc("Руление мышью", "Steer With Mouse");
@@ -246,7 +283,6 @@ std::string GetCleanEntryLabel(uint8_t* mm, const std::string& gxtKey, uint8_t a
     if (gxtKey == "FEJ_RNY" || gxtKey == "FEC_IRY") return ui::Loc("Инверсия правой оси Y", "Invert Right Stick Y");
     if (gxtKey == "FEJ_RNA" || gxtKey == "FEC_IRZ") return ui::Loc("Инверсия правой оси", "Invert Right Axis");
 
-    // Stats categories
     if (gxtKey == "FES_PLA") return ui::Loc("Игрок", "Player");
     if (gxtKey == "FES_MON") return ui::Loc("Деньги", "Money");
     if (gxtKey == "FES_WEA") return ui::Loc("Оружие", "Weapons");
@@ -256,7 +292,6 @@ std::string GetCleanEntryLabel(uint8_t* mm, const std::string& gxtKey, uint8_t a
     if (gxtKey == "FES_MIS") return ui::Loc("Миссии", "Mission");
     if (gxtKey == "FES_MSC") return ui::Loc("Прочее", "Misc");
 
-    // Languages
     if (gxtKey == "FEL_ENG") return ui::Loc("Английский", "English");
     if (gxtKey == "FEL_FRE") return ui::Loc("Французский", "French");
     if (gxtKey == "FEL_GER") return ui::Loc("Немецкий", "German");
@@ -265,13 +300,30 @@ std::string GetCleanEntryLabel(uint8_t* mm, const std::string& gxtKey, uint8_t a
 
     if (actionType == 2) return ui::Loc("Назад", "Back");
 
-    // Dynamic fallback — preserves ModLoader ("Mod Configuration") and any custom third-party entries!
     std::string gxt = sdk::GetGxtText(gxtKey.c_str());
     if (!gxt.empty()) return gxt;
     return gxtKey;
 }
 
-std::string GetEntryDescription(uint8_t actionType, const std::string& gxtKey, int8_t page) {
+std::string GetEntryDescription(uint8_t actionType, const std::string& gxtKey, int8_t page, bool inGame) {
+    if (actionType == 26 && integrations::widescreen::IsCutsceneBordersActive()) {
+        return ui::Loc("Настройка черных полос во время сюжетных роликов от Widescreen Fix.",
+                       "Configure black cutscene border mode provided by Widescreen Fix.");
+    }
+    if (actionType == 24 && integrations::widescreen::IsFrameLimiterExtended()) {
+        return ui::Loc("Выбор лимита частоты кадров от Widescreen Fix. Используйте A/D или клик.",
+                       "Choose gameplay FPS cap from Widescreen Fix. Use A/D or click to cycle.");
+    }
+    if (actionType == 43 && inGame) {
+        return ui::Loc("Изменение сглаживания текстур доступно только в главном меню до начала игры.",
+                       "Mip mapping can only be changed from the Main Menu before starting a game.");
+    }
+    if (inGame && integrations::sacoop::IsMultiplayerSessionActive() &&
+        (gxtKey == "FES_NGA" || gxtKey == "FES_LOA" || gxtKey == "FES_DEL")) {
+        return ui::Loc("В сетевой игре SA-COOP перезапуск и загрузка сохранений отключены для стабильной синхронизации.",
+                       "Restarting or loading saves is disabled during an active SA-COOP session to protect sync.");
+    }
+
     if (gxtKey == "FEP_RES") return ui::Loc("Закрыть меню паузы и вернуться в игру.", "Close the pause menu and return to the game.");
     if (gxtKey == "FEP_STG" || gxtKey == "FEH_SGA") return ui::Loc("Начать новую историю, загрузить сохранение или удалить ненужный слот.", "Start a new story, load a saved slot, or delete an old save.");
     if (gxtKey == "FEP_MAP" || gxtKey == "FEH_MAP") return ui::Loc("Интерактивная карта всего штата Сан-Андреас с метками и масштабом.", "Interactive map of San Andreas with waypoints, zoom, and legend.");
@@ -287,7 +339,7 @@ std::string GetEntryDescription(uint8_t actionType, const std::string& gxtKey, i
     if (gxtKey == "FEO_AUD" || gxtKey == "FEA_AUD") return ui::Loc("Громкость радио и эффектов, выбор радиостанции и своей музыки.", "Radio and sound effect levels, radio station, and user tracks.");
     if (gxtKey == "FEO_DIS" || gxtKey == "FED_DIS") return ui::Loc("Яркость, радар, субтитры, разрешение и качество графики.", "Brightness, radar, subtitles, resolution, and visual quality.");
     if (gxtKey == "FEO_LAN" || gxtKey == "FEL_LAN" || gxtKey == "FEH_LAN") return ui::Loc("Выбор языка игровых текстов и субтитров.", "Select the game text and subtitle language.");
-    if (gxtKey == "FED_ADV") return ui::Loc("Дальность прорисовки, качество эффектов, сглаживание и разрешение.", "Draw distance, visual FX quality, anti-aliasing, and resolution.");
+    if (gxtKey == "FED_ADV") return ui::Loc("Дальность прорисовки, лимит кадров, полосы в роликах, сглаживание и разрешение.", "Draw distance, frame limiter, cutscene borders, anti-aliasing, and resolution.");
     if (gxtKey == "FEA_TIT" || gxtKey == "FEA_USS") return ui::Loc("Порядок воспроизведения и сканирование папки пользовательской музыки.", "Playback mode and scanning for custom user music tracks.");
     if (gxtKey == "FET_DEF") return ui::Loc("Сбросить параметры этого раздела к стандартным значениям.", "Restore all settings in this section to default values.");
     if (gxtKey == "FEC_RED") return ui::Loc("Назначить собственные клавиши для ходьбы и транспорта.", "Assign custom key bindings for on-foot and vehicle actions.");
@@ -314,8 +366,17 @@ std::string GetEntryDescription(uint8_t actionType, const std::string& gxtKey, i
         case 26: return ui::Loc("Адаптация поля зрения под широкоформатные мониторы.", "Adapts field of view for widescreen monitors.");
         case 42: return ui::Loc("Детализация теней, частиц, отражений и растительности.", "Controls shadow, particle, reflection, and foliage detail.");
         case 43: return ui::Loc("Смягчение мерцания текстур на дальних дистанциях.", "Reduces texture shimmering at longer viewing distances.");
-        case 44: return ui::Loc("Сглаживание ступенчатых краев геометрии.", "Smooths jagged geometry edges across the scene.");
-        case 56: return ui::Loc("Выбор разрешения экрана. Нажмите Enter для применения.", "Select display resolution. Press Enter to apply.");
+        case 44: {
+            const auto& wsf = integrations::widescreen::GetIniSummary();
+            if (wsf.loaded && wsf.smaa) {
+                return ui::Loc("Активно сглаживание SMAA из Widescreen Fix. Для стабильности держите MSAA выключенным.",
+                               "Widescreen Fix SMAA is active. Keep MSAA off for stability.");
+            }
+            return ui::Loc("Сглаживание ступенчатых краев. Нажмите Enter для применения.",
+                           "Smooths jagged geometry edges. Press Enter to apply.");
+        }
+        case 56: return ui::Loc("Выбор разрешения экрана через A/D. Нажмите Enter для применения.",
+                                "Cycle display resolution with A/D. Press Enter to apply.");
         case 58: return ui::Loc("Переключение между клавиатурой с мышью и геймпадом.", "Switch between keyboard with mouse and controller input.");
         case 62: return ui::Loc("Скорость поворота камеры и прицела при движении мыши.", "Adjusts camera and aiming turn speed for mouse movement.");
         case 46: return ui::Loc("Инвертировать вертикальное направление обзора мышью.", "Invert vertical mouse look direction.");
@@ -360,8 +421,6 @@ void ApplySliderTargetFrac(uint8_t* mm, int rawItemIdx, uint8_t actionType, floa
     targetFrac01 = std::clamp(targetFrac01, 0.0f, 1.0f);
     sdk::SelectedItem(mm) = rawItemIdx;
 
-    // Step through GTA SA's native ProcessUserInput slider callback so gamma, audio engine
-    // master volumes, draw distance & mouse sens update in real time with exact native clamping!
     for (int step = 0; step < 20; ++step) {
         float cur  = ReadSliderFrac01(mm, actionType);
         float diff = targetFrac01 - cur;
@@ -370,7 +429,6 @@ void ApplySliderTargetFrac(uint8_t* mm, int rawItemIdx, uint8_t actionType, floa
         sdk::ProcessUserInput(mm, 0, 0, 0, 0, dir);
         float next = ReadSliderFrac01(mm, actionType);
         if (std::fabs(next - cur) < 0.0005f) break;
-        // Stop once we crossed or reached target
         if ((dir > 0 && next >= targetFrac01) || (dir < 0 && next <= targetFrac01)) break;
     }
 }
@@ -387,9 +445,19 @@ void ReadOptionValueDisplay(uint8_t* mm, uint8_t actionType, std::string& outVal
     outCol = th.textNormal;
 
     switch (actionType) {
-        case 24: outVal = FormatBoolValue(sdk::FrameLimiter(mm) != 0, outCol); break;
+        case 24: {
+            uint8_t fl = sdk::FrameLimiter(mm);
+            outVal = integrations::widescreen::FormatFrameLimiterValue(fl, ui::UseRussianFlag());
+            outCol = (fl != 0) ? th.textSuccess : th.textCol;
+            break;
+        }
         case 25: outVal = FormatBoolValue(sdk::ShowSubtitles(mm) != 0, outCol); break;
-        case 26: outVal = FormatBoolValue(sdk::Widescreen(mm) != 0, outCol); break;
+        case 26: {
+            uint8_t ws = sdk::Widescreen(mm);
+            outVal = integrations::widescreen::FormatCutsceneBordersValue(ws, ui::UseRussianFlag());
+            outCol = (ws != 0) ? th.textSuccess : th.textCol;
+            break;
+        }
         case 30: outVal = FormatBoolValue(sdk::RadioEq(mm) != 0, outCol); break;
         case 31: outVal = FormatBoolValue(sdk::RadioAutoSelect(mm) != 0, outCol); break;
         case 33: outVal = FormatBoolValue(sdk::ShowLegend(mm) != 0, outCol); break;
@@ -432,7 +500,7 @@ void ReadOptionValueDisplay(uint8_t* mm, uint8_t actionType, std::string& outVal
                 char buf[16];
                 std::snprintf(buf, sizeof(buf), "%dx", aa);
                 outVal = buf;
-                outCol = th.textSuccess;
+                outCol = (aa != sdk::CurrentAntialiasing(mm)) ? th.textWarning : th.textSuccess;
             }
             break;
         }
@@ -487,8 +555,29 @@ struct ResolvedEntry {
     int                saveSlot0  = -1;
 };
 
+enum class MpRowId : int {
+    HostServer = 0,
+    JoinServer,
+    OpenCoopWindow,
+    PlayerName,
+    HostSlot,
+    HostAddress,
+    Port,
+    Password,
+    MaxPlayers,
+    FriendlyFire,
+    PartnerTeleport,
+    SharedLife,
+    PartnerCheats,
+    VoiceEnabled,
+    GpsNav,
+    Count
+};
+
 struct MenuRuntimeState {
     bool     wasMenuActive    = false;
+    bool     coopInitDone     = false;
+    bool     inMultiplayerTab = false;
     int8_t   lastPage         = -1;
     uint32_t openedAtMs       = 0;
     uint32_t lastTickMs       = 0;
@@ -499,6 +588,22 @@ struct MenuRuntimeState {
     int      statsScroll      = 0;
     int      lastStatsCat     = -1;
     int      briefScroll      = 0;
+    int      controlsScroll   = 0;
+    int      mpSelected       = 0;
+    int      mpScroll         = 0;
+    bool     mpCfgLoaded      = false;
+    integrations::sacoop::CoopSettings mpCfg{};
+    std::string mpStatusMsg;
+    bool     mpStatusIsError  = false;
+
+    // Inline text-input modal for SA-COOP nickname / host / port / password
+    bool        textEditActive = false;
+    MpRowId     textEditField  = MpRowId::PlayerName;
+    std::string textEditBuf;
+    int         textEditMaxLen = 24;
+    bool        textEditNumeric = false;
+    bool        prevKeyState[256] = {};
+
     bool     draggingSlider   = false;
     int      dragRawItem      = -1;
     uint8_t  dragActionType   = 0;
@@ -507,6 +612,8 @@ struct MenuRuntimeState {
     bool     prevEnter        = false;
     bool     prevF            = false;
     bool     prevBack         = false;
+    bool     prevEsc          = false;
+    bool     prevTab          = false;
     bool     prevUp           = false;
     bool     prevDown         = false;
     bool     prevLeft         = false;
@@ -523,12 +630,54 @@ struct MenuRuntimeState {
 
 MenuRuntimeState g_st{};
 
+void EnsureCoopHookedOnce() {
+    if (g_st.coopInitDone) return;
+    if (!integrations::sacoop::IsLoaded()) {
+        g_st.coopInitDone = true;
+        return;
+    }
+    bool sup = integrations::sacoop::SuppressStartupConnectPopup();
+    int  pat = integrations::sacoop::ApplyDarkUiKitTheme();
+    g_st.coopInitDone = true;
+    modlog::Info("SA-COOP runtime init (suppress=%d, themePatches=%d)", sup ? 1 : 0, pat);
+}
+
+// Guarantees we never linger on an in-game-only page while on the Title Screen (prevents 0056E301 crash!)
+int8_t SanitizeAndGetEffectivePage(uint8_t* mm) {
+    const bool inGame = sdk::IsInGame(mm);
+    if (inGame) {
+        g_st.inMultiplayerTab = false;
+        g_st.textEditActive   = false;
+        if (sdk::CurrentPage(mm) == 34) {
+            sdk::CurrentPage(mm) = 41;
+        }
+        // In active SA-COOP session, block unsafe Load/Delete/NewGame pages
+        if (integrations::sacoop::IsMultiplayerSessionActive()) {
+            int8_t p = sdk::CurrentPage(mm);
+            if (p == 6 || p == 9 || p == 10 || p == 11 || p == 12) {
+                sdk::CurrentPage(mm) = 1;
+            }
+        }
+        return sdk::CurrentPage(mm);
+    }
+
+    // Not in-game (Main / Title Menu)
+    int8_t p = sdk::CurrentPage(mm);
+    if (p == 0 || p == 2 || p == 5 || p == 41) {
+        sdk::CurrentPage(mm) = 34;
+        sdk::SelectedItem(mm) = 0;
+        p = 34;
+    }
+    if (g_st.inMultiplayerTab && integrations::sacoop::IsLoaded()) {
+        return kPageMultiplayer;
+    }
+    return p;
+}
+
 void SyncCursorPosition(uint8_t* mm, float sw, float sh, float& outMx, float& outMy) {
-    // Primary: GTA SA's own DirectInput mouse coordinates
     float mx = static_cast<float>(sdk::MouseWinX(mm));
     float my = static_cast<float>(sdk::MouseWinY(mm));
 
-    // Secondary sync for windowed mode when OS cursor moves inside focused client rect
     if (integrations::sacoop::IsGameWindowFocused()) {
         HWND fg = GetForegroundWindow();
         POINT pt{};
@@ -555,22 +704,17 @@ void SyncCursorPosition(uint8_t* mm, float sw, float sh, float& outMx, float& ou
     outMy = std::clamp(my, 0.0f, sh);
 }
 
-bool IsSaCoopCursorOverlayOpen() {
+bool IsSaCoopOverlayBlockingInput() {
     if (!integrations::sacoop::IsLoaded()) return false;
+    if (integrations::sacoop::IsAnyCoopMenuVisible()) return true;
+    // Fallback for any other fullscreen OS-cursor overlay
     CURSORINFO ci{};
     ci.cbSize = sizeof(ci);
     if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) != 0) {
-        // In fullscreen SA-COOP only shows the OS cursor when F9/lobby ImGui is active.
-        // In windowed mode the OS cursor can also be visible when hovering non-captured,
-        // so only treat it as an active SA-COOP overlay if DirectInput isn't moving or if
-        // SA-COOP's ImGui is drawing over the title/gameplay screen.
-        // Note: check HWND style — fullscreen has no caption; in windowed mode let menu work normally!
         HWND fg = GetForegroundWindow();
         if (fg) {
             LONG style = GetWindowLongA(fg, GWL_STYLE);
-            if ((style & WS_CAPTION) == 0) {
-                return true; // Fullscreen + OS cursor visible => SA-COOP F9/lobby ImGui!
-            }
+            if ((style & WS_CAPTION) == 0) return true;
         }
     }
     return false;
@@ -582,14 +726,16 @@ void BuildPageEntries(uint8_t* mm, int8_t page, std::vector<ResolvedEntry>& outE
     const auto* scr = sdk::GetScreen(page);
     if (!scr) return;
 
-    const auto& th = ui::Theme();
+    const auto& th     = ui::Theme();
+    const bool  inGame = sdk::IsInGame(mm);
+    const bool  inCoop = inGame && integrations::sacoop::IsMultiplayerSessionActive();
+
     for (int i = 0; i < 12; ++i) {
         const auto& raw = scr->items[i];
         if (raw.actionType == 0) continue;
 
         std::string key = sdk::ReadGxtKey8(raw.gxtKey);
         if (raw.actionType == 1) {
-            // Static prompt / subtitle row
             if (outStaticPrompt.empty()) {
                 outStaticPrompt = sdk::GetGxtText(key.c_str());
             }
@@ -604,6 +750,15 @@ void BuildPageEntries(uint8_t* mm, int8_t page, std::vector<ResolvedEntry>& outE
         e.gxtKey     = key;
         e.uiItem.isBack  = (raw.actionType == 2 || key == "FEDS_TB");
         e.uiItem.enabled = true;
+
+        // Disable Mip Mapping in-game (native GTA SA only allows changing it on Main Menu @ 0x57CEE1!)
+        if (raw.actionType == 43 && inGame) {
+            e.uiItem.enabled = false;
+        }
+        // In active SA-COOP multiplayer session, lock New Game / Load Game / Delete Game!
+        if (inCoop && page == 1 && (key == "FES_NGA" || key == "FES_LOA" || key == "FES_DEL")) {
+            e.uiItem.enabled = false;
+        }
 
         if ((page == 9 || page == 10 || page == 16) && raw.entryType >= 1 && raw.entryType <= 8) {
             int slot0 = static_cast<int>(raw.entryType) - 1;
@@ -634,6 +789,10 @@ void BuildPageEntries(uint8_t* mm, int8_t page, std::vector<ResolvedEntry>& outE
                 e.uiItem.sliderFrac01 = ReadSliderFrac01(mm, raw.actionType);
             } else {
                 ReadOptionValueDisplay(mm, raw.actionType, e.uiItem.valueGame, e.uiItem.valueColor);
+                if (inCoop && page == 1 && !e.uiItem.enabled) {
+                    e.uiItem.valueGame  = ui::Loc("SA-COOP", "SA-COOP");
+                    e.uiItem.valueColor = th.textDisabled;
+                }
             }
         }
 
@@ -651,27 +810,35 @@ int FindVisibleIndexForRaw(const std::vector<ResolvedEntry>& entries, int rawIdx
     return entries.empty() ? -1 : 0;
 }
 
-void BuildTopBar(uint8_t* mm, int8_t page, bool showTabs, const std::string& breadcrumb, ui::MenuTopBar& outBar) {
-    const bool inGame = (sdk::InGame(mm) != 0);
+void BuildTopBar(uint8_t* mm, int8_t effectivePage, bool showTabs, const std::string& breadcrumb, ui::MenuTopBar& outBar) {
+    const bool inGame = sdk::IsInGame(mm);
     std::string mastLeft = ui::Loc("SAN ANDREAS", "SAN ANDREAS");
     std::string mastRight;
     sa::CRGBA   rightCol = ui::Theme().textCol;
 
     if (inGame) {
-        char buf[128];
+        char buf[160];
         int32_t money = sa::GetPlayerMoney();
         uint8_t hh    = sa::GetClockHours();
         uint8_t mmClk = sa::GetClockMinutes();
         auto* bus     = modbus::GetBus();
+        std::string modePrefix;
+        if (integrations::sacoop::IsMultiplayerSessionActive()) {
+            modePrefix = integrations::sacoop::IsFollowerLive()
+                             ? (ui::Loc("SA-COOP КЛИЕНТ", "SA-COOP CLIENT") + "  -  ")
+                             : (ui::Loc("SA-COOP ХОСТ", "SA-COOP HOST") + "  -  ");
+        }
         if (bus && bus->progressionInstalled) {
-            std::snprintf(buf, sizeof(buf), "%s %d  -  $%d  -  %02u:%02u",
+            std::snprintf(buf, sizeof(buf), "%s%s %d  -  $%d  -  %02u:%02u",
+                          modePrefix.c_str(),
                           ui::Loc("УР.", "RANK").c_str(),
                           std::max(1, bus->playerRank),
                           money,
                           static_cast<unsigned>(hh),
                           static_cast<unsigned>(mmClk));
         } else {
-            std::snprintf(buf, sizeof(buf), "$%d  -  %02u:%02u",
+            std::snprintf(buf, sizeof(buf), "%s$%d  -  %02u:%02u",
+                          modePrefix.c_str(),
                           money,
                           static_cast<unsigned>(hh),
                           static_cast<unsigned>(mmClk));
@@ -679,8 +846,8 @@ void BuildTopBar(uint8_t* mm, int8_t page, bool showTabs, const std::string& bre
         mastRight = buf;
         rightCol  = ui::Theme().textNormal;
     } else {
-        mastRight = integrations::sacoop::IsLoaded()
-                        ? ui::Loc("ОДИНОЧНАЯ ИГРА / SA-COOP", "SINGLEPLAYER / SA-COOP")
+        mastRight = (effectivePage == kPageMultiplayer)
+                        ? ui::Loc("СЕТЕВАЯ ИГРА SA-COOP", "SA-COOP MULTIPLAYER")
                         : ui::Loc("ГЛАВНОЕ МЕНЮ", "MAIN MENU");
     }
 
@@ -690,30 +857,444 @@ void BuildTopBar(uint8_t* mm, int8_t page, bool showTabs, const std::string& bre
           .ClearTabs();
 
     if (showTabs) {
-        const int activeIdx = GetActiveTopTabIndex(inGame, page);
-        if (inGame) {
-            for (int i = 0; i < static_cast<int>(std::size(kPauseTabs)); ++i) {
-                outBar.AddTab(ui::Loc(kPauseTabs[i].rus, kPauseTabs[i].eng),
-                              i == activeIdx, i == g_st.hoveredTab, true);
-            }
-        } else {
-            for (int i = 0; i < static_cast<int>(std::size(kMainTabs)); ++i) {
-                outBar.AddTab(ui::Loc(kMainTabs[i].rus, kMainTabs[i].eng),
-                              i == activeIdx, i == g_st.hoveredTab, true);
-            }
+        int tabCount = 0;
+        const TopTabDef* tabs = GetActiveTabs(inGame, tabCount);
+        const int activeIdx   = GetActiveTopTabIndex(inGame, effectivePage);
+        for (int i = 0; i < tabCount; ++i) {
+            outBar.AddTab(ui::Loc(tabs[i].rus, tabs[i].eng),
+                          i == activeIdx, i == g_st.hoveredTab, true);
         }
     }
 }
 
+// ============================================================================
+// Virtual Page: SA-COOP MULTIPLAYER HUB (Main Menu ONLY!)
+// ============================================================================
+void EnsureMpConfigLoaded() {
+    if (!g_st.mpCfgLoaded) {
+        g_st.mpCfg       = integrations::sacoop::LoadCoopSettings();
+        g_st.mpCfgLoaded = true;
+    }
+}
+
+std::vector<ui::MenuOptionItem> BuildMultiplayerItems() {
+    EnsureMpConfigLoaded();
+    const auto& th = ui::Theme();
+    const auto& c  = g_st.mpCfg;
+    std::vector<ui::MenuOptionItem> out;
+    out.reserve(static_cast<size_t>(MpRowId::Count));
+
+    auto add = [&](const std::string& lbl, const std::string& val, sa::CRGBA col, bool enabled = true) {
+        ui::MenuOptionItem it{};
+        it.labelGame  = lbl;
+        it.valueGame  = val;
+        it.valueColor = col;
+        it.enabled    = enabled;
+        out.push_back(std::move(it));
+    };
+
+    char slotBuf[32];
+    if (c.loadSlot == 0) {
+        std::snprintf(slotBuf, sizeof(slotBuf), "%s", ui::Loc("Новая игра", "New Game").c_str());
+    } else {
+        std::snprintf(slotBuf, sizeof(slotBuf), "%s %d", ui::Loc("Слот", "Slot").c_str(), c.loadSlot);
+    }
+    char portBuf[16], maxPBuf[16];
+    std::snprintf(portBuf, sizeof(portBuf), "%d", c.port);
+    std::snprintf(maxPBuf, sizeof(maxPBuf), "%d", c.maxPlayers);
+
+    auto boolStr = [&](bool v, sa::CRGBA& col) -> std::string {
+        col = v ? th.textSuccess : th.textCol;
+        return v ? ui::Loc("ВКЛ", "ON") : ui::Loc("ВЫКЛ", "OFF");
+    };
+
+    add(ui::Loc("Создать сервер", "Host Server"),
+        ui::Loc("ЗАПУСК", "START"), th.textSuccess);
+    add(ui::Loc("Подключиться к серверу", "Join Server"),
+        ui::Loc("ВХОД", "CONNECT"), th.textSelected);
+    add(ui::Loc("Открыть окно SA-COOP", "Open SA-COOP Window"),
+        "F9", th.textCol);
+    add(ui::Loc("Имя игрока", "Player Name"),
+        c.playerName.empty() ? "Player" : c.playerName, th.textSelected);
+    add(ui::Loc("Сохранение хоста", "Host Save Slot"),
+        slotBuf, th.textNormal);
+    add(ui::Loc("Адрес или код", "Address or Code"),
+        c.host.empty() ? "127.0.0.1" : c.host, th.textNormal);
+    add(ui::Loc("Порт сервера", "Server Port"),
+        portBuf, th.textNormal);
+    add(ui::Loc("Пароль", "Password"),
+        c.password.empty() ? ui::Loc("Нет", "None") : std::string(c.password.size(), '*'), th.textCol);
+    add(ui::Loc("Максимум игроков", "Max Players"),
+        maxPBuf, th.textNormal);
+
+    sa::CRGBA col{};
+    std::string v;
+    v = boolStr(c.friendlyFire, col);    add(ui::Loc("Огонь по своим", "Friendly Fire"), v, col);
+    v = boolStr(c.partnerTeleport, col); add(ui::Loc("Телепорт напарника", "Partner Teleport"), v, col);
+    v = boolStr(c.sharedLife, col);      add(ui::Loc("Общая жизнь в миссиях", "Shared Mission Life"), v, col);
+    v = boolStr(c.partnerCheats, col);   add(ui::Loc("Чит-коды напарников", "Partner Cheats"), v, col);
+    v = boolStr(c.voiceEnabled, col);    add(ui::Loc("Голосовой чат", "Voice Chat"), v, col);
+    v = boolStr(c.gps, col);             add(ui::Loc("Навигатор GPS", "GPS Navigation"), v, col);
+    return out;
+}
+
+void PopulateMultiplayerRightCard(int selIdx, ui::MenuInfoCard& card) {
+    EnsureMpConfigLoaded();
+    const auto& th = ui::Theme();
+    const auto& c  = g_st.mpCfg;
+    const MpRowId row = static_cast<MpRowId>(std::clamp(selIdx, 0, static_cast<int>(MpRowId::Count) - 1));
+
+    card.SetHeader(ui::Loc("СОВМЕСТНАЯ ИГРА", "CO-OP SESSION"), "SA-COOP");
+
+    std::string desc;
+    switch (row) {
+        case MpRowId::HostServer:
+            desc = ui::Loc("Запустить собственный сервер SA-COOP и войти в мир в роли хоста с выбранным сохранением.",
+                           "Launch your own SA-COOP server and enter the world as host with the chosen save slot.");
+            break;
+        case MpRowId::JoinServer:
+            desc = ui::Loc("Подключиться к серверу друга по указанному IP-адресу или коду приглашения.",
+                           "Connect to a friend's server using the configured IP address or invite code.");
+            break;
+        case MpRowId::OpenCoopWindow:
+            desc = ui::Loc("Открыть полное окно SA-COOP для копирования кода приглашения и настройки клавиш чата.",
+                           "Open the native SA-COOP window for invite codes and chat key bindings.");
+            break;
+        case MpRowId::PlayerName:
+            desc = ui::Loc("Ваш псевдоним в сетевой игре и имя профиля сохранений SA-COOP.",
+                           "Your display name in multiplayer and SA-COOP client save profile.");
+            break;
+        case MpRowId::HostSlot:
+            desc = ui::Loc("Выберите новую игру или слот 1-8, который загрузится при создании сервера.",
+                           "Choose New Game or slot 1-8 to load when hosting a server.");
+            break;
+        case MpRowId::HostAddress:
+            desc = ui::Loc("IP-адрес хоста или код приглашения для подключения к серверу.",
+                           "Host IP address or invite code used when joining a server.");
+            break;
+        case MpRowId::Port:
+            desc = ui::Loc("Сетевой порт подключения. Стандартное значение 7788.",
+                           "Network port for hosting or joining. Default is 7788.");
+            break;
+        case MpRowId::Password:
+            desc = ui::Loc("Необязательный пароль доступа к серверу.",
+                           "Optional password required to join the server.");
+            break;
+        case MpRowId::MaxPlayers:
+            desc = ui::Loc("Максимальное количество участников на вашем сервере.",
+                           "Maximum number of players allowed on your hosted server.");
+            break;
+        case MpRowId::FriendlyFire:
+            desc = ui::Loc("Разрешить игрокам наносить урон друг другу.",
+                           "Allow players to damage each other.");
+            break;
+        case MpRowId::PartnerTeleport:
+            desc = ui::Loc("Разрешить напарникам перемещаться к вам командами чата.",
+                           "Allow teammates to teleport via chat commands.");
+            break;
+        case MpRowId::SharedLife:
+            desc = ui::Loc("Гибель напарника проваливает активную сюжетную миссию хоста.",
+                           "A teammate's death fails the host's active story mission.");
+            break;
+        case MpRowId::PartnerCheats:
+            desc = ui::Loc("Разрешить напарникам использовать игровые чит-коды.",
+                           "Allow teammates to activate cheat codes.");
+            break;
+        case MpRowId::VoiceEnabled:
+            desc = ui::Loc("Включить встроенную голосовую связь SA-COOP.",
+                           "Enable built-in SA-COOP voice chat.");
+            break;
+        case MpRowId::GpsNav:
+            desc = ui::Loc("Отображать маршрут GPS на радаре во время вождения.",
+                           "Display GPS route guidance on the radar while driving.");
+            break;
+        default:
+            break;
+    }
+    if (!desc.empty()) card.SetDescription(desc);
+
+    card.AddRow(ui::Loc("Профиль", "Player"), c.playerName.empty() ? "Player" : c.playerName, th.textSelected);
+    char epBuf[96];
+    std::snprintf(epBuf, sizeof(epBuf), "%s:%d", c.host.empty() ? "127.0.0.1" : c.host.c_str(), c.port);
+    card.AddRow(ui::Loc("Адрес", "Endpoint"), epBuf, th.textNormal);
+    if (c.loadSlot >= 1 && c.loadSlot <= 8) {
+        auto sInfo = sdk::GetSaveSlotInfo(c.loadSlot - 1);
+        std::string sTxt = (sInfo.status == 0 && !sInfo.nameGame.empty())
+                               ? sInfo.nameGame
+                               : (ui::Loc("Слот ", "Slot ") + std::to_string(c.loadSlot));
+        card.AddRow(ui::Loc("Мир хоста", "Host World"), sTxt, th.textSuccess);
+    } else {
+        card.AddRow(ui::Loc("Мир хоста", "Host World"), ui::Loc("Новая игра", "New Game"), th.textCol);
+    }
+
+    std::string liveErr = integrations::sacoop::GetLastFlowError();
+    if (!liveErr.empty()) {
+        card.AddRow(ui::Loc("Статус", "Status"), liveErr, th.textDanger);
+    } else if (!g_st.mpStatusMsg.empty()) {
+        card.AddRow(ui::Loc("Статус", "Status"), g_st.mpStatusMsg,
+                    g_st.mpStatusIsError ? th.textDanger : th.textSuccess);
+    } else {
+        card.AddRow(ui::Loc("Режим", "Mode"), ui::Loc("Готов к запуску", "Ready"), th.textSuccess);
+    }
+
+    card.SetFooterNote(ui::Loc("После входа в мир сменить режим можно только перезапуском игры",
+                               "Mode is locked once in-game; restart to switch Singleplayer or Co-op"));
+}
+
+void BeginMpTextEdit(MpRowId field) {
+    EnsureMpConfigLoaded();
+    g_st.textEditActive  = true;
+    g_st.textEditField   = field;
+    g_st.textEditNumeric = (field == MpRowId::Port);
+    if (field == MpRowId::PlayerName) {
+        g_st.textEditBuf    = g_st.mpCfg.playerName;
+        g_st.textEditMaxLen = 20;
+    } else if (field == MpRowId::HostAddress) {
+        g_st.textEditBuf    = g_st.mpCfg.host;
+        g_st.textEditMaxLen = 40;
+    } else if (field == MpRowId::Port) {
+        g_st.textEditBuf    = std::to_string(g_st.mpCfg.port);
+        g_st.textEditMaxLen = 5;
+    } else if (field == MpRowId::Password) {
+        g_st.textEditBuf    = g_st.mpCfg.password;
+        g_st.textEditMaxLen = 24;
+    }
+    for (int vk = 0; vk < 256; ++vk) {
+        g_st.prevKeyState[vk] = (GetAsyncKeyState(vk) & 0x8000) != 0;
+    }
+}
+
+void CommitMpTextEdit() {
+    if (g_st.textEditField == MpRowId::PlayerName) {
+        if (!g_st.textEditBuf.empty()) g_st.mpCfg.playerName = g_st.textEditBuf;
+    } else if (g_st.textEditField == MpRowId::HostAddress) {
+        if (!g_st.textEditBuf.empty()) g_st.mpCfg.host = g_st.textEditBuf;
+    } else if (g_st.textEditField == MpRowId::Port) {
+        int p = std::atoi(g_st.textEditBuf.c_str());
+        if (p >= 1 && p <= 65535) g_st.mpCfg.port = p;
+    } else if (g_st.textEditField == MpRowId::Password) {
+        g_st.mpCfg.password = g_st.textEditBuf;
+    }
+    integrations::sacoop::SaveCoopSettings(g_st.mpCfg);
+    g_st.textEditActive = false;
+    sa::PlayFrontendSound(sa::SFX_SELECT);
+}
+
+void HandleMpTextEditInput() {
+    auto justPressed = [&](int vk) -> bool {
+        bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        bool edge = down && !g_st.prevKeyState[vk];
+        g_st.prevKeyState[vk] = down;
+        return edge;
+    };
+
+    if (justPressed(VK_ESCAPE)) {
+        g_st.textEditActive = false;
+        sa::PlayFrontendSound(sa::SFX_BACK);
+        return;
+    }
+    if (justPressed(VK_RETURN)) {
+        CommitMpTextEdit();
+        return;
+    }
+    if (justPressed(VK_BACK)) {
+        if (!g_st.textEditBuf.empty()) {
+            g_st.textEditBuf.pop_back();
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        }
+        return;
+    }
+
+    const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    auto pushChar = [&](char c) {
+        if (static_cast<int>(g_st.textEditBuf.size()) >= g_st.textEditMaxLen) return;
+        g_st.textEditBuf.push_back(c);
+        sa::PlayFrontendSound(sa::SFX_SCROLL);
+    };
+
+    for (int vk = '0'; vk <= '9'; ++vk) {
+        if (justPressed(vk)) pushChar(static_cast<char>(vk));
+    }
+    if (!g_st.textEditNumeric) {
+        for (int vk = 'A'; vk <= 'Z'; ++vk) {
+            if (justPressed(vk)) {
+                char ch = static_cast<char>(shift ? vk : (vk - 'A' + 'a'));
+                pushChar(ch);
+            }
+        }
+        if (justPressed(VK_OEM_PERIOD)) pushChar('.');
+        if (justPressed(VK_OEM_MINUS))  pushChar(shift ? '_' : '-');
+        if (justPressed(VK_OEM_4))      pushChar('[');
+        if (justPressed(VK_OEM_6))      pushChar(']');
+    }
+}
+
+void RenderMpTextEditModal() {
+    std::string title;
+    if (g_st.textEditField == MpRowId::PlayerName)       title = ui::Loc("ИМЯ ИГРОКА", "PLAYER NAME");
+    else if (g_st.textEditField == MpRowId::HostAddress) title = ui::Loc("АДРЕС ИЛИ КОД", "ADDRESS OR CODE");
+    else if (g_st.textEditField == MpRowId::Port)        title = ui::Loc("ПОРТ СЕРВЕРА", "SERVER PORT");
+    else                                                 title = ui::Loc("ПАРОЛЬ СЕРВЕРА", "SERVER PASSWORD");
+
+    ui::TextInputModal modal;
+    modal.SetTitle(title)
+         .SetText(g_st.textEditBuf)
+         .SetPlaceholder(ui::Loc("Введите значение", "Enter value"))
+         .SetMaxLength(g_st.textEditMaxLen)
+         .SetFooter(ui::Loc("ENTER - СОХРАНИТЬ   ESC - ОТМЕНА", "ENTER - SAVE   ESC - CANCEL"));
+    modal.Render();
+    ui::prim::FlushText();
+}
+
+void AdjustMultiplayerRow(int idx, int dir, bool activate) {
+    EnsureMpConfigLoaded();
+    MpRowId row = static_cast<MpRowId>(std::clamp(idx, 0, static_cast<int>(MpRowId::Count) - 1));
+    auto& c = g_st.mpCfg;
+    bool changed = false;
+
+    switch (row) {
+        case MpRowId::HostServer:
+            if (activate) {
+                c.mode = "host";
+                integrations::sacoop::SaveCoopSettings(c);
+                g_st.inMultiplayerTab = false;
+                if (integrations::sacoop::LaunchHost(c.loadSlot, static_cast<uint16_t>(c.port), c.password)) {
+                    g_st.mpStatusMsg     = ui::Loc("Запуск сервера...", "Starting server...");
+                    g_st.mpStatusIsError = false;
+                    sa::PlayFrontendSound(sa::SFX_SELECT);
+                } else {
+                    g_st.mpStatusMsg     = ui::Loc("Откройте окно SA-COOP", "Open SA-COOP window");
+                    g_st.mpStatusIsError = true;
+                    integrations::sacoop::SetConnectMenuVisible(true);
+                }
+            }
+            return;
+        case MpRowId::JoinServer:
+            if (activate) {
+                c.mode = "join";
+                integrations::sacoop::SaveCoopSettings(c);
+                g_st.inMultiplayerTab = false;
+                if (integrations::sacoop::LaunchJoin(c.host, static_cast<uint16_t>(c.port), c.password)) {
+                    g_st.mpStatusMsg     = ui::Loc("Подключение...", "Connecting...");
+                    g_st.mpStatusIsError = false;
+                    sa::PlayFrontendSound(sa::SFX_SELECT);
+                } else {
+                    g_st.mpStatusMsg     = ui::Loc("Откройте окно SA-COOP", "Open SA-COOP window");
+                    g_st.mpStatusIsError = true;
+                    integrations::sacoop::SetConnectMenuVisible(true);
+                }
+            }
+            return;
+        case MpRowId::OpenCoopWindow:
+            if (activate) {
+                integrations::sacoop::SaveCoopSettings(c);
+                integrations::sacoop::ApplyDarkUiKitTheme();
+                integrations::sacoop::SetConnectMenuVisible(true);
+                sa::PlayFrontendSound(sa::SFX_SELECT);
+            }
+            return;
+        case MpRowId::PlayerName:
+        case MpRowId::HostAddress:
+        case MpRowId::Port:
+        case MpRowId::Password:
+            if (activate) {
+                BeginMpTextEdit(row);
+                sa::PlayFrontendSound(sa::SFX_SELECT);
+            }
+            return;
+        case MpRowId::HostSlot:
+            c.loadSlot = (c.loadSlot + (dir != 0 ? dir : 1) + 9) % 9;
+            changed = true;
+            break;
+        case MpRowId::MaxPlayers:
+            c.maxPlayers = 2 + ((c.maxPlayers - 2 + (dir != 0 ? dir : 1) + 7) % 7);
+            changed = true;
+            break;
+        case MpRowId::FriendlyFire:    c.friendlyFire    = !c.friendlyFire;    changed = true; break;
+        case MpRowId::PartnerTeleport: c.partnerTeleport = !c.partnerTeleport; changed = true; break;
+        case MpRowId::SharedLife:      c.sharedLife      = !c.sharedLife;      changed = true; break;
+        case MpRowId::PartnerCheats:   c.partnerCheats   = !c.partnerCheats;   changed = true; break;
+        case MpRowId::VoiceEnabled:    c.voiceEnabled    = !c.voiceEnabled;    changed = true; break;
+        case MpRowId::GpsNav:          c.gps             = !c.gps;             changed = true; break;
+        default: break;
+    }
+
+    if (changed) {
+        integrations::sacoop::SaveCoopSettings(c);
+        sa::PlayFrontendSound(sa::SFX_SCROLL);
+    }
+}
+
+// ============================================================================
+// Modernized Redefine Controls (page == 38) Helpers
+// ============================================================================
+std::string FormatControlRowKeysSummary(int32_t actionId) {
+    std::string k1 = sdk::GetBoundKeyName(actionId, 1);
+    std::string k2 = sdk::GetBoundKeyName(actionId, 2);
+    if (!k1.empty() && !k2.empty() && k1 != k2) {
+        return k1 + " / " + k2;
+    }
+    if (!k1.empty()) return k1;
+    if (!k2.empty()) return k2;
+    std::string k3 = sdk::GetBoundKeyName(actionId, 3);
+    if (!k3.empty()) return k3;
+    std::string k4 = sdk::GetBoundKeyName(actionId, 4);
+    if (!k4.empty()) return k4;
+    return ui::Loc("Не назначено", "Unbound");
+}
+
+void PopulateControlsRightCard(uint8_t* mm, const std::vector<sdk::ControlRowDef>& rows, int selIdx,
+                               ui::MenuInfoCard& card)
+{
+    const auto& th        = ui::Theme();
+    const bool  isVeh     = (sdk::ControlSubMode(mm) != 0);
+    const bool  capturing = sdk::IsWaitingForKeybind(mm);
+
+    if (selIdx < 0 || selIdx >= static_cast<int>(rows.size())) {
+        card.SetHeader(GetPageHeaderTitle(38, mm));
+        return;
+    }
+    const auto& cur = rows[selIdx];
+    card.SetHeader(ui::Loc(cur.rusLabel, cur.engLabel),
+                   isVeh ? ui::Loc("В ТРАНСПОРТЕ", "VEHICLE") : ui::Loc("ПЕШКОМ", "ON FOOT"));
+
+    if (capturing) {
+        card.SetDescription(ui::Loc("Ожидание ввода... Нажмите новую клавишу или кнопку мыши. Backspace - очистить, Esc - отмена.",
+                                    "Waiting for input... Press a new key or mouse button. Backspace - clear, Esc - cancel."));
+    } else {
+        card.SetDescription(ui::Loc("Нажмите Enter или ЛКМ на действии, чтобы назначить новую клавишу.",
+                                    "Press Enter or LMB on an action to assign a new key binding."));
+    }
+
+    int shownBindings = 0;
+    for (int order = 1; order <= 4; ++order) {
+        std::string s = sdk::GetBoundKeyName(cur.actionId, order);
+        if (s.empty() && order > 2) continue;
+        char lbl[32];
+        std::snprintf(lbl, sizeof(lbl), "%s %d", ui::Loc("Привязка", "Binding").c_str(), order);
+        card.AddRow(lbl,
+                    s.empty() ? ui::Loc("Нет", "None") : s,
+                    s.empty() ? th.textDisabled : (order == 1 ? th.textSelected : th.textNormal));
+        ++shownBindings;
+    }
+    (void)shownBindings;
+
+    card.SetFooterNote(ui::Loc("TAB или A/D - переключить Пешком / В транспорте",
+                               "TAB or A/D - toggle Foot / Vehicle controls"));
+}
+
+// ============================================================================
+// Standard Right Info Card & Modal Dialog Builders
+// ============================================================================
 void PopulateRightInfoCard(uint8_t* mm, int8_t page,
                            const std::vector<ResolvedEntry>& entries, int selVisIdx,
                            ui::MenuInfoCard& card)
 {
-    const auto& th   = ui::Theme();
-    const bool inGame = (sdk::InGame(mm) != 0);
+    const auto& th    = ui::Theme();
+    const bool inGame = sdk::IsInGame(mm);
 
-    // 1. STATS PAGE (page == 0): Live scrollable GTA SA statistics for selected category
-    if (page == 0) {
+    // 1. STATS PAGE (page == 0): Live scrollable GTA SA statistics
+    if (page == 0 && inGame) {
         int cat = 0;
         if (selVisIdx >= 0 && selVisIdx < static_cast<int>(entries.size()) && !entries[selVisIdx].uiItem.isBack) {
             cat = std::clamp(entries[selVisIdx].rawIndex, 0, 7);
@@ -805,7 +1386,7 @@ void PopulateRightInfoCard(uint8_t* mm, int8_t page,
         const auto* ped = sa::FindPlayerPed(0);
         const auto* bus = modbus::GetBus();
         card.SetHeader(ui::Loc("ПРОФИЛЬ ПЕРСОНАЖА", "PLAYER OVERVIEW"),
-                       integrations::sacoop::IsInMultiplayer() ? "SA-COOP" : ui::Loc("СЮЖЕТ", "STORY"));
+                       integrations::sacoop::IsMultiplayerSessionActive() ? "SA-COOP" : ui::Loc("СЮЖЕТ", "STORY"));
 
         if (bus && bus->progressionInstalled) {
             int rank  = std::max(1, bus->playerRank);
@@ -857,17 +1438,17 @@ void PopulateRightInfoCard(uint8_t* mm, int8_t page,
         }
 
         if (selVisIdx >= 0 && selVisIdx < static_cast<int>(entries.size())) {
-            std::string desc = GetEntryDescription(entries[selVisIdx].actionType, entries[selVisIdx].gxtKey, page);
+            std::string desc = GetEntryDescription(entries[selVisIdx].actionType, entries[selVisIdx].gxtKey, page, inGame);
             if (!desc.empty()) card.SetFooterNote(desc);
         }
         return;
     }
 
-    // 4. ALL OTHER PAGES (Title Menu, Start Game, Options, Audio, Display, Controls, Language)
+    // 4. ALL OTHER PAGES (Title Menu, Start Game, Options, Audio, Display, Advanced, Controls, Language)
     if (selVisIdx >= 0 && selVisIdx < static_cast<int>(entries.size())) {
         const auto& cur = entries[selVisIdx];
-        card.SetHeader(cur.uiItem.labelGame, GetPageHeaderTitle(page));
-        std::string desc = GetEntryDescription(cur.actionType, cur.gxtKey, page);
+        card.SetHeader(cur.uiItem.labelGame, GetPageHeaderTitle(page, mm));
+        std::string desc = GetEntryDescription(cur.actionType, cur.gxtKey, page, inGame);
         if (!desc.empty()) {
             card.SetDescription(desc);
         }
@@ -881,18 +1462,35 @@ void PopulateRightInfoCard(uint8_t* mm, int8_t page,
             card.AddRow(ui::Loc("Текущее значение", "Current Value"), cur.uiItem.valueGame, cur.uiItem.valueColor);
         }
 
+        // Show Widescreen Fix live status block on Advanced Display (page 27)
+        if (page == 27 && integrations::widescreen::IsLoaded()) {
+            const auto& wsf = integrations::widescreen::GetIniSummary();
+            if (wsf.loaded) {
+                card.AddRow("Widescreen Fix", ui::Loc("Активен", "Active"), th.textSuccess);
+                card.AddRow("SMAA",
+                            wsf.smaa ? ui::Loc("ВКЛ", "ON") : ui::Loc("ВЫКЛ", "OFF"),
+                            wsf.smaa ? th.textSuccess : th.textCol);
+                if (wsf.menuFrameLimit > 0) {
+                    char mfl[24];
+                    std::snprintf(mfl, sizeof(mfl), "%d FPS", wsf.menuFrameLimit);
+                    card.AddRow(ui::Loc("Лимит FPS меню", "Menu FPS Cap"), mfl, th.textNormal);
+                }
+            }
+        }
+
         if (page == 34 && !inGame) {
-            card.AddRow(ui::Loc("Режим", "Mode"),
-                        integrations::sacoop::IsLoaded()
-                            ? ui::Loc("Одиночная и SA-COOP", "Singleplayer and SA-COOP")
-                            : ui::Loc("Одиночная игра", "Singleplayer"),
-                        th.textCol);
+            card.AddRow(ui::Loc("Одиночная игра", "Singleplayer"),
+                        ui::Loc("Вкладка Начать игру", "Start Game tab"), th.textNormal);
+            if (integrations::sacoop::IsLoaded()) {
+                card.AddRow(ui::Loc("Сетевая игра", "Multiplayer"),
+                            ui::Loc("Вкладка Мультиплеер", "Multiplayer tab"), th.textSuccess);
+            }
             card.AddRow(ui::Loc("Язык интерфейса", "UI Language"),
                         ui::UseRussianFlag() ? ui::Loc("Русский", "Russian") : std::string("English"),
-                        th.textNormal);
+                        th.textCol);
         }
     } else {
-        card.SetHeader(GetPageHeaderTitle(page));
+        card.SetHeader(GetPageHeaderTitle(page, mm));
     }
 }
 
@@ -901,19 +1499,25 @@ void BuildModalDialog(int8_t page, const std::vector<ResolvedEntry>& entries,
 {
     modal.SetTitle(GetPageHeaderTitle(page)).ClearButtons();
 
-    // Use clean crisp localized modal prompt for known dialogs (avoid raw ALL-CAPS GXT walls)
     std::string prompt;
     switch (page) {
         case 35: prompt = ui::Loc("Вы действительно хотите выйти из игры? Несохраненный прогресс будет потерян.",
                                   "Are you sure you want to quit? Any unsaved progress will be lost."); break;
         case 6:  prompt = ui::Loc("Начать новую игру? Текущий несохраненный прогресс будет потерян.",
                                   "Start a new game? Any unsaved progress will be lost."); break;
-        case 8:  prompt = ui::Loc("Загрузить выбранное сохранение? Несохраненный прогресс будет потерян.",
+        case 8:  prompt = ui::Loc("Загрузить выбранную миссию? Несохраненный прогресс будет потерян.",
+                                  "Load the selected mission? Unsaved progress will be lost."); break;
+        case 11: prompt = ui::Loc("Загрузить выбранное сохранение? Несохраненный прогресс будет потерян.",
                                   "Load the selected save game? Unsaved progress will be lost."); break;
-        case 11: prompt = ui::Loc("Удалить выбранное сохранение без возможности восстановления?",
+        case 12: prompt = ui::Loc("Удалить выбранное сохранение без возможности восстановления?",
                                   "Permanently delete this saved game?"); break;
+        case 15: prompt = ui::Loc("Выбранное сохранение успешно удалено.",
+                                  "The selected save file has been deleted."); break;
         case 17: prompt = ui::Loc("Перезаписать существующее сохранение в этом слоте?",
                                   "Overwrite the existing saved game in this slot?"); break;
+        case 19:
+        case 20:
+        case 21: prompt = ui::Loc("Игра успешно сохранена.", "Game saved successfully."); break;
         case 23:
         case 24:
         case 25: prompt = ui::Loc("Сбросить параметры этого раздела к стандартным значениям?",
@@ -936,28 +1540,44 @@ void BuildModalDialog(int8_t page, const std::vector<ResolvedEntry>& entries,
 }
 
 void ActivateTopTab(uint8_t* mm, int tabIdx) {
-    const bool inGame = (sdk::InGame(mm) != 0);
-    int8_t target = -1;
-    if (inGame) {
-        if (tabIdx >= 0 && tabIdx < static_cast<int>(std::size(kPauseTabs))) {
-            target = kPauseTabs[tabIdx].targetPage;
+    const bool inGame = sdk::IsInGame(mm);
+    int tabCount = 0;
+    const TopTabDef* tabs = GetActiveTabs(inGame, tabCount);
+    if (tabIdx < 0 || tabIdx >= tabCount) return;
+
+    const int8_t target = tabs[tabIdx].targetPage;
+    if (target == kPageMultiplayer) {
+        if (inGame || !integrations::sacoop::IsLoaded()) return;
+        if (!g_st.inMultiplayerTab) {
+            g_st.inMultiplayerTab = true;
+            g_st.textEditActive   = false;
+            g_st.mpCfgLoaded      = false;
+            g_st.mpStatusMsg.clear();
+            sa::PlayFrontendSound(sa::SFX_SELECT);
         }
-    } else {
-        if (tabIdx >= 0 && tabIdx < static_cast<int>(std::size(kMainTabs))) {
-            target = kMainTabs[tabIdx].targetPage;
-        }
+        return;
     }
-    if (target < 0 || target == sdk::CurrentPage(mm)) return;
+
+    const bool wasMp = g_st.inMultiplayerTab;
+    g_st.inMultiplayerTab = false;
+    g_st.textEditActive   = false;
+
+    if (!wasMp && target == sdk::CurrentPage(mm)) return;
+    if (sdk::CurrentPage(mm) == 38) {
+        sdk::CancelKeybindCapture(mm);
+    }
     sa::PlayFrontendSound(sa::SFX_SELECT);
     sdk::NavigateToPage(mm, target);
 }
 
 void CycleTopTab(uint8_t* mm, int delta) {
-    const bool inGame = (sdk::InGame(mm) != 0);
-    const int  count  = inGame ? static_cast<int>(std::size(kPauseTabs))
-                               : static_cast<int>(std::size(kMainTabs));
-    int cur = GetActiveTopTabIndex(inGame, sdk::CurrentPage(mm));
-    int nxt = (cur + delta + count) % count;
+    const bool inGame = sdk::IsInGame(mm);
+    int tabCount = 0;
+    GetActiveTabs(inGame, tabCount);
+    if (tabCount <= 1) return;
+    int8_t eff = SanitizeAndGetEffectivePage(mm);
+    int cur = GetActiveTopTabIndex(inGame, eff);
+    int nxt = (cur + delta + tabCount) % tabCount;
     ActivateTopTab(mm, nxt);
 }
 
@@ -970,8 +1590,13 @@ bool ShouldPassThrough(uint8_t* mm) {
     if (!mm || !g_cfg.enableModernMenu) return true;
     if (sdk::LoadingScreenFlag(mm) != 0) return true;
     int8_t page = sdk::CurrentPage(mm);
-    // Preserve native Redefine Controls (38) and ModLoader's Mod Configuration (43)
-    if (page == 38 || page == 43 || page < 0 || page >= sdk::MAX_MENU_PAGES) return true;
+    // CRITICAL: Pages 13 (LOAD_FIRST_SAVE), 14 (DELETE_FIRST_SAVE), and 18 (SAVE_WRITE)
+    // execute the actual save/load/delete engine routines inside CMenuManager::DrawStandardMenus!
+    // Page 43 is ModLoader's Mod Configuration menu.
+    if (page == 13 || page == 14 || page == 18 || page == 43 ||
+        page < 0 || page >= sdk::MAX_MENU_PAGES) {
+        return true;
+    }
     return false;
 }
 
@@ -981,16 +1606,17 @@ void ResetMenuUiState() {
 
 void RenderModernMenu(uint8_t* mm, FnDrawBackground origDrawBg) {
     ui::SyncFromSharedBus();
+    EnsureCoopHookedOnce();
 
     if (ShouldPassThrough(mm)) {
         if (origDrawBg) origDrawBg(mm);
         return;
     }
 
-    const int8_t page    = sdk::CurrentPage(mm);
-    const bool   inGame  = (sdk::InGame(mm) != 0);
-    const bool   hasTabs = ShouldShowTopTabs(mm, page);
-    const std::string crumb = GetPageBreadcrumb(inGame, page);
+    const int8_t page    = SanitizeAndGetEffectivePage(mm);
+    const bool   inGame  = sdk::IsInGame(mm);
+    const bool   hasTabs = ShouldShowTopTabs(page);
+    const std::string crumb = GetPageBreadcrumb(inGame, page, mm);
     const auto m = ui::ComputeMenuShellMetrics(hasTabs, !crumb.empty());
     if (m.sw < 100.0f || m.sh < 100.0f) {
         if (origDrawBg) origDrawBg(mm);
@@ -999,9 +1625,10 @@ void RenderModernMenu(uint8_t* mm, FnDrawBackground origDrawBg) {
 
     float mx = 0.0f, my = 0.0f;
     SyncCursorPosition(mm, m.sw, m.sh, mx, my);
+    const bool coopOverlay = IsSaCoopOverlayBlockingInput();
 
-    // 1. INTERACTIVE MAP PAGE (page == 5): Native full-screen map framed by Top Bar + Footer
-    if (page == 5) {
+    // 1. INTERACTIVE MAP PAGE (page == 5, strictly in-game only!)
+    if (page == 5 && inGame) {
         sdk::DrawMapNative(mm);
         ui::RenderMenuBackdrop(0, true);
 
@@ -1016,13 +1643,11 @@ void RenderModernMenu(uint8_t* mm, FnDrawBackground origDrawBg) {
             ui::Loc("Q/E - ВКЛАДКИ   BACKSPACE - НАЗАД", "Q/E - TABS   BACKSPACE - BACK"));
         footer.Render();
 
-        if (!IsSaCoopCursorOverlayOpen()) {
-            ui::RenderMenuCursor(mx, my);
-        }
+        if (!coopOverlay) ui::RenderMenuCursor(mx, my);
         return;
     }
 
-    // 2. BACKDROP (Classic Title Art + sleek scrim when in Title Menu; dark scrim over live world in Pause)
+    // 2. BACKDROP
     if (!inGame && g_cfg.showClassicTitleArt) {
         sdk::DrawTitleBackgroundArt(mm, m.sw, m.sh);
     }
@@ -1035,8 +1660,113 @@ void RenderModernMenu(uint8_t* mm, FnDrawBackground origDrawBg) {
     BuildTopBar(mm, page, hasTabs, crumb, topBar);
     topBar.Render();
 
-    // 4. BRIEF PAGE (page == 2): Clean full-width scrollable mission/notification log
-    if (page == 2) {
+    // 4. DEDICATED SA-COOP MULTIPLAYER TAB (Main Menu only!)
+    if (page == kPageMultiplayer && !inGame) {
+        auto mpItems = BuildMultiplayerItems();
+        int count = static_cast<int>(mpItems.size());
+        g_st.mpSelected = std::clamp(g_st.mpSelected, 0, std::max(0, count - 1));
+
+        ui::MenuOptionList leftList;
+        leftList.SetBounds(m.frameX, m.contentY, m.leftColW, m.contentH);
+        int maxVis = leftList.GetMaxVisibleRows();
+        if (g_st.mpSelected < g_st.mpScroll) g_st.mpScroll = g_st.mpSelected;
+        if (g_st.mpSelected >= g_st.mpScroll + maxVis) g_st.mpScroll = g_st.mpSelected - maxVis + 1;
+        g_st.mpScroll = std::clamp(g_st.mpScroll, 0, std::max(0, count - maxVis));
+
+        char badge[24];
+        std::snprintf(badge, sizeof(badge), "%d / %d", g_st.mpSelected + 1, count);
+        leftList.SetHeader(GetPageHeaderTitle(kPageMultiplayer), badge)
+                .SetSelection(g_st.mpSelected, g_st.hoveredRow)
+                .SetScrollOffset(g_st.mpScroll)
+                .ClearItems();
+        for (const auto& it : mpItems) leftList.AddItem(it);
+        leftList.Render();
+
+        ui::MenuInfoCard rightCard;
+        rightCard.SetBounds(m.rightColX, m.contentY, m.rightColW, m.contentH);
+        PopulateMultiplayerRightCard(g_st.mpSelected, rightCard);
+        rightCard.Render();
+
+        ui::MenuFooterBar footer;
+        footer.SetHints(
+            ui::Loc("W/S/КОЛЕСО - СПИСОК   A/D - ИЗМЕНИТЬ   ЛКМ/F/ENTER - ВЫБРАТЬ",
+                    "W/S/WHEEL - LIST   A/D - ADJUST   LMB/F/ENTER - SELECT"),
+            ui::Loc("Q/E - ВКЛАДКИ   ПКМ/BACKSPACE - НАЗАД", "Q/E - TABS   RMB/BACKSPACE - BACK"));
+        footer.Render();
+
+        if (g_st.textEditActive) {
+            RenderMpTextEditModal();
+        }
+        if (!coopOverlay) ui::RenderMenuCursor(mx, my);
+        return;
+    }
+
+    // 5. MODERNIZED REDEFINE CONTROLS (page == 38)
+    if (page == 38) {
+        const bool isVeh     = (sdk::ControlSubMode(mm) != 0);
+        const bool isJoy     = (sdk::ControlMethod(mm) != 0);
+        const bool capturing = sdk::IsWaitingForKeybind(mm);
+        auto rows = sdk::BuildControlRows(isVeh, isJoy);
+        int count = static_cast<int>(rows.size());
+        int sel   = std::clamp(sdk::SelectedControlRow(mm), 0, std::max(0, count - 1));
+        sdk::SelectedControlRow(mm) = sel;
+        if (sel >= 0 && sel < count) {
+            sdk::KeybindActionId(mm)   = rows[sel].actionId;
+            sdk::KeybindActiveFlag(mm) = capturing ? 1 : 0;
+        }
+
+        ui::MenuOptionList leftList;
+        leftList.SetBounds(m.frameX, m.contentY, m.leftColW, m.contentH);
+        int maxVis = leftList.GetMaxVisibleRows();
+        if (sel < g_st.controlsScroll) g_st.controlsScroll = sel;
+        if (sel >= g_st.controlsScroll + maxVis) g_st.controlsScroll = sel - maxVis + 1;
+        g_st.controlsScroll = std::clamp(g_st.controlsScroll, 0, std::max(0, count - maxVis));
+
+        char badge[32];
+        std::snprintf(badge, sizeof(badge), "%d / %d", sel + 1, count);
+        leftList.SetHeader(GetPageHeaderTitle(38, mm), badge)
+                .SetSelection(sel, g_st.hoveredRow)
+                .SetScrollOffset(g_st.controlsScroll)
+                .ClearItems();
+
+        const auto& th = ui::Theme();
+        for (int i = 0; i < count; ++i) {
+            ui::MenuOptionItem it{};
+            it.labelGame   = ui::Loc(rows[i].rusLabel, rows[i].engLabel);
+            it.isCapturing = (capturing && i == sel);
+            it.valueGame   = it.isCapturing
+                                 ? ui::Loc("НАЖМИТЕ КЛАВИШУ...", "PRESS A KEY...")
+                                 : FormatControlRowKeysSummary(rows[i].actionId);
+            it.valueColor  = it.isCapturing ? th.textWarning : th.textCol;
+            it.enabled     = true;
+            leftList.AddItem(it);
+        }
+        leftList.Render();
+
+        ui::MenuInfoCard rightCard;
+        rightCard.SetBounds(m.rightColX, m.contentY, m.rightColW, m.contentH);
+        PopulateControlsRightCard(mm, rows, sel, rightCard);
+        rightCard.Render();
+
+        ui::MenuFooterBar footer;
+        if (capturing) {
+            footer.SetHints(
+                ui::Loc("НАЖМИТЕ НОВУЮ КЛАВИШУ ИЛИ КНОПКУ МЫШИ", "PRESS NEW KEY OR MOUSE BUTTON"),
+                ui::Loc("BACKSPACE - ОЧИСТИТЬ   ESC - ОТМЕНА", "BACKSPACE - CLEAR   ESC - CANCEL"));
+        } else {
+            footer.SetHints(
+                ui::Loc("W/S/КОЛЕСО - СПИСОК   ЛКМ/ENTER - НАЗНАЧИТЬ   TAB - РЕЖИМ",
+                        "W/S/WHEEL - LIST   LMB/ENTER - BIND   TAB - MODE"),
+                ui::Loc("ПКМ/BACKSPACE - НАЗАД", "RMB/BACKSPACE - BACK"));
+        }
+        footer.Render();
+
+        if (!coopOverlay) ui::RenderMenuCursor(mx, my);
+        return;
+    }
+
+    // 6. BRIEF PAGE (page == 2, in-game only!)
+    if (page == 2 && inGame) {
         auto briefs = sdk::ReadPreviousBriefs(20);
         constexpr int kPerView = 6;
         int maxScr = std::max(0, static_cast<int>(briefs.size()) - kPerView);
@@ -1069,19 +1799,17 @@ void RenderModernMenu(uint8_t* mm, FnDrawBackground origDrawBg) {
             ui::Loc("BACKSPACE/ПКМ - НАЗАД", "BACKSPACE/RMB - BACK"));
         footer.Render();
 
-        if (!IsSaCoopCursorOverlayOpen()) {
-            ui::RenderMenuCursor(mx, my);
-        }
+        if (!coopOverlay) ui::RenderMenuCursor(mx, my);
         return;
     }
 
-    // 5. EXTRACT DYNAMIC PAGE ENTRIES FROM aScreens[page]
+    // 7. EXTRACT DYNAMIC PAGE ENTRIES FROM aScreens[page]
     std::vector<ResolvedEntry> entries;
     std::string staticPrompt;
     BuildPageEntries(mm, page, entries, staticPrompt);
     int selVisIdx = FindVisibleIndexForRaw(entries, sdk::SelectedItem(mm));
 
-    // 6. CENTERED MODAL CONFIRMATION / NOTICE PAGES
+    // 8. CENTERED MODAL CONFIRMATION / NOTICE PAGES
     if (IsModalPage(page)) {
         ui::MenuConfirmModal modal;
         BuildModalDialog(page, entries, staticPrompt, selVisIdx, modal);
@@ -1093,16 +1821,14 @@ void RenderModernMenu(uint8_t* mm, FnDrawBackground origDrawBg) {
             ui::Loc("ПКМ/BACKSPACE - ОТМЕНА", "RMB/BACKSPACE - CANCEL"));
         footer.Render();
 
-        if (!IsSaCoopCursorOverlayOpen()) {
-            ui::RenderMenuCursor(mx, my);
-        }
+        if (!coopOverlay) ui::RenderMenuCursor(mx, my);
         return;
     }
 
-    // 7. STANDARD DEFINITIVE-EDITION TWO-COLUMN CONTENT LAYOUT
+    // 9. STANDARD DEFINITIVE-EDITION TWO-COLUMN CONTENT LAYOUT
     ui::MenuOptionList leftList;
     leftList.SetBounds(m.frameX, m.contentY, m.leftColW, m.contentH)
-            .SetHeader(GetPageHeaderTitle(page))
+            .SetHeader(GetPageHeaderTitle(page, mm))
             .SetSelection(selVisIdx, g_st.hoveredRow)
             .ClearItems();
     for (const auto& e : entries) {
@@ -1115,7 +1841,7 @@ void RenderModernMenu(uint8_t* mm, FnDrawBackground origDrawBg) {
     PopulateRightInfoCard(mm, page, entries, selVisIdx, rightCard);
     rightCard.Render();
 
-    // 8. MINIMALIST BOTTOM FOOTER BAR
+    // 10. MINIMALIST BOTTOM FOOTER BAR
     ui::MenuFooterBar footer;
     std::string leftHint;
     if (page == 3 || page == 4 || page == 27 || page == 39 || page == 40 || page == 26) {
@@ -1132,13 +1858,12 @@ void RenderModernMenu(uint8_t* mm, FnDrawBackground origDrawBg) {
     footer.SetHints(leftHint, rightHint);
     footer.Render();
 
-    if (!IsSaCoopCursorOverlayOpen()) {
-        ui::RenderMenuCursor(mx, my);
-    }
+    if (!coopOverlay) ui::RenderMenuCursor(mx, my);
 }
 
 void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
     ui::SyncFromSharedBus();
+    EnsureCoopHookedOnce();
 
     if (ShouldPassThrough(mm)) {
         g_st.draggingSlider = false;
@@ -1146,10 +1871,16 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         return;
     }
 
-    const uint32_t now = GetTickCount();
-    const int8_t   page = sdk::CurrentPage(mm);
-    const bool     inGame = (sdk::InGame(mm) != 0);
-    const bool     hasTabs = ShouldShowTopTabs(mm, page);
+    const uint32_t now    = GetTickCount();
+    const int8_t   page   = SanitizeAndGetEffectivePage(mm);
+    const bool     inGame = sdk::IsInGame(mm);
+    const bool     hasTabs = ShouldShowTopTabs(page);
+
+    // While waiting for a native keybind on page 38, hand full control to GTA SA's CheckRedefineControlInput!
+    if (page == 38 && sdk::IsWaitingForKeybind(mm)) {
+        if (origUserInput) origUserInput(mm);
+        return;
+    }
 
     // Helper: sample edge-triggered keys cleanly
     auto keyDown = [](int vk) -> bool { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
@@ -1158,6 +1889,8 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
     const bool enter = keyDown(VK_RETURN);
     const bool keyF  = keyDown('F');
     const bool back  = keyDown(VK_BACK);
+    const bool esc   = keyDown(VK_ESCAPE);
+    const bool tab   = keyDown(VK_TAB);
     const bool up    = keyDown(VK_UP)    || keyDown('W');
     const bool down  = keyDown(VK_DOWN)  || keyDown('S');
     const bool left  = keyDown(VK_LEFT)  || keyDown('A');
@@ -1172,6 +1905,8 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
     const bool justEnter = enter && !g_st.prevEnter;
     const bool justF     = keyF  && !g_st.prevF;
     const bool justBack  = back  && !g_st.prevBack;
+    const bool justEsc   = esc   && !g_st.prevEsc;
+    const bool justTab   = tab   && !g_st.prevTab;
     const bool justUp    = up    && !g_st.prevUp;
     const bool justDown  = down  && !g_st.prevDown;
     const bool justLeft  = left  && !g_st.prevLeft;
@@ -1181,7 +1916,6 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
     const bool justPgUp  = pgUp  && !g_st.prevPgUp;
     const bool justPgDn  = pgDn  && !g_st.prevPgDn;
 
-    // Repeat vertical/horizontal hold after 340ms initial delay every 95ms
     bool repUp = justUp, repDown = justDown, repLeft = justLeft, repRight = justRight;
     if (up || down || left || right) {
         if (justUp || justDown || justLeft || justRight) {
@@ -1202,6 +1936,8 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         g_st.prevEnter = enter;
         g_st.prevF     = keyF;
         g_st.prevBack  = back;
+        g_st.prevEsc   = esc;
+        g_st.prevTab   = tab;
         g_st.prevUp    = up;
         g_st.prevDown  = down;
         g_st.prevLeft  = left;
@@ -1212,28 +1948,29 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         g_st.prevPgDn  = pgDn;
     };
 
-    // Detect menu open / reopen (including after native Esc close!) or page change
     const bool justReopened = (!g_st.wasMenuActive || (now - g_st.lastTickMs) > 250u);
     g_st.lastTickMs = now;
     if (justReopened) {
-        g_st.wasMenuActive   = true;
-        g_st.openedAtMs      = now;
-        g_st.lastPage        = page;
-        g_st.draggingSlider  = false;
-        g_st.hoveredTab      = -1;
-        g_st.hoveredRow      = -1;
-        g_st.hoveredModalBtn = -1;
+        g_st.wasMenuActive    = true;
+        g_st.openedAtMs       = now;
+        g_st.lastPage         = page;
+        g_st.draggingSlider   = false;
+        g_st.hoveredTab       = -1;
+        g_st.hoveredRow       = -1;
+        g_st.hoveredModalBtn  = -1;
+        g_st.textEditActive   = false;
         commitPrevKeys();
         return;
     }
     if (page != g_st.lastPage) {
-        g_st.lastPage       = page;
-        g_st.draggingSlider = false;
-        g_st.hoveredRow     = -1;
+        g_st.lastPage        = page;
+        g_st.draggingSlider  = false;
+        g_st.hoveredRow      = -1;
         g_st.hoveredModalBtn = -1;
-        g_st.statsScroll    = 0;
-        g_st.briefScroll    = 0;
-        g_st.lastInputMs    = now;
+        g_st.statsScroll     = 0;
+        g_st.briefScroll     = 0;
+        g_st.controlsScroll  = 0;
+        g_st.lastInputMs     = now;
         commitPrevKeys();
         return;
     }
@@ -1242,7 +1979,7 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         g_st.draggingSlider = false;
     }
 
-    if (!integrations::sacoop::IsGameWindowFocused() || IsSaCoopCursorOverlayOpen()) {
+    if (!integrations::sacoop::IsGameWindowFocused() || IsSaCoopOverlayBlockingInput()) {
         g_st.draggingSlider = false;
         commitPrevKeys();
         return;
@@ -1252,12 +1989,18 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         return;
     }
 
-    const std::string crumb = GetPageBreadcrumb(inGame, page);
+    // Inline text-input modal inside Multiplayer tab captures keyboard exclusively!
+    if (page == kPageMultiplayer && g_st.textEditActive) {
+        HandleMpTextEditInput();
+        commitPrevKeys();
+        return;
+    }
+
+    const std::string crumb = GetPageBreadcrumb(inGame, page, mm);
     const auto m = ui::ComputeMenuShellMetrics(hasTabs, !crumb.empty());
     float mx = 0.0f, my = 0.0f;
     SyncCursorPosition(mm, m.sw, m.sh, mx, my);
 
-    // Mouse wheel from GTA SA's DirectInput mouse state
     auto* ms = sa::GetNewMouseState();
     const bool wheelUp   = ms && (ms->wheelUp != 0);
     const bool wheelDown = ms && (ms->wheelDown != 0);
@@ -1285,8 +2028,131 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         }
     }
 
-    // 2. INTERACTIVE MAP PAGE (page == 5): Forward non-topbar input directly to native GTA SA Map!
-    if (page == 5) {
+    // 2. DEDICATED SA-COOP MULTIPLAYER TAB INPUT (Main Menu only!)
+    if (page == kPageMultiplayer && !inGame) {
+        auto mpItems = BuildMultiplayerItems();
+        int count = static_cast<int>(mpItems.size());
+
+        ui::MenuOptionList leftList;
+        leftList.SetBounds(m.frameX, m.contentY, m.leftColW, m.contentH)
+                .SetHeader(GetPageHeaderTitle(kPageMultiplayer))
+                .SetScrollOffset(g_st.mpScroll)
+                .ClearItems();
+        for (const auto& it : mpItems) leftList.AddItem(it);
+
+        const int prevHover = g_st.hoveredRow;
+        g_st.hoveredRow = leftList.HitTestRow(mx, my);
+        if (g_st.hoveredRow >= 0 && g_st.hoveredRow != prevHover && g_st.hoveredRow < count) {
+            if (g_st.hoveredRow != g_st.mpSelected) {
+                g_st.mpSelected = g_st.hoveredRow;
+                sa::PlayFrontendSound(sa::SFX_SCROLL);
+            }
+        }
+
+        if (repUp || wheelUp) {
+            g_st.mpSelected = (g_st.mpSelected - 1 + count) % count;
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        } else if (repDown || wheelDown) {
+            g_st.mpSelected = (g_st.mpSelected + 1) % count;
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        }
+
+        if (repLeft || repRight) {
+            AdjustMultiplayerRow(g_st.mpSelected, repRight ? 1 : -1, false);
+        } else if (justEnter || justF || (justLmb && g_st.hoveredRow >= 0)) {
+            int tgt = (justLmb && g_st.hoveredRow >= 0) ? g_st.hoveredRow : g_st.mpSelected;
+            g_st.mpSelected = tgt;
+            AdjustMultiplayerRow(tgt, 1, true);
+        } else if (justBack || justRmb) {
+            g_st.inMultiplayerTab = false;
+            sa::PlayFrontendSound(sa::SFX_BACK);
+            sdk::NavigateToPage(mm, 34);
+        }
+        commitPrevKeys();
+        return;
+    }
+
+    // 3. MODERNIZED REDEFINE CONTROLS INPUT (page == 38)
+    if (page == 38) {
+        const bool isVeh = (sdk::ControlSubMode(mm) != 0);
+        const bool isJoy = (sdk::ControlMethod(mm) != 0);
+        auto rows = sdk::BuildControlRows(isVeh, isJoy);
+        int count = static_cast<int>(rows.size());
+        int sel   = std::clamp(sdk::SelectedControlRow(mm), 0, std::max(0, count - 1));
+
+        // Quick toggle Foot <-> Vehicle right inside Redefine Controls!
+        if (justTab || repLeft || repRight) {
+            sdk::ControlSubMode(mm) = isVeh ? 0 : 1;
+            sdk::SelectedControlRow(mm) = 0;
+            g_st.controlsScroll = 0;
+            sa::PlayFrontendSound(sa::SFX_SELECT);
+            commitPrevKeys();
+            return;
+        }
+
+        ui::MenuOptionList leftList;
+        leftList.SetBounds(m.frameX, m.contentY, m.leftColW, m.contentH)
+                .SetHeader(GetPageHeaderTitle(38, mm))
+                .SetScrollOffset(g_st.controlsScroll)
+                .ClearItems();
+        for (int i = 0; i < count; ++i) {
+            ui::MenuOptionItem it{};
+            it.labelGame = ui::Loc(rows[i].rusLabel, rows[i].engLabel);
+            it.enabled   = true;
+            leftList.AddItem(it);
+        }
+
+        const int prevHover = g_st.hoveredRow;
+        g_st.hoveredRow = leftList.HitTestRow(mx, my);
+        if (g_st.hoveredRow >= 0 && g_st.hoveredRow != prevHover && g_st.hoveredRow < count) {
+            if (g_st.hoveredRow != sel) {
+                sel = g_st.hoveredRow;
+                sdk::SelectedControlRow(mm) = sel;
+                sa::PlayFrontendSound(sa::SFX_SCROLL);
+            }
+        }
+
+        if (repUp || wheelUp) {
+            sel = (sel - 1 + count) % count;
+            sdk::SelectedControlRow(mm) = sel;
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        } else if (repDown || wheelDown) {
+            sel = (sel + 1) % count;
+            sdk::SelectedControlRow(mm) = sel;
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        } else if (justPgUp) {
+            sel = std::max(0, sel - 6);
+            sdk::SelectedControlRow(mm) = sel;
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        } else if (justPgDn) {
+            sel = std::min(count - 1, sel + 6);
+            sdk::SelectedControlRow(mm) = sel;
+            sa::PlayFrontendSound(sa::SFX_SCROLL);
+        }
+
+        if ((justEnter || justF || (justLmb && g_st.hoveredRow >= 0)) && count > 0) {
+            int tgt = (justLmb && g_st.hoveredRow >= 0) ? g_st.hoveredRow : sel;
+            if (tgt >= 0 && tgt < count) {
+                sdk::BeginKeybindCapture(mm, tgt, rows[tgt].actionId);
+                sa::PlayFrontendSound(sa::SFX_SELECT);
+            }
+            commitPrevKeys();
+            return;
+        }
+        if (justBack || justRmb) {
+            sdk::CancelKeybindCapture(mm);
+            sa::PlayFrontendSound(sa::SFX_BACK);
+            sdk::NavigateToPage(mm, 37);
+            commitPrevKeys();
+            return;
+        }
+        (void)justEsc;
+        commitPrevKeys();
+        return;
+    }
+
+    // 4. INTERACTIVE MAP PAGE (page == 5, in-game only!)
+    if (page == 5 && inGame) {
         if (justBack) {
             sa::PlayFrontendSound(sa::SFX_BACK);
             sdk::ProcessUserInput(mm, 0, 0, 0, 1, 0);
@@ -1298,8 +2164,8 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         return;
     }
 
-    // 3. BRIEF PAGE (page == 2): Scroll recent brief entries, Back returns to Pause
-    if (page == 2) {
+    // 5. BRIEF PAGE (page == 2, in-game only!)
+    if (page == 2 && inGame) {
         auto briefs = sdk::ReadPreviousBriefs(20);
         int maxScr = std::max(0, static_cast<int>(briefs.size()) - 6);
         if (repUp || wheelUp) {
@@ -1321,7 +2187,7 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         return;
     }
 
-    // 4. EXTRACT CURRENT PAGE ENTRIES
+    // 6. EXTRACT CURRENT PAGE ENTRIES
     std::vector<ResolvedEntry> entries;
     std::string staticPrompt;
     BuildPageEntries(mm, page, entries, staticPrompt);
@@ -1330,7 +2196,7 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         sdk::SelectedItem(mm) = entries[selVisIdx].rawIndex;
     }
 
-    // 5. MODAL CONFIRMATION / NOTICE PAGES
+    // 7. MODAL CONFIRMATION / NOTICE PAGES
     if (IsModalPage(page)) {
         ui::MenuConfirmModal modal;
         BuildModalDialog(page, entries, staticPrompt, selVisIdx, modal);
@@ -1369,24 +2235,22 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         return;
     }
 
-    // 6. STANDARD TWO-COLUMN OPTION / STATS / SAVE-LOAD PAGES
+    // 8. STANDARD TWO-COLUMN OPTION / STATS / SAVE-LOAD PAGES
     ui::MenuOptionList leftList;
     leftList.SetBounds(m.frameX, m.contentY, m.leftColW, m.contentH)
-            .SetHeader(GetPageHeaderTitle(page))
+            .SetHeader(GetPageHeaderTitle(page, mm))
             .SetSelection(selVisIdx, g_st.hoveredRow)
             .ClearItems();
     for (const auto& e : entries) {
         leftList.AddItem(e.uiItem);
     }
 
-    // Active mouse slider drag
     if (g_st.draggingSlider && lmb) {
         int dragVis = FindVisibleIndexForRaw(entries, g_st.dragRawItem);
         float frac = 0.0f;
         if (dragVis >= 0 && leftList.HitTestSlider(dragVis, mx, my, frac)) {
             ApplySliderTargetFrac(mm, g_st.dragRawItem, g_st.dragActionType, frac);
         } else if (dragVis >= 0) {
-            // Allow horizontal dragging even if cursor drifts slightly vertically off the row
             const float padX = 8.5f * m.xScale;
             const float barW = std::min(84.0f * m.xScale, m.leftColW * 0.36f);
             const float barX = m.frameX + m.leftColW - padX - barW;
@@ -1397,7 +2261,6 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         return;
     }
 
-    // Hover hit-test on left list
     const int prevHover = g_st.hoveredRow;
     g_st.hoveredRow = leftList.HitTestRow(mx, my);
     if (g_st.hoveredRow >= 0 && g_st.hoveredRow != prevHover && g_st.hoveredRow < static_cast<int>(entries.size())) {
@@ -1408,7 +2271,6 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         }
     }
 
-    // Helper: move selection to next enabled row
     auto stepSelection = [&](int dir) {
         const int n = static_cast<int>(entries.size());
         if (n <= 1) return;
@@ -1422,23 +2284,21 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         }
     };
 
-    // Mouse wheel over right card on Stats page scrolls stats; otherwise scrolls left list!
     const bool overRightCard = (mx >= m.rightColX && mx <= m.rightColX + m.rightColW &&
                                 my >= m.contentY && my <= m.contentY + m.contentH);
-    if (page == 0 && (overRightCard && (wheelUp || wheelDown))) {
+    if (page == 0 && inGame && (overRightCard && (wheelUp || wheelDown))) {
         int cat   = (selVisIdx >= 0 && selVisIdx < static_cast<int>(entries.size()) && !entries[selVisIdx].uiItem.isBack)
                         ? std::clamp(entries[selVisIdx].rawIndex, 0, 7) : 0;
         int total = sdk::GetStatCategoryCount(static_cast<uint8_t>(cat));
         int maxS  = std::max(0, total - 10);
-        if (wheelUp && g_st.statsScroll > 0)        { g_st.statsScroll = std::max(0, g_st.statsScroll - 2); sa::PlayFrontendSound(sa::SFX_SCROLL); }
+        if (wheelUp && g_st.statsScroll > 0)          { g_st.statsScroll = std::max(0, g_st.statsScroll - 2); sa::PlayFrontendSound(sa::SFX_SCROLL); }
         else if (wheelDown && g_st.statsScroll < maxS) { g_st.statsScroll = std::min(maxS, g_st.statsScroll + 2); sa::PlayFrontendSound(sa::SFX_SCROLL); }
     } else {
-        if (repUp || wheelUp)        stepSelection(-1);
+        if (repUp || wheelUp)          stepSelection(-1);
         else if (repDown || wheelDown) stepSelection(+1);
     }
 
-    // Stats page keyboard scrolling (A/D / Left/Right / PgUp/PgDn)
-    if (page == 0) {
+    if (page == 0 && inGame) {
         int cat   = (selVisIdx >= 0 && selVisIdx < static_cast<int>(entries.size()) && !entries[selVisIdx].uiItem.isBack)
                         ? std::clamp(entries[selVisIdx].rawIndex, 0, 7) : 0;
         int total = sdk::GetStatCategoryCount(static_cast<uint8_t>(cat));
@@ -1457,16 +2317,15 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
             }
         }
     } else if (selVisIdx >= 0 && selVisIdx < static_cast<int>(entries.size())) {
-        // Left/Right adjusts native options & sliders (entryType == 12)
         const auto& cur = entries[selVisIdx];
-        if (cur.entryType == 12 && (repLeft || repRight)) {
+        if (cur.entryType == 12 && cur.uiItem.enabled && (repLeft || repRight)) {
             sdk::SelectedItem(mm) = cur.rawIndex;
             sdk::ProcessUserInput(mm, 0, 0, 0, 0, repRight ? 1 : -1);
             sa::PlayFrontendSound(sa::SFX_SCROLL);
         }
     }
 
-    // LMB click on left list (slider direct-click/drag OR row activation)
+    // LMB click on left list
     if (justLmb && g_st.hoveredRow >= 0 && g_st.hoveredRow < static_cast<int>(entries.size())) {
         const auto& clicked = entries[g_st.hoveredRow];
         if (clicked.uiItem.enabled) {
@@ -1483,8 +2342,7 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
             }
             if (clicked.uiItem.isBack) {
                 sdk::ProcessUserInput(mm, 0, 0, 0, 1, 0);
-            } else if (clicked.entryType == 12 && clicked.actionType != 56 && !clicked.uiItem.hasSlider) {
-                // Clicking an option row cycles/toggles it intuitively!
+            } else if (clicked.entryType == 12 && clicked.actionType != 56 && clicked.actionType != 44 && !clicked.uiItem.hasSlider) {
                 sdk::ProcessUserInput(mm, 0, 0, 0, 0, 1);
                 sa::PlayFrontendSound(sa::SFX_SELECT);
             } else {
@@ -1506,7 +2364,7 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
             sdk::SelectedItem(mm) = cur.rawIndex;
             if (cur.uiItem.isBack) {
                 sdk::ProcessUserInput(mm, 0, 0, 0, 1, 0);
-            } else if (cur.entryType == 12 && cur.actionType != 56 && !cur.uiItem.hasSlider) {
+            } else if (cur.entryType == 12 && cur.actionType != 56 && cur.actionType != 44 && !cur.uiItem.hasSlider) {
                 sdk::ProcessUserInput(mm, 0, 0, 0, 0, 1);
                 sa::PlayFrontendSound(sa::SFX_SELECT);
             } else {
@@ -1521,16 +2379,18 @@ void HandleModernMenuInput(uint8_t* mm, FnUserInput origUserInput) {
         }
     }
 
-    // Backspace / RMB: go back cleanly (or resume game if on Pause Root)
+    // Backspace / RMB cancels/goes back cleanly
     if (justBack || justRmb) {
-        if (page == 41 && inGame) {
-            sa::PlayFrontendSound(sa::SFX_BACK);
+        if (inGame && page == 41) {
             sdk::MenuActive(mm) = 0;
             g_st.wasMenuActive  = false;
             ui::TriggerPostCloseShield(220);
+            sa::PlayFrontendSound(sa::SFX_BACK);
         } else if (page != 34) {
             sdk::ProcessUserInput(mm, 0, 0, 0, 1, 0);
         }
+        commitPrevKeys();
+        return;
     }
 
     commitPrevKeys();

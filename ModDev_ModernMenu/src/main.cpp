@@ -7,6 +7,8 @@
 #include "log.hpp"
 #include "common_utils.hpp"
 #include "mod_bus.hpp"
+#include "integrations/sacoop.hpp"
+#include "integrations/widescreen_fix.hpp"
 #include "menu_config.hpp"
 #include "menu_sdk.hpp"
 #include "menu_ui.hpp"
@@ -74,6 +76,14 @@ bool Init(HMODULE hModule) {
     // Ensure shared bus exists & UI language/scale are synced
     modbus::GetBus();
 
+    // Suppress SA-COOP automatic startup popup & apply dark UI Kit theme if coop.asi is already loaded
+    if (g_cfg.enableModernMenu && integrations::sacoop::IsLoaded()) {
+        bool suppressed = integrations::sacoop::SuppressStartupConnectPopup();
+        int  patched    = integrations::sacoop::ApplyDarkUiKitTheme();
+        modlog::Info("SA-COOP integration ready (suppressStartup=%d, themePatches=%d)",
+                     suppressed ? 1 : 0, patched);
+    }
+
     uintptr_t origBg = mem::HookJump(ADDR_DRAW_FRONTEND_TAIL_JMP,
                                      reinterpret_cast<uintptr_t>(&HookedDrawBackground));
     uintptr_t origIn = mem::HookCall(ADDR_PROCESS_USERINPUT_CALL,
@@ -94,8 +104,9 @@ bool Init(HMODULE hModule) {
         g_origMapHelper2 = reinterpret_cast<FnDisplayHelper>(h2);
     }
     g_initialized   = true;
-    modlog::Info("Hooks installed cleanly (origDrawBg=0x%08X, origUserInput=0x%08X)",
-                 static_cast<unsigned>(origBg), static_cast<unsigned>(origIn));
+    modlog::Info("Hooks installed cleanly (origDrawBg=0x%08X, origUserInput=0x%08X, WSF=%d)",
+                 static_cast<unsigned>(origBg), static_cast<unsigned>(origIn),
+                 integrations::widescreen::IsLoaded() ? 1 : 0);
     return true;
 }
 
