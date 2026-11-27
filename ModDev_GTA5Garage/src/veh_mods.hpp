@@ -8,9 +8,10 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "garage_config.hpp"
 #include "log.hpp"
 #include "sa_sdk.hpp"
-#include "ui_menu.hpp"
+#include "ui_kit.hpp"
 
 namespace vehmods {
 
@@ -214,17 +215,14 @@ inline std::string GetPartDisplayName(int16_t modId) {
     if (modId == 1008) return ui::Loc("Нитро 5x", "5x Nitro");
     if (modId == 1010) return ui::Loc("Нитро 10x", "10x Nitro");
     if (modId == 1087) return ui::Loc("Гидравлика", "Hydraulics");
-    if (modId == 1086) return ui::Loc("Аудиосистема (Сабвуфер)", "Stereo / Bass Boost");
+    if (modId == 1086) return ui::Loc("Аудиосистема", "Car Stereo");
 
     auto it = DB().modById.find(modId);
-    if (it != DB().modById.end()) {
-        if (!it->second.gxtKey.empty()) {
-            const char* txt = sa::TextGet(it->second.gxtKey.c_str());
-            if (txt && txt[0] != '\0') return std::string(txt);
-        }
-        return it->second.rawName;
+    if (it != DB().modById.end() && !it->second.gxtKey.empty()) {
+        const char* txt = sa::TextGet(it->second.gxtKey.c_str());
+        if (txt && txt[0] != '\0') return std::string(txt);
     }
-    return "Part #" + std::to_string(modId);
+    return ui::Loc("Деталь", "Part");
 }
 
 inline int GetPartPrice(int16_t modId) {

@@ -8,11 +8,19 @@ namespace tuning {
 struct VehicleStats {
     int topSpeedKmh    = 0;   // Calibrated achievable top speed in km/h
     int topSpeedMph    = 0;   // Calibrated achievable top speed in MPH (matches SA Styled Speedometer!)
-    int accelRating    = 0;   // 0..100+ acceleration score
-    int brakeRating    = 0;   // 0..100+ braking score
-    int handlingRating = 0;   // 0..100+ grip & stability score
+    int accelRating    = 0;   // Base acceleration score (without driver skill bonus)
+    int brakeRating    = 0;   // Base braking score (without driver skill bonus)
+    int handlingRating = 0;   // Base grip & stability score (without driver skill bonus)
     int armorPercent   = 100; // 100%..200% effective durability
     int numGears       = 5;   // Forward gears (1..5; Transmission upgrades increase gear count up to 5!)
+
+    // CJ vehicle skill bonuses (Driving / Bike / Cycling / Flying)
+    int accelSkillBonus    = 0;
+    int accelSkillPct      = 0;
+    int brakeSkillBonus    = 0;
+    int brakeSkillPct      = 0;
+    int handlingSkillBonus = 0;
+    int handlingSkillPct   = 0;
 };
 
 // Apply (or update) all GTA 5 performance tuning + ETS 2 wear penalties to a live CVehicle*

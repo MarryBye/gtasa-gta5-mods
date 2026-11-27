@@ -4,10 +4,12 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include "config.hpp"
+#include "common_utils.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
 #include "mod_bus.hpp"
 #include "sa_sdk.hpp"
+#include "weapon_config.hpp"
 #include "weapon_data.hpp"
 
 namespace wstore {
@@ -66,6 +68,7 @@ public:
 
     void SaveToDisk() const {
         std::string path = BuildFilePath(m_slot);
+        if (path.empty()) return; // Unsaved Singleplayer/Host New Game: keep in RAM until saved to a slot
         FILE* f = std::fopen(path.c_str(), "w");
         if (!f) {
             modlog::Info("[WStore] Failed to write %s", path.c_str());
@@ -111,14 +114,15 @@ public:
         for (int s = 0; s < 13; ++s) m_lastLiveSlotType[s] = 0;
 
         std::string path = BuildFilePath(m_slot, true);
-        if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            modlog::Info("[WStore] No saved weapons yet at %s (fresh slot %d).", path.c_str(), m_slot);
+        if (path.empty() || GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            modlog::Info("[WStore] No saved weapons yet (slot %d) -> starting clean.", m_slot);
             return;
         }
+        const char* p = path.c_str();
         for (int c = 0; c < wdata::kWheelCategoryCount; ++c) {
             char key[24];
             std::snprintf(key, sizeof(key), "Cat_%d", c);
-            m_preferredWeapon[c] = static_cast<uint32_t>(GetPrivateProfileIntA("WheelPreferred", key, 0, path.c_str()));
+            m_preferredWeapon[c] = static_cast<uint32_t>(common::IniReadInt(p, "WheelPreferred", key, 0));
         }
 
         int loaded = 0;
@@ -127,40 +131,42 @@ public:
             if (id == 0) continue;
             char sec[32];
             std::snprintf(sec, sizeof(sec), "Weapon_%u", id);
-            int owned = GetPrivateProfileIntA(sec, "Owned", -1, path.c_str());
+            int owned = common::IniReadInt(p, sec, "Owned", -1);
             if (owned < 0) continue;
 
             wdata::WeaponLoadout L;
             L.owned           = (owned != 0);
-            L.muzzle          = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Muzzle", 0, path.c_str()));
-            L.mag             = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Mag",    0, path.c_str()));
-            L.scope           = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Scope",  0, path.c_str()));
-            L.grip            = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Grip",   0, path.c_str()));
-            L.barrel          = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Barrel", 0, path.c_str()));
-            L.laser           = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Laser",  0, path.c_str()));
-            L.ownedMuzzleMask = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "OwnedMuzzle", 1, path.c_str()) | 1 | (1u << L.muzzle));
-            L.ownedMagMask    = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "OwnedMag",    1, path.c_str()) | 1 | (1u << L.mag));
-            L.ownedScopeMask  = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "OwnedScope",  1, path.c_str()) | 1 | (1u << L.scope));
-            L.ownedGripMask   = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "OwnedGrip",   1, path.c_str()) | 1 | (1u << L.grip));
-            L.ownedBarrelMask = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "OwnedBarrel", 1, path.c_str()) | 1 | (1u << L.barrel));
-            L.ownedLaserMask  = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "OwnedLaser",  1, path.c_str()) | 1 | (1u << L.laser));
-            L.storedAmmo      = GetPrivateProfileIntA(sec, "StoredAmmo", 0, path.c_str());
-            m_loadouts[id] = L;
+            L.muzzle          = static_cast<uint8_t>(common::IniReadInt(p, sec, "Muzzle", 0));
+            L.mag             = static_cast<uint8_t>(common::IniReadInt(p, sec, "Mag",    0));
+            L.scope           = static_cast<uint8_t>(common::IniReadInt(p, sec, "Scope",  0));
+            L.grip            = static_cast<uint8_t>(common::IniReadInt(p, sec, "Grip",   0));
+            L.barrel          = static_cast<uint8_t>(common::IniReadInt(p, sec, "Barrel", 0));
+            L.laser           = static_cast<uint8_t>(common::IniReadInt(p, sec, "Laser",  0));
+            L.ownedMuzzleMask = static_cast<uint8_t>(common::IniReadInt(p, sec, "OwnedMuzzle", 1) | 1 | (1u << L.muzzle));
+            L.ownedMagMask    = static_cast<uint8_t>(common::IniReadInt(p, sec, "OwnedMag",    1) | 1 | (1u << L.mag));
+            L.ownedScopeMask  = static_cast<uint8_t>(common::IniReadInt(p, sec, "OwnedScope",  1) | 1 | (1u << L.scope));
+            L.ownedGripMask   = static_cast<uint8_t>(common::IniReadInt(p, sec, "OwnedGrip",   1) | 1 | (1u << L.grip));
+            L.ownedBarrelMask = static_cast<uint8_t>(common::IniReadInt(p, sec, "OwnedBarrel", 1) | 1 | (1u << L.barrel));
+            L.ownedLaserMask  = static_cast<uint8_t>(common::IniReadInt(p, sec, "OwnedLaser",  1) | 1 | (1u << L.laser));
+            L.storedAmmo      = common::IniReadInt(p, sec, "StoredAmmo", 0);
+            m_loadouts[id] = wdata::SanitizeLoadout(id, L);
             ++loaded;
         }
         modlog::Info("[WStore] Loaded %d weapons from %s", loaded, path.c_str());
     }
 
     // Continuously tracks any weapons CJ picks up or holds in vanilla slots!
-    void SyncFromPlayerInventory(const sa::CPed* ped) {
-        if (!sa::IsPedValid(ped)) return;
+    // Returns true if a brand-new weapon was discovered so callers can persist it immediately.
+    bool SyncFromPlayerInventory(const sa::CPed* ped) {
+        if (!sa::IsPedValid(ped)) return false;
+        bool discoveredNew = false;
         const sa::CWeapon* w = ped->Weapons();
         for (int s = 0; s < 13; ++s) {
             uint32_t wid = w[s].m_nType;
             uint32_t prevWid = m_lastLiveSlotType[s];
 
             // If CJ just fired the last rocket/grenade in an individual-ammo slot (Heavy/Thrown),
-            // GTA SA clears w[s].m_nType to 0 -> zero that weapon's storedAmmo immediately!
+            // GTA SA clears w[s].m_nType to 0 -> zero that weapon's storedAmmo immediately while keeping owned=true!
             if (wid == 0 && prevWid != 0) {
                 const auto* prevDef = wdata::FindDef(prevWid);
                 if (prevDef && !prevDef->sharesSlotAmmo && prevDef->category != wdata::WeaponCategory::Melee) {
@@ -174,20 +180,17 @@ public:
             const auto* def = wdata::FindDef(wid);
             if (!def) continue;
 
-            bool hasIt = (def->category == wdata::WeaponCategory::Melee) || (w[s].m_nTotalAmmo > 0);
-            if (hasIt) {
-                auto& L = m_loadouts[wid];
+            // Record ANY weapon present in CJ's slot (even if ammo hits 0!) so it NEVER disappears from the arsenal!
+            auto& L = m_loadouts[wid];
+            if (!L.owned) {
                 L.owned = true;
-                if (!def->sharesSlotAmmo && def->category != wdata::WeaponCategory::Melee) {
-                    L.storedAmmo = static_cast<int>(w[s].m_nTotalAmmo);
-                }
-            } else if (!def->sharesSlotAmmo && def->category != wdata::WeaponCategory::Melee) {
-                auto it = m_loadouts.find(wid);
-                if (it != m_loadouts.end()) {
-                    it->second.storedAmmo = 0;
-                }
+                discoveredNew = true;
+            }
+            if (!def->sharesSlotAmmo && def->category != wdata::WeaponCategory::Melee) {
+                L.storedAmmo = static_cast<int>(w[s].m_nTotalAmmo);
             }
         }
+        return discoveredNew;
     }
 
     bool PlayerHasWeaponOrOwned(const sa::CPed* ped, uint32_t weaponId) const {
@@ -284,11 +287,6 @@ public:
             // SHARED category ammo: keep current slot ammo + add any newly purchased ammo!
             int baseAmmo = (prevId != 0) ? prevAmmo : 0;
             targetAmmo = std::clamp(baseAmmo + extraAmmo, 0, def->maxAmmo);
-            if (targetAmmo == 0 && extraAmmo == 0) {
-                // Keep 1 reserve or 0 if genuinely out of ammo (GTA SA removes gun at 0 ammo -> keep at 1 if swapping? No, respect 0 if truly empty!)
-                // Wait: if player owns the gun and has 0 ammo, giving 0 won't spawn it in GTA SA slot.
-                // Let's keep at least 0 if truly empty, otherwise exact shared ammo!
-            }
         } else {
             // Non-shared (Heavy / Thrown): restore this weapon's own stored ammo + extraAmmo
             int baseAmmo = (prevId == def->id) ? prevAmmo : m_loadouts[def->id].storedAmmo;
@@ -326,12 +324,11 @@ public:
 
 private:
     static std::string BuildFilePath(int slot, bool forLoading = false) {
-        const char* ov = nullptr;
-        if (auto* b = modbus::GetBus(); b && b->coopProfileName[0]) ov = b->coopProfileName;
+        const char* ov = integrations::sacoop::GetProfileOverride();
         if (forLoading) {
-            return sa::ResolveExistingLoadPath("GTA5WeaponSaves", wcfg::Get().modDir, "weapons", slot, ov);
+            return integrations::sacoop::ResolveExistingLoadPath("GTA5WeaponSaves", wcfg::Get().modDir, "weapons", slot, ov);
         }
-        return sa::BuildSaveProfilePath("GTA5WeaponSaves", wcfg::Get().modDir, "weapons", slot, ov);
+        return integrations::sacoop::BuildSaveProfilePath("GTA5WeaponSaves", wcfg::Get().modDir, "weapons", slot, ov);
     }
 
     int      m_slot = 0;

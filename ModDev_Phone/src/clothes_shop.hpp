@@ -7,6 +7,7 @@ void PreScriptsTick();
 void PostScriptsTick();
 void Render2D();
 bool IsShopActive();
+bool ShouldClaimShopPanel();
 void Reset();
 
 } // namespace clothesshop

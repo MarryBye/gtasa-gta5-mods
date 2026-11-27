@@ -4,11 +4,11 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-#include "bass_audio.hpp"
-#include "config.hpp"
+#include "integrations/bass_audio.hpp"
 #include "log.hpp"
 #include "memory.hpp"
 #include "sa_sdk.hpp"
+#include "weapon_config.hpp"
 #include "weapon_data.hpp"
 #include "weapon_storage.hpp"
 
@@ -52,8 +52,7 @@ inline void SynthesizeWeaponSounds() {
 
         for (uint32_t i = 0; i < count; ++i) {
             float t = static_cast<float>(i) / static_cast<float>(sr);
-            rng = rng * 1664525u + 1013904223u;
-            float white = (static_cast<float>((rng >> 16) & 0xFFFF) / 32768.0f) - 1.0f;
+            float white = bass::NextNoise(rng);
 
             // Band-shaped pressurized gas puff ("pfft")
             float hp = white - hpPrev * 0.80f;
@@ -77,7 +76,7 @@ inline void SynthesizeWeaponSounds() {
             }
 
             float s = std::tanh((lp2 * 1.55f * gasEnv + thump * 0.58f + bolt * 0.35f) * 1.6f);
-            pcm[i] = static_cast<int16_t>(std::clamp(static_cast<int>(s * 27000.0f), -32000, 32000));
+            pcm[i] = bass::FloatToPcm16(s * 0.82f);
         }
         return bass::BuildWav16Mono(pcm, sr);
     };
@@ -96,15 +95,14 @@ inline void SynthesizeWeaponSounds() {
         float lp = 0.0f;
         for (uint32_t i = 0; i < count; ++i) {
             float t = static_cast<float>(i) / static_cast<float>(sr);
-            rng = rng * 1664525u + 1013904223u;
-            float n = (static_cast<float>((rng >> 16) & 0xFFFF) / 32768.0f) - 1.0f;
+            float n = bass::NextNoise(rng);
             lp += 0.32f * (n - lp);
 
             float punchEnv = std::exp(-t * 32.0f);
             float crackEnv = std::exp(-t * 58.0f);
             float subBoom  = std::sin(PI2 * (120.0f * std::exp(-t * 16.0f) + 42.0f) * t) * punchEnv;
             float s = std::tanh((subBoom * 0.85f + lp * 1.45f * crackEnv) * 1.8f);
-            pcm[i] = static_cast<int16_t>(std::clamp(static_cast<int>(s * 24000.0f), -32000, 32000));
+            pcm[i] = bass::FloatToPcm16(s * 0.73f);
         }
         st.wavHeavyCrack = bass::BuildWav16Mono(pcm, sr);
     }
@@ -116,16 +114,27 @@ inline void SynthesizeWeaponSounds() {
         uint32_t rng = 0xCAFEBABEu;
         for (uint32_t i = 0; i < count; ++i) {
             float t = static_cast<float>(i) / static_cast<float>(sr);
-            rng = rng * 1664525u + 1013904223u;
-            float n = (static_cast<float>((rng >> 16) & 0xFFFF) / 32768.0f) - 1.0f;
+            float n = bass::NextNoise(rng);
             float c1 = std::exp(-t * 140.0f) * (std::sin(PI2 * 1800.0f * t) + 0.4f * n);
             float t2 = t - 0.038f;
             float c2 = (t2 > 0.0f) ? std::exp(-t2 * 160.0f) * (std::sin(PI2 * 2400.0f * t2) + 0.35f * n) : 0.0f;
             float s = std::clamp((c1 * 0.65f + c2 * 0.85f), -1.0f, 1.0f);
-            pcm[i] = static_cast<int16_t>(s * 22000.0f);
+            pcm[i] = bass::FloatToPcm16(s * 0.67f);
         }
         st.wavAttachClick = bass::BuildWav16Mono(pcm, sr);
     }
+}
+
+inline void Shutdown() {
+    auto& st = State();
+    bass::FreeSample(st.smpSuppPistol);
+    bass::FreeSample(st.smpSuppSmg);
+    bass::FreeSample(st.smpSuppRifle);
+    bass::FreeSample(st.smpSuppShotgun);
+    bass::FreeSample(st.smpHeavyCrack);
+    bass::FreeSample(st.smpAttachClick);
+    st.initialized = false;
+    st.attempted   = false;
 }
 
 inline void EnsureInit() {

@@ -5,14 +5,17 @@
 #include <string>
 #include <vector>
 #include <windows.h>
-#include "config.hpp"
+#include "common_utils.hpp"
 #include "dealership.hpp"
 #include "garage.hpp"
+#include "garage_config.hpp"
+#include "garage_ui.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
 #include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "tuning_physics.hpp"
-#include "ui_menu.hpp"
+#include "ui_kit.hpp"
 #include "workshop.hpp"
 
 namespace delivery {
@@ -36,8 +39,9 @@ enum class DeliveryPhase {
 };
 
 // Menu state
-MenuMode g_menuMode      = MenuMode::Closed;
-bool     g_openedFromPhone = false;
+MenuMode g_menuMode          = MenuMode::Closed;
+MenuMode g_restoreReturnMode = MenuMode::VehicleList;
+bool     g_openedFromPhone   = false;
 int      g_page          = 0; // 0 or 1 (5 slots per page, 10 total)
 int      g_rowInPage     = 0; // 0..4
 int      g_insCursor     = 0;
@@ -221,7 +225,7 @@ bool StartMechanicDelivery(int slotIdx) {
     if (!veh) {
         sa::ScriptCmd(0x0249).Int(slot.modelId).Run();
         sa::ScriptCmd(0x0249).Int(MODEL_MECHANIC).Run();
-        ui::ShowHelp("~r~Ошибка спавна транспорта!", "~r~Failed to spawn vehicle!");
+        ui::ShowHelp("~r~Не удалось доставить транспорт.", "~r~Failed to deliver vehicle.");
         return false;
     }
 
@@ -281,8 +285,8 @@ bool StartMechanicDelivery(int slotIdx) {
     garage::SaveNow();
 
     ui::ShowHelp(
-        "~g~Доставка в процессе!~w~ Механик уже едет к вам (отмечен на карте).",
-        "~g~Delivery in progress!~w~ Your mechanic is on the way (marked on radar).");
+        "~g~Механик уже в пути.~w~ Транспорт отмечен на карте.",
+        "~g~Mechanic is on the way.~w~ Vehicle marked on radar.");
     sa::PlayFrontendSound(sa::SFX_SELECT);
     modlog::Info("[Delivery] Started mechanic delivery of slot %d (model %d) from (%.1f, %.1f) -> (%.1f, %.1f)",
                  slotIdx, slot.modelId, spawnPos.x, spawnPos.y, targetRoad.x, targetRoad.y);
@@ -432,8 +436,8 @@ void HandleMenuInput() {
     auto* bus = modbus::GetBus();
     bool phoneOwnsF6 = (bus && bus->phoneInstalled);
 
-    // Toggle F6 menu ONLY when GTA5Phone.asi is NOT installed and no SA-COOP/ImGui overlay is active!
-    if (!phoneOwnsF6 && !sa::IsExternalOverlayActive() && k.JustPressed(mod::Config().callMenuKey)) {
+    // Toggle standalone hotkey ONLY when GTA5Phone.asi is NOT installed and no overlay is active
+    if (!phoneOwnsF6 && !integrations::sacoop::IsOverlayActive() && k.JustPressed(mod::Config().callMenuKey)) {
         if (g_menuMode != MenuMode::Closed) {
             g_menuMode = MenuMode::Closed;
             g_openedFromPhone = false;
@@ -449,13 +453,12 @@ void HandleMenuInput() {
             g_rowInPage       = std::clamp(g_rowInPage, 0, mod::VEHICLES_PER_PAGE - 1);
             ui::LockMenuInputBriefly(180);
             sa::PlayFrontendSound(sa::SFX_SELECT);
-            sa::ClearPadPhoneInputs();
+            sa::ClearPadModalInputs(false);
             return;
         }
     }
 
     if (g_menuMode == MenuMode::Closed) {
-        ui::SyncIdleMouseEdges();
         return;
     }
 
@@ -466,14 +469,14 @@ void HandleMenuInput() {
         return;
     }
 
-    // Unified ListInputController + full player movement/attack/camera/Esc lock!
+    // Unified ListInputController + full player movement/attack/camera/Esc lock
     auto in = ui::ListInput().Poll(true);
     const bool up     = in.up;
     const bool down   = in.down;
     const bool left   = in.left;
     const bool right  = in.right;
     const bool accept = in.accept;
-    const bool back   = in.back || (phoneOwnsF6 && k.JustPressed(VK_F6));
+    const bool back   = in.back || (phoneOwnsF6 && k.JustPressed(modbus::GetPhoneKey()));
     const bool delKey = in.del;
 
     const int maxVeh   = std::min(mod::Config().maxVehicles, mod::MAX_OWNED_VEHICLES);
@@ -493,27 +496,20 @@ void HandleMenuInput() {
         }
         if (wreckedSlots.empty()) return;
         g_insCursor = std::clamp(g_insCursor, 0, static_cast<int>(wreckedSlots.size()) - 1);
-        if (up) {
-            g_insCursor = (g_insCursor - 1 + static_cast<int>(wreckedSlots.size())) % static_cast<int>(wreckedSlots.size());
-            sa::PlayFrontendSound(sa::SFX_SCROLL);
-        } else if (down) {
-            g_insCursor = (g_insCursor + 1) % static_cast<int>(wreckedSlots.size());
+        if (ui::ListInput().ApplyToCursor(g_insCursor, static_cast<int>(wreckedSlots.size()), in)) {
             sa::PlayFrontendSound(sa::SFX_SCROLL);
         } else if (accept) {
-            g_pendingSlot   = wreckedSlots[g_insCursor];
-            g_confirmCursor = 0;
-            g_menuMode      = MenuMode::ConfirmRestore;
+            g_pendingSlot       = wreckedSlots[g_insCursor];
+            g_confirmCursor     = 0;
+            g_restoreReturnMode = MenuMode::InsuranceList;
+            g_menuMode          = MenuMode::ConfirmRestore;
             sa::PlayFrontendSound(sa::SFX_SELECT);
         }
         return;
     }
 
     if (g_menuMode == MenuMode::VehicleList) {
-        if (up) {
-            g_rowInPage = (g_rowInPage - 1 + mod::VEHICLES_PER_PAGE) % mod::VEHICLES_PER_PAGE;
-            sa::PlayFrontendSound(sa::SFX_SCROLL);
-        } else if (down) {
-            g_rowInPage = (g_rowInPage + 1) % mod::VEHICLES_PER_PAGE;
+        if (ui::ListInput().ApplyToCursor(g_rowInPage, mod::VEHICLES_PER_PAGE, in)) {
             sa::PlayFrontendSound(sa::SFX_SCROLL);
         } else if ((left || right) && numPages > 1) {
             g_page = (g_page + (right ? 1 : -1) + numPages) % numPages;
@@ -525,7 +521,7 @@ void HandleMenuInput() {
             int slotIdx = g_page * mod::VEHICLES_PER_PAGE + g_rowInPage;
             if (slotIdx < maxVeh && garage::Slots()[slotIdx].occupied) {
                 g_pendingSlot   = slotIdx;
-                g_confirmCursor = 1; // Default to Cancel for safety!
+                g_confirmCursor = 1; // Default to Cancel for safety
                 g_menuMode      = MenuMode::ConfirmDelete;
                 sa::PlayFrontendSound(sa::SFX_SELECT);
             }
@@ -534,8 +530,8 @@ void HandleMenuInput() {
             if (slotIdx >= maxVeh || !garage::Slots()[slotIdx].occupied) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
                 ui::ShowHelp(
-                    "Слот пуст. Купите авто в автосалоне или зарегистрируйте в мастерской.",
-                    "Slot empty. Buy a vehicle at a dealership or register one in a mod shop.");
+                    "Место свободно. Купите транспорт в автосалоне или зарегистрируйте в мастерской.",
+                    "Empty slot. Buy a vehicle at a dealership or register one in a mod shop.");
                 return;
             }
             if (g_phase != DeliveryPhase::Idle) {
@@ -546,12 +542,12 @@ void HandleMenuInput() {
 
             const auto& slot = garage::Slots()[slotIdx];
             if (slot.destroyed) {
-                g_pendingSlot   = slotIdx;
-                g_confirmCursor = 0;
-                g_menuMode      = MenuMode::ConfirmRestore;
+                g_pendingSlot       = slotIdx;
+                g_confirmCursor     = 0;
+                g_restoreReturnMode = MenuMode::VehicleList;
+                g_menuMode          = MenuMode::ConfirmRestore;
                 sa::PlayFrontendSound(sa::SFX_SELECT);
             } else {
-                // Free delivery!
                 if (StartMechanicDelivery(slotIdx)) {
                     g_menuMode = MenuMode::Closed;
                     g_openedFromPhone = false;
@@ -562,15 +558,19 @@ void HandleMenuInput() {
     }
 
     if (g_menuMode == MenuMode::ConfirmRestore || g_menuMode == MenuMode::ConfirmDelete) {
+        const MenuMode returnScreen = (g_menuMode == MenuMode::ConfirmRestore)
+            ? g_restoreReturnMode
+            : MenuMode::VehicleList;
+
         if (up || down) {
             g_confirmCursor = 1 - g_confirmCursor;
             sa::PlayFrontendSound(sa::SFX_SCROLL);
         } else if (back) {
-            g_menuMode = MenuMode::VehicleList;
+            g_menuMode = returnScreen;
             sa::PlayFrontendSound(sa::SFX_BACK);
         } else if (accept) {
             if (g_confirmCursor == 1) {
-                g_menuMode = MenuMode::VehicleList;
+                g_menuMode = returnScreen;
                 sa::PlayFrontendSound(sa::SFX_BACK);
                 return;
             }
@@ -583,12 +583,12 @@ void HandleMenuInput() {
                 return;
             }
 
-            // ConfirmRestore: validate road first so player doesn't lose money if standing in a field!
+            // ConfirmRestore: validate road first so player doesn't lose money if standing off-road
             int cost = mod::ComputeRestoreCost(sa::GetPlayerMoney());
             if (sa::GetPlayerMoney() < cost) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
                 ui::ShowHelp("~r~Недостаточно денег для восстановления!", "~r~Not enough money to restore!");
-                g_menuMode = MenuMode::VehicleList;
+                g_menuMode = returnScreen;
                 return;
             }
 
@@ -596,7 +596,7 @@ void HandleMenuInput() {
             float dummyH = 0.0f;
             if (!ValidatePlayerNearRoad(dummyRoad, dummyH)) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
-                g_menuMode = MenuMode::VehicleList;
+                g_menuMode = returnScreen;
                 return;
             }
 
@@ -606,9 +606,8 @@ void HandleMenuInput() {
                 g_menuMode = MenuMode::Closed;
                 g_openedFromPhone = false;
             } else {
-                // Refund if spawn somehow failed
                 sa::AddPlayerMoney(cost);
-                g_menuMode = MenuMode::VehicleList;
+                g_menuMode = returnScreen;
             }
         }
     }
@@ -634,118 +633,99 @@ void Render2D() {
 
     const int maxVeh   = std::min(mod::Config().maxVehicles, mod::MAX_OWNED_VEHICLES);
     const int numPages = std::max(1, (maxVeh + mod::VEHICLES_PER_PAGE - 1) / mod::VEHICLES_PER_PAGE);
+    const bool useRus  = ui::UseRussianFlag();
 
-    ui::MenuDrawSpec spec;
-    spec.x640 = 24.0f;
-    spec.y448 = 110.0f;
-    spec.w640 = 212.0f;
-    spec.maxVisibleRows = 6;
+    ui::ListMenu menu;
+    menu.SetPosition(24.0f, 110.0f, 212.0f).SetMaxVisible(6);
 
     if (g_menuMode == MenuMode::VehicleList) {
-        spec.titleGame   = ui::Loc("МЕХАНИК / ГАРАЖ", "MECHANIC / GARAGE");
-        spec.colLeftGame = ui::Loc("ЛИЧНЫЙ ТРАНСПОРТ", "PERSONAL VEHICLES");
         char pageBuf[32];
         std::snprintf(pageBuf, sizeof(pageBuf), "%s %d/%d",
                       ui::Loc("СТР.", "PAGE").c_str(), g_page + 1, numPages);
-        spec.colRightGame = pageBuf;
-        spec.footerGame   = ui::StandardFooter("Вызвать", "Request", "Назад", "Back", "A/D Стр., Del", "A/D Page, Del");
-        spec.selectedIndex = g_rowInPage;
+        menu.SetTitle(ui::Loc("МЕХАНИК / ГАРАЖ", "MECHANIC / GARAGE"))
+            .SetColumns(ui::Loc("ЛИЧНЫЙ ТРАНСПОРТ", "PERSONAL VEHICLES"), pageBuf)
+            .SetFooter(ui::StandardFooter("Вызвать", "Request", "Назад", "Back", "A/D Стр., Del", "A/D Page, Del"))
+            .SetSelected(g_rowInPage);
 
-        const auto& slots = garage::Slots();
-        const int restoreCost = mod::ComputeRestoreCost(sa::GetPlayerMoney());
-        const int activeSlot  = garage::GetActivePersonalSlot();
+        const auto& slots      = garage::Slots();
+        const int restoreCost  = mod::ComputeRestoreCost(sa::GetPlayerMoney());
+        const int activeSlot   = garage::GetActivePersonalSlot();
         const bool activeAlive = (garage::GetActivePersonalVehicle() != nullptr);
 
         for (int r = 0; r < mod::VEHICLES_PER_PAGE; ++r) {
             int idx = g_page * mod::VEHICLES_PER_PAGE + r;
-            ui::MenuRow row;
             if (idx >= maxVeh || !slots[idx].occupied) {
                 char emptyLbl[48];
-                std::snprintf(emptyLbl, sizeof(emptyLbl), "%d. %s", idx + 1, ui::Loc("Пустой слот", "Empty Slot").c_str());
-                row.leftGame   = emptyLbl;
-                row.rightGame  = "---";
-                row.enabled    = false;
-                row.rightColor = {115, 115, 120, 255};
+                std::snprintf(emptyLbl, sizeof(emptyLbl), "%d. %s", idx + 1, ui::Loc("Пусто", "Empty").c_str());
+                menu.AddItem(emptyLbl, "---", ui::ColorDisabled(), false);
             } else {
                 const auto& v = slots[idx];
                 char nm[96];
                 std::snprintf(nm, sizeof(nm), "%d. %s", idx + 1, v.displayNameGame.c_str());
-                row.leftGame = nm;
-                row.enabled  = true;
 
                 if (v.destroyed) {
                     char dst[48];
-                    std::snprintf(dst, sizeof(dst), "%s ($%d)", ui::Loc("Уничтож.", "Wrecked").c_str(), restoreCost);
-                    row.rightGame  = dst;
-                    row.rightColor = {240, 105, 95, 255};
+                    std::snprintf(dst, sizeof(dst), "%s $%d", ui::Loc("Уничтож.", "Wrecked").c_str(), restoreCost);
+                    menu.AddItem(nm, dst, ui::ColorDanger());
                 } else if (activeAlive && activeSlot == idx) {
-                    row.rightGame  = (g_phase != DeliveryPhase::Idle)
+                    std::string st = (g_phase != DeliveryPhase::Idle)
                         ? ui::Loc("В пути...", "On the way")
                         : ui::Loc("На карте", "Active");
-                    row.rightColor = {130, 195, 255, 255};
+                    menu.AddItem(nm, st, ui::ColorWarning());
                 } else {
-                    row.rightGame  = ui::Loc("Бесплатно", "Free");
-                    row.rightColor = {125, 235, 135, 255};
+                    menu.AddItem(nm, ui::Loc("Бесплатно", "Free"), ui::ColorSuccess());
                 }
             }
-            spec.rows.push_back(std::move(row));
         }
     } else if (g_menuMode == MenuMode::InsuranceList) {
-        spec.titleGame    = ui::Loc("СТРАХОВАЯ КОМПАНИЯ", "MORS MUTUAL INSURANCE");
-        spec.colLeftGame  = ui::Loc("УНИЧТОЖЕННЫЕ АВТО", "WRECKED VEHICLES");
-        spec.colRightGame = ui::Loc("ВЫПЛАТА", "CLAIM");
-        spec.footerGame   = ui::StandardFooter("Восст.", "Claim", "Назад", "Back");
+        menu.SetTitle(ui::Loc("СТРАХОВАЯ", "INSURANCE"))
+            .SetColumns(ui::Loc("УНИЧТОЖЕННЫЕ АВТО", "WRECKED VEHICLES"), ui::Loc("ВЫПЛАТА", "CLAIM"))
+            .SetFooter(ui::StandardFooter("Восстановить", "Claim", "Назад", "Back"));
+
         const int restoreCost = mod::ComputeRestoreCost(sa::GetPlayerMoney());
         const auto& slots = garage::Slots();
-        std::vector<int> wreckedSlots;
+        int wreckedCount = 0;
         for (int i = 0; i < maxVeh; ++i) {
             if (slots[i].occupied && slots[i].destroyed) {
-                wreckedSlots.push_back(i);
-                ui::MenuRow row;
-                row.leftGame   = slots[i].displayNameGame;
-                row.rightGame  = ui::FormatPrice(restoreCost);
-                row.rightColor = (sa::GetPlayerMoney() >= restoreCost)
-                    ? sa::CRGBA{125, 235, 135, 255}
-                    : sa::CRGBA{240, 100, 95, 255};
-                spec.rows.push_back(std::move(row));
+                ++wreckedCount;
+                menu.AddItem(slots[i].displayNameGame,
+                             common::FormatPrice(restoreCost, useRus),
+                             (sa::GetPlayerMoney() >= restoreCost) ? ui::ColorSuccess() : ui::ColorDanger());
             }
         }
-        if (spec.rows.empty()) {
-            spec.rows.push_back({ui::Loc("Нет уничтоженного транспорта", "No wrecked vehicles"), "", false, false, {140, 140, 140, 255}});
-            spec.selectedIndex = 0;
+        if (wreckedCount == 0) {
+            menu.AddItem(ui::Loc("Нет уничтоженного транспорта", "No wrecked vehicles"), "", ui::ColorDisabled(), false);
+            menu.SetSelected(0);
         } else {
-            spec.selectedIndex = std::clamp(g_insCursor, 0, static_cast<int>(spec.rows.size()) - 1);
+            menu.SetSelected(std::clamp(g_insCursor, 0, wreckedCount - 1));
         }
     } else if (g_menuMode == MenuMode::ConfirmRestore && g_pendingSlot >= 0) {
         int cost = mod::ComputeRestoreCost(sa::GetPlayerMoney());
-        spec.titleGame    = ui::Loc("СТРАХОВАЯ КОМПАНИЯ", "INSURANCE CLAIM");
-        spec.colLeftGame  = garage::Slots()[g_pendingSlot].displayNameGame;
         char pctBuf[32];
         std::snprintf(pctBuf, sizeof(pctBuf), "%d%%", mod::Config().restorePercent);
-        spec.colRightGame = pctBuf;
-        spec.footerGame   = ui::StandardFooter("Да", "Confirm", "Назад", "Back");
-        spec.selectedIndex = g_confirmCursor;
+        menu.SetTitle(ui::Loc("СТРАХОВАЯ", "INSURANCE CLAIM"))
+            .SetColumns(garage::Slots()[g_pendingSlot].displayNameGame, pctBuf)
+            .SetFooter(ui::StandardFooter("Да", "Confirm", "Назад", "Back"))
+            .SetSelected(g_confirmCursor);
 
-        char costBuf[32];
-        std::snprintf(costBuf, sizeof(costBuf), "$%d", cost);
         bool canAfford = (sa::GetPlayerMoney() >= cost);
-        spec.rows.push_back({ui::Loc("Восстановить и доставить", "Restore & Deliver"), costBuf, true, false,
-                             canAfford ? sa::CRGBA{125, 235, 135, 255} : sa::CRGBA{240, 100, 95, 255}});
-        spec.rows.push_back({ui::Loc("Отмена", "Cancel"), "", true, false, {200, 200, 200, 255}});
+        menu.AddItem(ui::Loc("Восстановить и доставить", "Restore & Deliver"),
+                     common::FormatPrice(cost, useRus),
+                     canAfford ? ui::ColorSuccess() : ui::ColorDanger());
+        menu.AddItem(ui::Loc("Отмена", "Cancel"), "", ui::ColorNormal());
     } else if (g_menuMode == MenuMode::ConfirmDelete && g_pendingSlot >= 0) {
-        spec.titleGame    = ui::Loc("УДАЛИТЬ ТРАНСПОРТ?", "REMOVE VEHICLE?");
-        spec.colLeftGame  = garage::Slots()[g_pendingSlot].displayNameGame;
-        spec.colRightGame = "";
-        spec.footerGame   = ui::StandardFooter("Да", "Confirm", "Назад", "Back");
-        spec.selectedIndex = g_confirmCursor;
+        menu.SetTitle(ui::Loc("УДАЛИТЬ ТРАНСПОРТ?", "REMOVE VEHICLE?"))
+            .SetColumns(garage::Slots()[g_pendingSlot].displayNameGame, "")
+            .SetFooter(ui::StandardFooter("Да", "Confirm", "Назад", "Back"))
+            .SetSelected(g_confirmCursor);
 
-        spec.rows.push_back({ui::Loc("Да, снять с учёта", "Yes, Unregister"), "", true, false, {240, 110, 100, 255}});
-        spec.rows.push_back({ui::Loc("Отмена", "Cancel"), "", true, false, {200, 200, 200, 255}});
+        menu.AddItem(ui::Loc("Да, снять с учёта", "Yes, Unregister"), "", ui::ColorDanger());
+        menu.AddItem(ui::Loc("Отмена", "Cancel"), "", ui::ColorNormal());
     }
 
-    ui::DrawVanillaMenu(spec);
+    menu.Render();
 
-    // Show live Vehicle Stats Card at bottom-right (with RED ETS 2 wear-loss bars!)
+    // Show live Vehicle Stats Card at bottom-right (with RED ETS 2 wear-loss bars)
     int previewIdx = -1;
     if (g_menuMode == MenuMode::VehicleList) {
         previewIdx = g_page * mod::VEHICLES_PER_PAGE + g_rowInPage;
@@ -768,7 +748,7 @@ void Render2D() {
             auto pristineStats = tuning::ComputeStatsForModel(slot.modelId, slot.tuning, mod::VehicleWear{});
             std::string note;
             if (slot.destroyed) {
-                note = ui::Loc("Уничтожен (нужна страховка)", "Wrecked (insurance req.)");
+                note = ui::Loc("Уничтожен, нужна страховка", "Wrecked, insurance required");
             } else {
                 if (mod::Config().enableWearSystem && slot.wear.HasAnyWear()) {
                     char wbuf[48];
@@ -791,7 +771,7 @@ void Render2D() {
                 }
             }
             const auto* prisPtr = (mod::Config().enableWearSystem && slot.wear.HasAnyWear()) ? &pristineStats : nullptr;
-            ui::DrawVehicleStatsPanel(slot.displayNameGame, actualStats, actualStats, true, note, prisPtr);
+            garage_ui::RenderVehicleStatsCard(slot.displayNameGame, actualStats, actualStats, true, note, prisPtr);
         }
     }
 }
@@ -824,11 +804,8 @@ bool IsDeliveryInProgress() { return g_phase != DeliveryPhase::Idle; }
 void CancelDelivery(bool deleteVehicle) {
     sa::CPed* mech = (g_delivPedHandle > 0) ? sa::GetPedFromHandle(g_delivPedHandle) : nullptr;
     if (deleteVehicle && g_delivVehHandle > 0) {
-        // SA-COOP safety: never DELETE_CAR if a local or remote player is currently driving it!
         sa::CVehicle* veh = sa::GetVehicleFromHandle(g_delivVehHandle);
-        sa::CPed* drv = veh ? veh->GetDriver() : nullptr;
-        bool safeToDelete = (drv == nullptr || drv == mech);
-        if (safeToDelete) {
+        if (integrations::sacoop::IsSafeToDeleteVehicle(veh, mech)) {
             sa::ScriptCmd(0x00A6).Int(g_delivVehHandle).Run(); // DELETE_CAR
         } else {
             sa::ScriptCmd(0x01C3).Int(g_delivVehHandle).Run(); // MARK_CAR_AS_NO_LONGER_NEEDED

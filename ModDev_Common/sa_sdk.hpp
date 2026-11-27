@@ -1,10 +1,16 @@
 #pragma once
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <cmath>
 #include <string>
 #include <windows.h>
-#include <shlobj.h>
+#include "integrations/limit_adjusters.hpp"
+#include "integrations/proper_shaders.hpp"
+#include "integrations/sacoop.hpp"
 
 namespace sa {
 
@@ -72,164 +78,25 @@ struct CMatrix {
 static_assert(sizeof(CMatrix) == 64, "CMatrix / RwMatrix must be 64 bytes");
 
 // ============================================================================
-// Version Check & Common Save Directory Helper
+// Version Check & Global State Accessors (SA 1.0 US)
+// (SA-COOP integration lives in ModDev_Common/integrations/sacoop.hpp)
 // ============================================================================
 inline bool IsSA10US() {
     return *reinterpret_cast<const uint32_t*>(0x0082457C) == 0x000094BF;
 }
 
-inline bool IsCoopModLoaded() {
-    return (GetModuleHandleA("coop.asi")           != nullptr) ||
-           (GetModuleHandleA("sa-coop.asi")        != nullptr) ||
-           (GetModuleHandleA("SA-COOP.asi")        != nullptr) ||
-           (GetModuleHandleA("sa_coop.asi")        != nullptr) ||
-           (GetModuleHandleA("CoopAndreas.asi")    != nullptr) ||
-           (GetModuleHandleA("coopandreas.asi")    != nullptr) ||
-           (GetModuleHandleA("sa_coop_client.asi") != nullptr) ||
-           (GetModuleHandleA("sa-coop-client.asi") != nullptr) ||
-           (GetModuleHandleA("coop_client.asi")    != nullptr);
+constexpr uint32_t PEDSTATE_IDLE    = 1;
+constexpr uint32_t PEDSTATE_DRIVING = 50;
+
+// Verified at 0x004396D3 (CCheat::NotWantedCheat / AEZAKMI) & 0x00438576 (CCheat::m_bHasPlayerCheated)
+inline bool IsNeverWantedCheatActive() {
+    return *reinterpret_cast<const uint8_t*>(0x00969171) != 0;
 }
 
-inline bool IsGameWindowFocused() {
-    HWND fg = GetForegroundWindow();
-    if (!fg) return false;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(fg, &pid);
-    return pid == GetCurrentProcessId();
+inline bool HasPlayerCheatedFlag() {
+    return *reinterpret_cast<const uint8_t*>(0x0096918C) != 0;
 }
 
-// Detects active ImGui / SA-COOP overlays (F9 menu, F2 player list, F4 skins, T chat, Cheat Menu)
-// so our mod hotkeys (F6/F7/TAB) never steal typing or clicks from external overlays!
-inline bool IsExternalOverlayActive() {
-    if (!IsGameWindowFocused()) return true;
-    if (*reinterpret_cast<const uint8_t*>(0x00BA6748 + 0x5C) != 0) return true; // Pause menu
-    CURSORINFO ci{};
-    ci.cbSize = sizeof(ci);
-    if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) != 0) {
-        return true;
-    }
-    return false;
-}
-
-inline std::string SanitizeProfileTag(const char* raw) {
-    std::string out;
-    if (!raw) return out;
-    for (const char* p = raw; *p && out.size() < 28; ++p) {
-        unsigned char ch = static_cast<unsigned char>(*p);
-        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-            (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
-            out.push_back(static_cast<char>(ch));
-        } else if (ch == ' ' && !out.empty() && out.back() != '_') {
-            out.push_back('_');
-        }
-    }
-    while (!out.empty() && out.back() == '_') out.pop_back();
-    return out;
-}
-
-// Reads local player nickname from Karimov-Akbar/sa-coop (coop\coop.ini) or explicit override,
-// enabling isolated per-player profiles on every PC without modifying GTA SA's .b save binary!
-inline std::string GetCoopPlayerProfileName(const char* overrideName = nullptr) {
-    if (overrideName && overrideName[0]) {
-        std::string s = SanitizeProfileTag(overrideName);
-        if (!s.empty()) return s;
-    }
-
-    char exeBuf[MAX_PATH] = {};
-    GetModuleFileNameA(nullptr, exeBuf, MAX_PATH);
-    std::string exeFull(exeBuf);
-    size_t slash = exeFull.find_last_of("\\/");
-    std::string gDir = (slash != std::string::npos) ? exeFull.substr(0, slash) : ".";
-
-    const std::string iniPaths[3] = {
-        gDir + "\\coop\\coop.ini",
-        gDir + "\\sa-coop.ini",
-        gDir + "\\coop.ini"
-    };
-    const char* sections[] = {"coop", "player", "network", "game", "general"};
-    const char* keys[]     = {"nickname", "name", "player_name", "username", "playername"};
-
-    for (const auto& path : iniPaths) {
-        if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-        for (const char* sec : sections) {
-            for (const char* key : keys) {
-                char val[64] = {};
-                GetPrivateProfileStringA(sec, key, "", val, sizeof(val), path.c_str());
-                std::string clean = SanitizeProfileTag(val);
-                if (!clean.empty()) return clean;
-            }
-        }
-    }
-
-    char userBuf[64] = {};
-    DWORD userLen = sizeof(userBuf);
-    if (GetUserNameA(userBuf, &userLen) && userBuf[0]) {
-        std::string clean = SanitizeProfileTag(userBuf);
-        if (!clean.empty()) return clean;
-    }
-    return "player";
-}
-
-inline std::string GetUserFilesSubDir(const char* subFolder, const std::string& fallbackDir) {
-    char docs[MAX_PATH] = {};
-    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr, 0, docs)) && docs[0] != '\0') {
-        std::string userFiles = std::string(docs) + "\\GTA San Andreas User Files";
-        CreateDirectoryA(userFiles.c_str(), nullptr);
-        std::string dir = userFiles + "\\" + subFolder;
-        CreateDirectoryA(dir.c_str(), nullptr);
-        return dir;
-    }
-    std::string dir = fallbackDir + "\\" + subFolder;
-    CreateDirectoryA(dir.c_str(), nullptr);
-    return dir;
-}
-
-// Unified save-file resolver for Singleplayer slots (1..8) AND SA-COOP per-player profiles (slot 0)!
-inline std::string BuildSaveProfilePath(const char* saveFolder, const std::string& fallbackDir,
-                                        const char* filePrefix, int slot1to8,
-                                        const char* coopOverride = nullptr)
-{
-    std::string dir = GetUserFilesSubDir(saveFolder, fallbackDir);
-    char name[96];
-    if (slot1to8 >= 1 && slot1to8 <= 8) {
-        std::snprintf(name, sizeof(name), "\\%s_slot_%d.ini", filePrefix, slot1to8);
-    } else if (IsCoopModLoaded()) {
-        std::string nick = GetCoopPlayerProfileName(coopOverride);
-        std::snprintf(name, sizeof(name), "\\%s_coop_%s.ini", filePrefix, nick.c_str());
-    } else {
-        std::snprintf(name, sizeof(name), "\\%s_autosave.ini", filePrefix);
-    }
-    return dir + name;
-}
-
-// When loading in SA-COOP for the first time after upgrading, smoothly migrate from legacy *_autosave.ini if present!
-inline std::string ResolveExistingLoadPath(const char* saveFolder, const std::string& fallbackDir,
-                                           const char* filePrefix, int slot1to8,
-                                           const char* coopOverride = nullptr)
-{
-    std::string primary = BuildSaveProfilePath(saveFolder, fallbackDir, filePrefix, slot1to8, coopOverride);
-    if (GetFileAttributesA(primary.c_str()) != INVALID_FILE_ATTRIBUTES) return primary;
-    if ((slot1to8 < 1 || slot1to8 > 8) && IsCoopModLoaded()) {
-        std::string legacy = GetUserFilesSubDir(saveFolder, fallbackDir) + "\\" + std::string(filePrefix) + "_autosave.ini";
-        if (GetFileAttributesA(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) return legacy;
-    }
-    return primary;
-}
-
-// Parse slot number 1..8 from GTA SA save filename buffer (e.g., "...\GTASAsf3.b")
-inline int ParseSaveSlotFromPath(const char* path) {
-    if (!path) return 0;
-    const char* p = std::strstr(path, "GTASAsf");
-    if (!p) p = std::strstr(path, "gtasasf");
-    if (p && p[7] >= '1' && p[7] <= '8') {
-        return p[7] - '0';
-    }
-    return 0;
-}
-
-// ============================================================================
-// Global State Accessors (SA 1.0 US)
-// ============================================================================
 inline int32_t GetGameState() {
     return *reinterpret_cast<const int32_t*>(0x00C8D4C0);
 }
@@ -242,8 +109,8 @@ inline bool IsCutsceneRunning() {
     return *reinterpret_cast<const uint8_t*>(0x00B5F851) != 0;
 }
 
-inline bool IsWidescreenOn() {
-    return *reinterpret_cast<const uint8_t*>(0x00BA6748 + 0x58) != 0;
+inline uint32_t GetFrameCounter() {
+    return *reinterpret_cast<const uint32_t*>(0x00B7CB4C); // CTimer::m_FrameCounter
 }
 
 inline uint32_t GetTimeMs() {
@@ -252,14 +119,6 @@ inline uint32_t GetTimeMs() {
 
 inline float GetTimeStep() {
     return *reinterpret_cast<const float*>(0x00B7CB5C); // CTimer::ms_fTimeStep (50fps normalized)
-}
-
-inline float GetTimeScale() {
-    return *reinterpret_cast<const float*>(0x00B7CB64); // CTimer::ms_fTimeScale
-}
-
-inline void SetTimeScale(float scale) {
-    *reinterpret_cast<float*>(0x00B7CB64) = scale;
 }
 
 inline int32_t GetScreenWidth() {
@@ -282,10 +141,6 @@ inline uint8_t GetClockMinutes() {
     return *reinterpret_cast<const uint8_t*>(0x00B70152); // CClock::ms_nGameClockMinutes
 }
 
-inline uint8_t GetClockDaysPassed() {
-    return *reinterpret_cast<const uint8_t*>(0x00B70154); // CClock::ms_nGameClockDays
-}
-
 inline bool IsOnMission() {
     const uint8_t* scriptSpace = reinterpret_cast<const uint8_t*>(0x00A49960);
     return (*reinterpret_cast<const int32_t*>(scriptSpace + 0x4 * 4)) != 0;
@@ -294,11 +149,6 @@ inline bool IsOnMission() {
 // Local Player Money (CWorld::Players[0].m_nMoney — always local player, even in SA-COOP!)
 inline int32_t GetPlayerMoney() {
     return *reinterpret_cast<const int32_t*>(0x00B7CE50);
-}
-
-inline void SetPlayerMoney(int32_t amount) {
-    if (amount < 0) amount = 0;
-    *reinterpret_cast<int32_t*>(0x00B7CE50) = amount;
 }
 
 inline void AddPlayerMoney(int32_t delta) {
@@ -312,6 +162,11 @@ inline void AddPlayerMoney(int32_t delta) {
 // Pad0 Input Helpers (CPad::Pads[0] at 0x00B73458)
 inline uint8_t* GetPad0() {
     return reinterpret_cast<uint8_t*>(0x00B73458);
+}
+
+// Verified at 0x0053FB80 (CPad::GetPedWalkLeftRight: cmp WORD PTR [ecx+0x10e], 0) & 0x0044C31D (CGarage)
+inline bool IsPlayerControlsDisabled() {
+    return *reinterpret_cast<const uint16_t*>(GetPad0() + 0x10E) != 0;
 }
 
 inline void ClearPadMenuInputs() {
@@ -350,14 +205,16 @@ inline CMouseControllerState* GetNewMouseState() {
 }
 
 // Clears ALL player movement, combat, camera, and mouse inputs while Phone / Modal UI is active!
-// Keeps CJ completely stationary even when navigating Phone with WASD, Arrows, Mouse Wheel, LMB/RMB!
-inline void ClearPadPhoneInputs() {
+// Optionally preserves TAB (LeftShoulder1) when Priority 1 Story Phone Call is ringing!
+inline void ClearPadModalInputs(bool preserveTabForStoryPhone = false) {
     uint8_t* pad = GetPad0();
     *reinterpret_cast<int16_t*>(pad + 0x00) = 0; // LeftStickX  (A/D movement)
     *reinterpret_cast<int16_t*>(pad + 0x02) = 0; // LeftStickY  (W/S movement)
     *reinterpret_cast<int16_t*>(pad + 0x04) = 0; // RightStickX (Camera X)
     *reinterpret_cast<int16_t*>(pad + 0x06) = 0; // RightStickY (Camera Y)
-    *reinterpret_cast<int16_t*>(pad + 0x08) = 0; // LeftShoulder1 (TAB)
+    if (!preserveTabForStoryPhone) {
+        *reinterpret_cast<int16_t*>(pad + 0x08) = 0; // LeftShoulder1 (TAB)
+    }
     *reinterpret_cast<int16_t*>(pad + 0x0A) = 0; // LeftShoulder2 (Q / Prev Weapon)
     *reinterpret_cast<int16_t*>(pad + 0x0C) = 0; // RightShoulder1 (Aim)
     *reinterpret_cast<int16_t*>(pad + 0x0E) = 0; // RightShoulder2 (E / Next Weapon)
@@ -373,26 +230,21 @@ inline void ClearPadPhoneInputs() {
     *reinterpret_cast<int16_t*>(pad + 0x24) = 0; // ShockButtonL (Crouch/Horn)
     *reinterpret_cast<int16_t*>(pad + 0x26) = 0; // ShockButtonR
     *reinterpret_cast<int16_t*>(pad + 0x4E) = 0; // OldState.ButtonTriangle
-    // Suppress CPad::NewKeyState.esc (verified at 0x00576B9F) so pressing Esc inside a menu NEVER pops Pause Menu!
-    *reinterpret_cast<int16_t*>(0x00B733A8) = 0;
     auto* ms = GetNewMouseState();
-    ms->X = 0.0f;
-    ms->Y = 0.0f;
-    ms->Z = 0.0f;
-    ms->lmb = 0;
-    ms->rmb = 0;
-    ms->wheelUp = 0;
-    ms->wheelDown = 0;
-}
-
-inline void ClearPadListInputs() {
-    ClearPadPhoneInputs();
+    if (ms) {
+        ms->X = 0.0f;
+        ms->Y = 0.0f;
+        ms->Z = 0.0f;
+        ms->lmb = 0;
+        ms->rmb = 0;
+        ms->wheelUp = 0;
+        ms->wheelDown = 0;
+    }
 }
 
 // Suppresses firing, aiming, camera rotation, weapon cycling & TAB stats while Weapon Wheel is held
 inline void ClearPadWheelInputs() {
     uint8_t* pad = GetPad0();
-    // NewState starts at +0x00 (CControllerState, 0x30 bytes):
     *reinterpret_cast<int16_t*>(pad + 0x04) = 0; // RightStickX
     *reinterpret_cast<int16_t*>(pad + 0x06) = 0; // RightStickY
     *reinterpret_cast<int16_t*>(pad + 0x08) = 0; // LeftShoulder1 (TAB / Stats)
@@ -407,13 +259,15 @@ inline void ClearPadWheelInputs() {
     *reinterpret_cast<int16_t*>(pad + 0x20) = 0; // ButtonCross
     *reinterpret_cast<int16_t*>(pad + 0x22) = 0; // ButtonCircle (Fire)
     auto* ms = GetNewMouseState();
-    ms->X = 0.0f;
-    ms->Y = 0.0f;
-    ms->Z = 0.0f;
-    ms->lmb = 0;
-    ms->rmb = 0;
-    ms->wheelUp = 0;
-    ms->wheelDown = 0;
+    if (ms) {
+        ms->X = 0.0f;
+        ms->Y = 0.0f;
+        ms->Z = 0.0f;
+        ms->lmb = 0;
+        ms->rmb = 0;
+        ms->wheelUp = 0;
+        ms->wheelDown = 0;
+    }
 }
 
 // ============================================================================
@@ -439,6 +293,13 @@ inline uint16_t GetActiveCamMode() {
     return *reinterpret_cast<const uint16_t*>(GetActiveCam() + 0x0C);
 }
 
+// Verified at 0x0053BF53 (CGame::Process): TheCamera is a CPlaceable (m_matrix @ +0x14, pos @ +0x30 or +0x04)
+inline CVector GetPosition() {
+    const CMatrix* mat = *reinterpret_cast<const CMatrix* const*>(0x00B6F03C);
+    if (mat) return mat->pos;
+    return *reinterpret_cast<const CVector*>(0x00B6F02C);
+}
+
 inline bool IsAimingWeaponCam() {
     uint16_t m = GetActiveCamMode();
     return (m == 53 || m == 55 || m == 65); // MODE_AIMWEAPON / FROMCAR / ATTACHED
@@ -451,11 +312,6 @@ inline bool IsSniperOrRocketCam() {
 
 inline float GetActiveCamFov() {
     return *reinterpret_cast<const float*>(GetActiveCam() + 0xA0);
-}
-
-inline CVector GetCamPos() {
-    // CCamera::m_pRwCamera / CCamera::GetPosition (TheCamera + 0x974 = m_mCameraMatrix.pos)
-    return *reinterpret_cast<const CVector*>(GetTheCamera() + 0x974);
 }
 
 // Verified at 0x0050D280: void __thiscall CCamera::LerpFOV(float from, float to, float timeMs, bool bKeepAfterFinish)
@@ -658,7 +514,45 @@ struct CEntity {
         if (CMatrix* m = GetMatrix()) return m->TransformPoint(local);
         return GetPosition();
     }
+    // Verified at 0x004B5BBB & 0x005E8186: CEntity::m_nType @ +0x36 bits 0..2 (2=VEHICLE, 3=PED, 4=OBJECT)
+    uint8_t GetEntityType() const {
+        return reinterpret_cast<const uint8_t*>(this)[0x36] & 0x07u;
+    }
 };
+
+constexpr uint8_t ENTITY_TYPE_BUILDING = 1;
+constexpr uint8_t ENTITY_TYPE_VEHICLE  = 2;
+constexpr uint8_t ENTITY_TYPE_PED      = 3;
+constexpr uint8_t ENTITY_TYPE_OBJECT   = 4;
+
+// Verified against CPed::IsPlayer (0x005DF8F0), data/ped.dat & data/pedgrp.dat
+constexpr uint32_t PEDTYPE_PLAYER1    = 0;
+constexpr uint32_t PEDTYPE_PLAYER2    = 1;
+constexpr uint32_t PEDTYPE_PLAYER_NET = 2;
+constexpr uint32_t PEDTYPE_CIVMALE    = 4;
+constexpr uint32_t PEDTYPE_CIVFEMALE  = 5;
+constexpr uint32_t PEDTYPE_COP        = 6;
+constexpr uint32_t PEDTYPE_GANG1      = 7;  // Ballas
+constexpr uint32_t PEDTYPE_GANG2      = 8;  // Grove Street Families (Player Gang)
+constexpr uint32_t PEDTYPE_GANG3      = 9;  // Los Santos Vagos
+constexpr uint32_t PEDTYPE_GANG4      = 10; // San Fierro Rifa
+constexpr uint32_t PEDTYPE_GANG5      = 11; // Da Nang Boys
+constexpr uint32_t PEDTYPE_GANG6      = 12; // Italian Mafia
+constexpr uint32_t PEDTYPE_GANG7      = 13; // Triads
+constexpr uint32_t PEDTYPE_GANG8      = 14; // Varrios Los Aztecas
+constexpr uint32_t PEDTYPE_GANG9      = 15; // Unused / Enemy Gang
+constexpr uint32_t PEDTYPE_GANG10     = 16; // Unused / Enemy Gang
+constexpr uint32_t PEDTYPE_DEALER     = 17;
+constexpr uint32_t PEDTYPE_MEDIC      = 18;
+constexpr uint32_t PEDTYPE_FIREMAN    = 19;
+constexpr uint32_t PEDTYPE_CRIMINAL   = 20;
+constexpr uint32_t PEDTYPE_BUM        = 21;
+constexpr uint32_t PEDTYPE_PROSTITUTE = 22;
+constexpr uint32_t PEDTYPE_SPECIAL    = 23;
+constexpr uint32_t PEDTYPE_MISSION1   = 24;
+constexpr uint32_t PEDTYPE_MISSION8   = 31;
+
+constexpr uint32_t PED_PIECE_HEAD     = 9;
 
 struct CPed : CEntity {
     uint8_t* Raw() { return reinterpret_cast<uint8_t*>(this); }
@@ -669,8 +563,26 @@ struct CPed : CEntity {
     float GetMaxHealth() const { return *reinterpret_cast<const float*>(Raw() + 0x544); }
     float GetArmor() const     { return *reinterpret_cast<const float*>(Raw() + 0x548); }
     void  SetArmor(float v)    { *reinterpret_cast<float*>(Raw() + 0x548) = v; }
+    void* GetIntelligence() const { return *reinterpret_cast<void* const*>(Raw() + 0x47C); }
     void* GetPlayerData() const { return *reinterpret_cast<void* const*>(Raw() + 0x480); }
+    // Verified at 0x005E8199 (CPed::CPed): m_nCreatedBy @ +0x484 (1=PED_GAME, 2=PED_MISSION)
+    uint8_t GetCreatedBy() const { return Raw()[0x484]; }
+    // Verified at 0x005E835A..0x005E837E (CPed::CPed): CAcquaintance @ +0x4E0 (+0x00 Respect, +0x10 Hate)
+    uint32_t GetRespectMask() const { return *reinterpret_cast<const uint32_t*>(Raw() + 0x4E0); }
+    uint32_t GetHateMask() const    { return *reinterpret_cast<const uint32_t*>(Raw() + 0x4F0); }
+    // Verified at 0x005DF8F0 (CPed::IsPlayer): m_nPedType @ +0x598
+    uint32_t GetPedType() const     { return *reinterpret_cast<const uint32_t*>(Raw() + 0x598); }
+    bool IsPlayerPedType() const    { uint32_t t = GetPedType(); return t == PEDTYPE_PLAYER1 || t == PEDTYPE_PLAYER2 || t == PEDTYPE_PLAYER_NET; }
     void* GetVehiclePtr() const { return *reinterpret_cast<void* const*>(Raw() + 0x58C); }
+    // Verified at 0x005E456D (CPed::SetPedState): m_ePedState @ +0x530 (1=IDLE, 24=ENTER_CAR, 25=EXIT_CAR, 50=DRIVING)
+    uint32_t GetPedState() const { return *reinterpret_cast<const uint32_t*>(Raw() + 0x530); }
+    // Verified at 0x00600EE6 / 0x00681750: CPedIntelligence::m_TaskMgr @ +0x04, m_aPrimaryTasks[0..3] (non-default active tasks: EnterCar/ExitCar/Jump/Climb/etc.)
+    bool HasActivePrimaryTask() const {
+        const uint8_t* intel = reinterpret_cast<const uint8_t*>(GetIntelligence());
+        if (!intel) return false;
+        void* const* primary = reinterpret_cast<void* const*>(intel + 0x04);
+        return primary[0] != nullptr || primary[1] != nullptr || primary[2] != nullptr || primary[3] != nullptr;
+    }
     bool  IsInVehicle() const { return (*reinterpret_cast<const uint32_t*>(Raw() + 0x46C) & 0x100) != 0 && GetVehiclePtr() != nullptr; }
     bool  IsInWater() const { return (*reinterpret_cast<const uint32_t*>(Raw() + 0x46C) & 0x40) != 0; }
 
@@ -690,6 +602,32 @@ struct CPed : CEntity {
         int8_t slot = GetActiveWeaponSlot();
         if (slot < 0 || slot >= 13) return nullptr;
         return &Weapons()[slot];
+    }
+
+    // Verified at 0x005E3B60: int8_t __thiscall CPed::GetWeaponSkill(uint32_t weaponType)
+    // Returns 0 = Poor, 1 = Gangster (Std), 2 = Hitman (Pro) using player's live CStats weapon skill!
+    int8_t GetWeaponSkill(uint32_t weaponType) const {
+        using Fn = int8_t(__thiscall*)(const CPed*, uint32_t);
+        return reinterpret_cast<Fn>(0x005E3B60)(this, weaponType);
+    }
+
+    static constexpr uint32_t BONE_PELVIS = 1;
+    static constexpr uint32_t BONE_SPINE1 = 3;
+    static constexpr uint32_t BONE_NECK   = 4;
+    static constexpr uint32_t BONE_HEAD   = 5;
+
+    // Verified at 0x005E4280 (ret 0x0C): void __thiscall CPed::GetBonePosition(CVector* outPos, uint32_t boneId, bool updateSkin)
+    // Reads live animated RpHAnimHierarchy bone world coordinates (accurate even when sitting in barber/tattoo chairs!)
+    bool GetBonePosition(CVector& outPos, uint32_t boneId, bool updateSkin = true) const {
+        CVector tmp{};
+        using Fn = void(__thiscall*)(const CPed*, CVector*, uint32_t, bool);
+        reinterpret_cast<Fn>(0x005E4280)(this, &tmp, boneId, updateSkin);
+        if (!std::isfinite(tmp.x) || !std::isfinite(tmp.y) || !std::isfinite(tmp.z)) {
+            outPos = GetPosition();
+            return false;
+        }
+        outPos = tmp;
+        return true;
     }
 };
 
@@ -909,13 +847,12 @@ inline const char* TextGet(const char* key) {
 }
 
 inline void* GetModelInfo(int32_t modelId) {
-    if (modelId < 0 || modelId >= 20000) return nullptr;
-    return reinterpret_cast<void**>(0x00A9B0C8)[modelId];
+    return integrations::limits::GetModelInfo(modelId);
 }
 
-inline std::string GetVehicleDisplayNameGameEncoded(int32_t modelId) {
+inline std::string GetVehicleDisplayNameGameEncoded(int32_t modelId, const char* fallbackEncoded = "Vehicle") {
     void* mi = GetModelInfo(modelId);
-    if (!mi) return "Vehicle";
+    if (!mi) return fallbackEncoded ? fallbackEncoded : "Vehicle";
     char gxtKey[12] = {};
     std::memcpy(gxtKey, reinterpret_cast<const uint8_t*>(mi) + 0x32, 8);
     gxtKey[8] = '\0';
@@ -924,7 +861,7 @@ inline std::string GetVehicleDisplayNameGameEncoded(int32_t modelId) {
         if (localized && localized[0] != '\0') return std::string(localized);
         return std::string(gxtKey);
     }
-    return "Vehicle";
+    return fallbackEncoded ? fallbackEncoded : "Vehicle";
 }
 
 inline bool GetVehicleBounds(int32_t modelId, CVector& outMin, CVector& outMax) {
@@ -1058,6 +995,27 @@ inline bool ProcessLineOfSight(
         seeThrough, cameraObjects, shootThrough);
 }
 
+// Shared horizontal raycast helper for unobstructed 3D preview cameras (Clothes, Barber, Tattoo, Workshop)
+// Set includeObjects=false for seated interiors (Barber/Tattoo) so chair/stool CObjects never trap camera zoom!
+inline float ProbeLineOfSightClearDist(const CVector& origin, float angleRad, float maxDist,
+                                       float zOffset = 0.0f, bool includeObjects = true)
+{
+    CVector target{
+        origin.x + std::cos(angleRad) * maxDist,
+        origin.y + std::sin(angleRad) * maxDist,
+        origin.z + zOffset
+    };
+    CColPoint col{};
+    CEntity* hitEnt = nullptr;
+    if (ProcessLineOfSight(origin, target, col, hitEnt,
+                           true, false, false, includeObjects, false, false, false, false)) {
+        float dx = col.m_vecPoint.x - origin.x;
+        float dy = col.m_vecPoint.y - origin.y;
+        return std::sqrt(dx * dx + dy * dy);
+    }
+    return maxDist;
+}
+
 namespace rw {
 
 // RenderWare 3.6 D3D9 RwIm2DVertex (28 bytes — verified against CSprite2d::SetVertices 0x00727420)
@@ -1087,15 +1045,19 @@ inline uint32_t PackColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
 inline float GetNearScreenZ()   { return *reinterpret_cast<const float*>(0x00C80460); }
 inline float GetRecipNearClip() { return *reinterpret_cast<const float*>(0x00C80464); }
 
-// RenderState enum constants (RenderWare 3.6)
-constexpr int32_t STATE_TEXTURERASTER      = 1;
-constexpr int32_t STATE_ZTESTENABLE        = 6;
-constexpr int32_t STATE_ZWRITEENABLE       = 8;
-constexpr int32_t STATE_SHADEMODE          = 9;  // 1=FLAT, 2=GOURAUD
-constexpr int32_t STATE_SRCBLEND           = 10; // 5=SRCALPHA
-constexpr int32_t STATE_DESTBLEND          = 11; // 2=ONE, 6=INVSRCALPHA
-constexpr int32_t STATE_VERTEXALPHAENABLE  = 12;
-constexpr int32_t STATE_CULLMODE           = 20; // 1=NONE, 2=BACK
+// RenderState enum constants (RenderWare 3.6 — synced with integrations/proper_shaders.hpp)
+constexpr int32_t STATE_TEXTURERASTER      = integrations::proper_shaders::RW_TEXTURERASTER;
+constexpr int32_t STATE_ZTESTENABLE        = integrations::proper_shaders::RW_ZTESTENABLE;
+constexpr int32_t STATE_SHADEMODE          = integrations::proper_shaders::RW_SHADEMODE;
+constexpr int32_t STATE_ZWRITEENABLE       = integrations::proper_shaders::RW_ZWRITEENABLE;
+constexpr int32_t STATE_TEXTUREFILTER      = integrations::proper_shaders::RW_TEXTUREFILTER;
+constexpr int32_t STATE_SRCBLEND           = integrations::proper_shaders::RW_SRCBLEND;
+constexpr int32_t STATE_DESTBLEND          = integrations::proper_shaders::RW_DESTBLEND;
+constexpr int32_t STATE_VERTEXALPHAENABLE  = integrations::proper_shaders::RW_VERTEXALPHAENABLE;
+constexpr int32_t STATE_FOGENABLE          = integrations::proper_shaders::RW_FOGENABLE;
+constexpr int32_t STATE_CULLMODE           = integrations::proper_shaders::RW_CULLMODE;
+constexpr int32_t STATE_ALPHATESTFUNCTION  = integrations::proper_shaders::RW_ALPHATESTFUNCTION;
+constexpr int32_t STATE_ALPHATESTREF       = integrations::proper_shaders::RW_ALPHATESTREF;
 
 constexpr uint32_t PRIM_LINELIST = 1;
 constexpr uint32_t PRIM_TRILIST  = 3;
@@ -1187,11 +1149,6 @@ inline void* GetWeaponIconTexture(int32_t modelId) {
     return reinterpret_cast<FindTexFn>(0x00734E50)(txd, iconHash);
 }
 
-inline void* GetWeaponIconRaster(int32_t modelId) {
-    void* rwTex = GetWeaponIconTexture(modelId);
-    return rwTex ? *reinterpret_cast<void**>(rwTex) : nullptr;
-}
-
 } // namespace rw
 
 // ============================================================================
@@ -1220,9 +1177,9 @@ namespace font {
     inline void SetScale(float w, float h) { reinterpret_cast<void(__cdecl*)(float, float)>(0x00719380)(w, h); }
     inline void SetColor(CRGBA c) { reinterpret_cast<void(__cdecl*)(CRGBA)>(0x00719430)(c); }
     inline void SetFontStyle(uint8_t style) { reinterpret_cast<void(__cdecl*)(uint8_t)>(0x00719490)(style); }
-    inline void SetWrapx(float x) { reinterpret_cast<void(__cdecl*)(float)>(0x007194D0)(x); }
-    inline void SetRightJustifyWrap(float x) { *reinterpret_cast<float*>(0x00C71A8C) = x; }
-    inline void SetCentreSize(float s) { reinterpret_cast<void(__cdecl*)(float)>(0x007194F0)(s); }
+    inline void SetWrapx(float x) { reinterpret_cast<void(__cdecl*)(float)>(0x007194D0)(x); }            // m_fWrapx @ 0x00C71A88
+    inline void SetCentreSize(float s) { reinterpret_cast<void(__cdecl*)(float)>(0x007194E0)(s); }       // m_fCentreSize @ 0x00C71A8C
+    inline void SetRightJustifyWrap(float x) { reinterpret_cast<void(__cdecl*)(float)>(0x007194F0)(x); } // m_fRightJustifyWrap @ 0x00C71A90
     inline void SetDropColor(CRGBA c) { reinterpret_cast<void(__cdecl*)(CRGBA)>(0x00719510)(c); }
     inline void SetDropShadowPosition(int8_t pos) { reinterpret_cast<void(__cdecl*)(int8_t)>(0x00719570)(pos); }
     inline void SetEdge(int8_t edge) { reinterpret_cast<void(__cdecl*)(int8_t)>(0x00719590)(edge); }
@@ -1257,13 +1214,6 @@ inline void DrawSpriteTexture(void* rwTexture, const CRect& r, const CRGBA& c) {
     void* spriteObj = rwTexture;
     using Fn = void(__thiscall*)(void*, const CRect&, const CRGBA&);
     reinterpret_cast<Fn>(0x00728350)(&spriteObj, r, c);
-}
-
-// Verified at 0x005E6580: CPed::GetWeaponSkill() -> 0=Poor, 1=Std, 2=Pro(Hitman), 3=Cop
-inline int8_t GetPedWeaponSkill(const CPed* ped) {
-    if (!IsPedValid(ped)) return 1;
-    using Fn = int8_t(__thiscall*)(const CPed*);
-    return reinterpret_cast<Fn>(0x005E6580)(ped);
 }
 
 inline void RegisterCorona(
@@ -1533,19 +1483,74 @@ inline uint32_t GetUppercaseKey(const char* str) {
 }
 
 namespace stats {
-    constexpr uint16_t STAT_FAT        = 21;
-    constexpr uint16_t STAT_STAMINA    = 22;
-    constexpr uint16_t STAT_MUSCLE     = 23;
-    constexpr uint16_t STAT_MAX_HEALTH = 24;
-    constexpr uint16_t STAT_SEX_APPEAL = 25;
-    constexpr uint16_t STAT_RESPECT    = 64;
+    constexpr uint16_t STAT_FAT                  = 21;
+    constexpr uint16_t STAT_STAMINA              = 22;
+    constexpr uint16_t STAT_MUSCLE               = 23;
+    constexpr uint16_t STAT_MAX_HEALTH           = 24;
+    constexpr uint16_t STAT_SEX_APPEAL           = 25;
+    constexpr uint16_t STAT_RESPECT              = 64;
 
-    // Verified at 0x00558E40 & 0x0055A070
+    // Weapon skill stats (0.0 .. 1000.0, verified via CWeaponInfo::FindWeaponStat @ 0x00743CD0)
+    constexpr uint16_t STAT_WEAPON_PISTOL        = 69;
+    constexpr uint16_t STAT_WEAPON_SILENCED      = 70;
+    constexpr uint16_t STAT_WEAPON_DESERT_EAGLE  = 71;
+    constexpr uint16_t STAT_WEAPON_SHOTGUN       = 72;
+    constexpr uint16_t STAT_WEAPON_SAWNOFF       = 73;
+    constexpr uint16_t STAT_WEAPON_SPAS12        = 74;
+    constexpr uint16_t STAT_WEAPON_MICRO_UZI     = 75; // Shared with Tec-9 (weaponId 32)
+    constexpr uint16_t STAT_WEAPON_MP5           = 76;
+    constexpr uint16_t STAT_WEAPON_AK47          = 77;
+    constexpr uint16_t STAT_WEAPON_M4            = 78;
+    constexpr uint16_t STAT_WEAPON_SNIPER        = 79; // Country Rifle (33) & Sniper Rifle (34)
+
+    // Vehicle skill stats (0 .. 1000, verified via CStats::GetStatValue @ 0x00558E40 & GetFatAndMuscleModifier @ 0x00559AF0)
+    constexpr uint16_t STAT_DRIVING_SKILL        = 160;
+    constexpr uint16_t STAT_FLYING_SKILL         = 223;
+    constexpr uint16_t STAT_BIKE_SKILL           = 229;
+    constexpr uint16_t STAT_CYCLING_SKILL        = 230;
+
+    // Misc & Progression stats (verified directly against text/american.gxt STATxxx & gta_sa.exe!)
+    constexpr uint16_t STAT_HEADSHOTS                = 130;
+    constexpr uint16_t STAT_WANTED_STARS_EVADED      = 132;
+    constexpr uint16_t STAT_TIMES_CHEATED            = 137;
+    constexpr uint16_t STAT_UNIQUE_JUMPS_DONE        = 145;
+    constexpr uint16_t STAT_MISSIONS_PASSED          = 147;
+    constexpr uint16_t STAT_CRIMINALS_VIGILANTE      = 152;
+    constexpr uint16_t STAT_FIRES_EXTINGUISHED       = 153;
+    constexpr uint16_t STAT_TRUCK_MISSIONS_PASSED    = 161;
+    constexpr uint16_t STAT_CALORIES                 = 165;
+    constexpr uint16_t STAT_GIRLS_PIMPED             = 171;
+    constexpr uint16_t STAT_HOUSES_BURGLED           = 191;
+    constexpr uint16_t STAT_SNAPSHOTS_TAKEN          = 231;
+    constexpr uint16_t STAT_TERRITORIES_TAKEN_OVER   = 234;
+    constexpr uint16_t STAT_HORSESHOES_COLLECTED     = 241;
+    constexpr uint16_t STAT_OYSTERS_COLLECTED        = 243;
+
+    // Verified at 0x0049CEE6..0x0049CF14: CTagManager::ms_numTags @ 0x00A9AD70, ms_tagDesc @ 0x00A9A8C0 (stride 8, +4 alpha > 0xE4)
+    inline int GetSprayedTagsCount() {
+        int32_t numTags = *reinterpret_cast<const int32_t*>(0x00A9AD70);
+        if (numTags <= 0 || numTags > 150) return 0;
+        const uint8_t* desc = reinterpret_cast<const uint8_t*>(0x00A9A8C0);
+        int sprayed = 0;
+        for (int32_t i = 0; i < numTags; ++i) {
+            if (desc[static_cast<size_t>(i) * 8 + 4] > 0xE4u) ++sprayed;
+        }
+        return sprayed;
+    }
+
+    // Verified at 0x00558E40 (GetStatValue), 0x0055A070 (SetStatValue) & 0x0055C180 (IncrementStat)
     inline float Get(uint16_t statId) {
         return reinterpret_cast<float(__cdecl*)(uint16_t)>(0x00558E40)(statId);
     }
     inline void Set(uint16_t statId, float value) {
         reinterpret_cast<void(__cdecl*)(uint16_t, float)>(0x0055A070)(statId, value);
+    }
+    inline void Increment(uint16_t statId, float delta) {
+        if (delta <= 0.0f) return;
+        reinterpret_cast<void(__cdecl*)(uint16_t, float)>(0x0055C180)(statId, delta);
+    }
+    inline float GetNormalized01(uint16_t statId) {
+        return std::clamp(Get(statId) * 0.001f, 0.0f, 1.0f);
     }
 } // namespace stats
 
@@ -1565,6 +1570,15 @@ namespace wanted {
         if (stars > 6) stars = 6;
         using Fn = void(__thiscall*)(void*, int32_t);
         reinterpret_cast<Fn>(0x00562470)(w, stars);
+    }
+    // Verified at 0x005625CA & 0x005625D6 (CWanted::ClearWantedLevelAndGoOnParole — Pay 'n' Spray!)
+    inline uint32_t GetTimeOfParole(int32_t playerId = 0) {
+        uint8_t* w = GetPlayerWanted(playerId);
+        return w ? *reinterpret_cast<const uint32_t*>(w + 0x10) : 0;
+    }
+    inline int32_t GetStarsBeforeParole(int32_t playerId = 0) {
+        uint8_t* w = GetPlayerWanted(playerId);
+        return w ? *reinterpret_cast<const int32_t*>(w + 0x30) : 0;
     }
 } // namespace wanted
 
@@ -1591,8 +1605,10 @@ namespace clothes {
     }
 
     // Verified at 0x005A82C0: void __cdecl CClothes::RebuildPlayer(CPlayerPed* player, bool bIgnoreFatAndMuscle)
+    // Always guarded against SA-COOP F4 custom skins (modelId != 0 crashes CClothes::RebuildPlayer)!
     inline void RebuildPlayer(CPed* ped, bool ignoreFatAndMuscle = false) {
         if (!IsPedValid(ped)) return;
+        if (integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) return;
         reinterpret_cast<void(__cdecl*)(CPed*, bool)>(0x005A82C0)(ped, ignoreFatAndMuscle);
     }
 } // namespace clothes
@@ -1621,52 +1637,72 @@ namespace shopping {
         return reinterpret_cast<const uint8_t*>(0x00A972A0)[idx] != 0;
     }
 
-    inline bool HasBoughtName(const char* itemName) {
-        return HasBoughtHash(GetUppercaseKey(itemName));
-    }
-
     inline void SetBoughtHash(uint32_t hash, bool bought) {
         int idx = FindItemIndexByHash(hash);
         if (idx < 0) return;
         reinterpret_cast<uint8_t*>(0x00A972A0)[idx] = bought ? 1 : 0;
     }
-
-    inline void SetBoughtName(const char* itemName, bool bought) {
-        SetBoughtHash(GetUppercaseKey(itemName), bought);
-    }
 } // namespace shopping
 
 // ============================================================================
-// Vehicle Audio Settings Table (Verified at 0x004F5C10: 0x00860AF0, stride 0x24)
+// Shared CRadar Trace Pool & CGarages Table Helpers (Verified SA 1.0 US)
+// Replaces raw 0x00BA86F0 / 0x0096C024 scans duplicated across EarlyUnlock & Dealership!
 // ============================================================================
-#pragma pack(push, 1)
-struct tVehicleAudioSettings {
-    int8_t  m_nVehicleSoundType;    // +0x00 (0=Car, 1=Bike, 2=Bicycle, 3=Boat, 4=Heli, 5=Plane, 9=RC)
-    int8_t  _pad01;                 // +0x01
-    int16_t m_nEngineOnSoundBankId; // +0x02 (0-based index into audio\CONFIG\BankLkup.dat, -1 if none)
-    int16_t m_nEngineOffSoundBankId;// +0x04
-    int8_t  m_nBassSetting;         // +0x06
-    int8_t  _pad07;                 // +0x07
-    float   m_fBassEq;              // +0x08
-    float   m_fField14;             // +0x0C (base engine pitch scale, e.g. 1.00, 1.19)
-    int8_t  m_nHornTon;             // +0x10
-    int8_t  _pad11[3];              // +0x11
-    float   m_fHornHigh;            // +0x14
-    int8_t  m_nDoorSound;           // +0x18
-    int8_t  _pad19;                 // +0x19
-    int8_t  m_nRadioNum;            // +0x1A
-    int8_t  m_nRadioType;           // +0x1B
-    int8_t  m_nVehTypeForAudio;     // +0x1C
-    int8_t  _pad1D[3];              // +0x1D
-    float   m_fHornVolumeDelta;     // +0x20
-};
-static_assert(sizeof(tVehicleAudioSettings) == 0x24, "tVehicleAudioSettings must be 36 bytes");
-#pragma pack(pop)
+namespace radar {
+    constexpr int    MAX_RADAR_TRACES   = 175;
+    constexpr size_t RADAR_TRACE_STRIDE = 0x28;
 
-inline const tVehicleAudioSettings* GetVehicleAudioSettings(int32_t modelId) {
-    if (modelId < 400 || modelId > 611) return nullptr;
-    return reinterpret_cast<const tVehicleAudioSettings*>(0x00860AF0 + static_cast<size_t>(modelId - 400) * 0x24);
-}
+    inline const uint8_t* GetTraceTable() {
+        return reinterpret_cast<const uint8_t*>(0x00BA86F0); // CRadar::ms_RadarTrace
+    }
+
+    inline int CountUsedBlips() {
+        const uint8_t* base = GetTraceTable();
+        int used = 0;
+        for (int i = 0; i < MAX_RADAR_TRACES; ++i) {
+            if ((base[i * RADAR_TRACE_STRIDE + 0x25] & 0x02) != 0) ++used; // m_bInUse
+        }
+        return used;
+    }
+
+    // Checks if any active radar blip (optionally matching spriteId > 0) already exists near (x, y)
+    inline bool HasBlipNear(float x, float y, float maxDist, uint8_t spriteId = 0) {
+        const uint8_t* base = GetTraceTable();
+        const float maxDistSq = maxDist * maxDist;
+        for (int i = 0; i < MAX_RADAR_TRACES; ++i) {
+            const uint8_t* t = base + static_cast<size_t>(i) * RADAR_TRACE_STRIDE;
+            if ((t[0x25] & 0x02) == 0) continue; // m_bInUse
+            if (spriteId != 0 && t[0x24] != spriteId) continue; // m_nBlipSprite
+            float bx = *reinterpret_cast<const float*>(t + 0x08);
+            float by = *reinterpret_cast<const float*>(t + 0x0C);
+            float dx = bx - x, dy = by - y;
+            if (dx * dx + dy * dy <= maxDistSq) return true;
+        }
+        return false;
+    }
+} // namespace radar
+
+namespace garages {
+    inline int32_t GetCount() {
+        int32_t n = *reinterpret_cast<const int32_t*>(0x0096C024); // CGarages::NumGarages
+        return std::clamp<int32_t>(n, 0, 50);
+    }
+
+    inline uint8_t* GetGarageAt(int32_t idx) {
+        if (idx < 0 || idx >= GetCount()) return nullptr;
+        return reinterpret_cast<uint8_t*>(0x0096C048) + static_cast<size_t>(idx) * 0xD8;
+    }
+
+    // Verified at 0x0044AEDE / 0x0044C311: type 5 = GARAGE_RESPRAY (Pay 'n' Spray), +0x4D = state (0 = closed/idle)
+    inline bool IsAnyResprayGarageBusy() {
+        const int32_t n = GetCount();
+        for (int32_t i = 0; i < n; ++i) {
+            const uint8_t* g = GetGarageAt(i);
+            if (g && g[0x4C] == 5 && g[0x4D] != 0) return true;
+        }
+        return false;
+    }
+} // namespace garages
 
 // ============================================================================
 // Native SCM Opcode Runner (Calls CRunningScript::ProcessOneCommand 0x00469EB0)
@@ -1683,6 +1719,7 @@ public:
     }
 
     ScriptCmd& Int(int32_t v) {
+        if (m_pos + 5 > sizeof(m_buf)) { m_overflow = true; return *this; }
         m_buf[m_pos++] = 1;
         std::memcpy(m_buf + m_pos, &v, 4);
         m_pos += 4;
@@ -1690,6 +1727,7 @@ public:
     }
 
     ScriptCmd& Float(float v) {
+        if (m_pos + 5 > sizeof(m_buf)) { m_overflow = true; return *this; }
         m_buf[m_pos++] = 6;
         std::memcpy(m_buf + m_pos, &v, 4);
         m_pos += 4;
@@ -1697,6 +1735,7 @@ public:
     }
 
     ScriptCmd& Str8(const char* s) {
+        if (m_pos + 9 > sizeof(m_buf)) { m_overflow = true; return *this; }
         m_buf[m_pos++] = 9;
         char tmp[8] = {};
         if (s) {
@@ -1712,6 +1751,7 @@ public:
     ScriptCmd& VarStr(const char* s) {
         size_t len = s ? std::strlen(s) : 0;
         if (len > 120) len = 120;
+        if (m_pos + 2 + len > sizeof(m_buf)) { m_overflow = true; return *this; }
         m_buf[m_pos++] = 14;
         m_buf[m_pos++] = static_cast<uint8_t>(len);
         if (len > 0) std::memcpy(m_buf + m_pos, s, len);
@@ -1720,6 +1760,7 @@ public:
     }
 
     ScriptCmd& Out(int32_t& outVar) {
+        if (m_numOutputs >= 16 || m_pos + 3 > sizeof(m_buf)) { m_overflow = true; return *this; }
         uint16_t slot = m_numOutputs;
         m_outInt[slot] = &outVar;
         m_outIsFloat[slot] = false;
@@ -1731,6 +1772,7 @@ public:
     }
 
     ScriptCmd& Out(float& outVar) {
+        if (m_numOutputs >= 16 || m_pos + 3 > sizeof(m_buf)) { m_overflow = true; return *this; }
         uint16_t slot = m_numOutputs;
         m_outFloat[slot] = &outVar;
         m_outIsFloat[slot] = true;
@@ -1742,6 +1784,7 @@ public:
     }
 
     bool Run() {
+        if (m_overflow) return false;
         alignas(16) uint8_t script[SCRIPT_STRUCT_SIZE];
         std::memset(script, 0, sizeof(script));
         *reinterpret_cast<uint8_t**>(script + 0x10) = m_buf;
@@ -1768,6 +1811,7 @@ private:
     uint8_t  m_buf[256] = {};
     size_t   m_pos = 0;
     uint16_t m_numOutputs = 0;
+    bool     m_overflow = false;
     int32_t* m_outInt[16] = {};
     float*   m_outFloat[16] = {};
     bool     m_outIsFloat[16] = {};

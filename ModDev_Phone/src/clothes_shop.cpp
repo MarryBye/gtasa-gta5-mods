@@ -6,9 +6,13 @@
 #include <string>
 #include <vector>
 #include <windows.h>
+#include "common_utils.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
 #include "memory.hpp"
+#include "mod_bus.hpp"
 #include "phone_config.hpp"
+#include "progression_rules.hpp"
 #include "sa_sdk.hpp"
 #include "ui_kit.hpp"
 #include "wardrobe.hpp"
@@ -20,12 +24,6 @@ namespace {
 constexpr float kPi  = 3.14159265358979323846f;
 constexpr float kPi2 = 6.28318530718530717959f;
 
-enum class ShopMode : uint8_t {
-    None = 0,
-    Clothes,
-    Barber
-};
-
 enum class Screen : uint8_t {
     Categories = 0,
     Items
@@ -35,7 +33,6 @@ using FnMenuProcess = void(__cdecl*)(int8_t);
 FnMenuProcess g_origMenuProcess = nullptr;
 
 bool     g_shopActive         = false;
-ShopMode g_mode               = ShopMode::None;
 bool     g_forwardExit        = false;
 uint32_t g_exitCooldownUntil  = 0;
 int      g_exitPulseCounter   = 0;
@@ -44,40 +41,31 @@ int      g_catCursor          = 0;
 int      g_itemCursor         = 0;
 
 const wardrobe::ShopCatalog* g_activeShop = nullptr;
-std::vector<int>             g_availSlots;  // Clothes: indices 0..6 that have items in this shop
-std::vector<int>             g_slotItems;   // Clothes or Haircuts catalog indices
+std::vector<int>             g_availSlots;
+std::vector<int>             g_slotItems;
 
 wardrobe::ClothSnapshot      g_savedSnap{};
-bool                         g_camActive        = false;
-float                        g_camAngle         = 0.0f;  // Interactive 360° camera orbit around CJ (Q/E)
-float                        g_camBaseAngle     = 0.0f;  // Default front-facing camera angle (for C reset)
-float                        g_camDist          = 2.0f;  // Base unobstructed showroom distance
-float                        g_camZoomOffset    = 0.0f;  // Interactive Z/X camera zoom offset
-sa::CVector                  g_savedPos{};               // CJ's original fitting booth position
+ui::OrbitCameraRig           g_camRig{};
+sa::CVector                  g_savedPos{};
 bool                         g_hasSavedPos      = false;
-sa::CVector                  g_showroomPos{};            // Bright open showroom floor position
-float                        g_savedHeadingDeg  = 0.0f;  // CJ heading before entering clothes shop
+sa::CVector                  g_showroomPos{};
+float                        g_savedHeadingDeg  = 0.0f;
 bool                         g_hasSavedHeading  = false;
-float                        g_pedYawDeg        = 0.0f;  // Fixed front-facing showroom heading for CJ
-float                        g_barberBaseAngle  = 0.0f;  // Base front angle of barber chair
-float                        g_barberOrbitOff   = 0.0f;  // Interactive camera orbit offset (Barber)
-float                        g_barberZoomOffset = 0.0f;  // Interactive Z/X camera zoom offset (Barber)
+float                        g_pedYawDeg        = 0.0f;
 
-// Verified open showroom floor coordinates for all 6 GTA SA clothing store interiors (from data\maps\interior\gen_int5.ipl)!
-// Moves CJ out of the closed fitting-room cubicle behind the curtain onto the bright, unobstructed main showroom floor.
 struct ShowroomSpot {
     const char* shopKey;
     float       x, y, z;
-    float       camDirAngle; // Angle from CJ toward the wide-open entrance aisle where the camera sits
+    float       camDirAngle;
 };
 
 constexpr ShowroomSpot kShowroomSpots[6] = {
-    {"LACS1",   203.78f,  -45.30f, 1001.80f, -kPi * 0.5f}, // Sub Urban (camera South looking North)
-    {"CSSPRT",  207.05f, -135.60f, 1003.51f, -kPi * 0.5f}, // ProLaps (camera South looking North)
-    {"CSCHP",   207.74f, -105.80f, 1005.26f, -kPi * 0.5f}, // Binco (camera South looking North)
-    {"CLOTHGP", 161.39f,  -92.10f, 1001.80f, -kPi * 0.5f}, // ZIP (camera South looking North)
-    {"CSEXL",   204.33f, -163.50f, 1000.52f, -kPi * 0.5f}, // Didier Sachs (camera South looking North)
-    {"CSDESGN", 223.10f,   -7.43f, 1002.21f,  0.0f},       // Victim (camera East looking West)
+    {"LACS1",   203.78f,  -45.30f, 1001.80f, -kPi * 0.5f},
+    {"CSSPRT",  207.05f, -135.60f, 1003.51f, -kPi * 0.5f},
+    {"CSCHP",   207.74f, -105.80f, 1005.26f, -kPi * 0.5f},
+    {"CLOTHGP", 161.39f,  -92.10f, 1001.80f, -kPi * 0.5f},
+    {"CSEXL",   204.33f, -163.50f, 1000.52f, -kPi * 0.5f},
+    {"CSDESGN", 223.10f,   -7.43f, 1002.21f,  0.0f},
 };
 
 const ShowroomSpot* FindShowroomSpot(const char* shopKey) {
@@ -88,44 +76,20 @@ const ShowroomSpot* FindShowroomSpot(const char* shopKey) {
     return nullptr;
 }
 
-sa::tMenuPanel* GetInterceptedPanel(ShopMode* outMode = nullptr) {
+// Intercepts only the 6 Clothing Store chains (CLOT*) during Free Roam;
+// Barber shops (HAIR*) stay unclaimed so GTA5UIKit restyles them natively with full barber animations!
+sa::tMenuPanel* GetInterceptedPanel() {
     if (!pcfg::Get().enableClothesShopUI) return nullptr;
     sa::tMenuPanel* p = sa::GetMenuPanel(0);
     if (!p) return nullptr;
 
     const char* loadedShop = sa::shopping::GetLoadedShopName();
     if (std::strncmp(p->m_acTitle, "CLOT", 4) == 0) {
-        // Story Mission Safety: During missions (e.g. "Nines and AKs" at Binco), yield to vanilla cloth.sc
-        // (GTA5UIKit still renders it in our modern style with unified controls!) so mission flags always trigger!
         if (!sa::IsOnMission() && wardrobe::FindShopCatalog(loadedShop)) {
-            if (outMode) *outMode = ShopMode::Clothes;
-            return p;
-        }
-    } else if (std::strncmp(p->m_acTitle, "HAIR", 4) == 0) {
-        // Story Mission Safety: NEVER intercept Barber during missions (e.g., Mission 2 "Ryder" scripted cutscene!)
-        if (!sa::IsOnMission() && wardrobe::FindBarberCatalog(loadedShop)) {
-            if (outMode) *outMode = ShopMode::Barber;
             return p;
         }
     }
     return nullptr;
-}
-
-float ProbeRayClearDist(const sa::CVector& origin, float angleRad, float maxDist) {
-    sa::CVector target{
-        origin.x + std::cos(angleRad) * maxDist,
-        origin.y + std::sin(angleRad) * maxDist,
-        origin.z
-    };
-    sa::CColPoint col{};
-    sa::CEntity* hitEnt = nullptr;
-    if (sa::ProcessLineOfSight(origin, target, col, hitEnt,
-                               true, false, false, true, false, false, false, false)) {
-        float dx = col.m_vecPoint.x - origin.x;
-        float dy = col.m_vecPoint.y - origin.y;
-        return std::sqrt(dx * dx + dy * dy);
-    }
-    return maxDist;
 }
 
 void BeginClothesPreviewCam(sa::CPed* ped) {
@@ -136,11 +100,10 @@ void BeginClothesPreviewCam(sa::CPed* ped) {
     g_hasSavedPos = true;
 
     if (pedH > 0) {
-        sa::ScriptCmd(0x0172).Int(pedH).Out(g_savedHeadingDeg).Run(); // GET_CHAR_HEADING
+        sa::ScriptCmd(0x0172).Int(pedH).Out(g_savedHeadingDeg).Run();
         g_hasSavedHeading = true;
     }
 
-    // Move CJ out of the closed fitting-room cubicle onto the bright open showroom floor!
     const ShowroomSpot* spot = g_activeShop ? FindShowroomSpot(g_activeShop->shopKey.c_str()) : nullptr;
     float preferredCamAngle  = 0.0f;
     bool  hasPreferredAngle  = false;
@@ -149,9 +112,9 @@ void BeginClothesPreviewCam(sa::CPed* ped) {
         sa::ScriptCmd(0x02CE).Float(spot->x).Float(spot->y).Float(spot->z + 1.5f).Out(gz).Run();
         float placeZ = (gz > spot->z - 3.0f && gz < spot->z + 2.0f) ? gz : (spot->z - 0.95f);
         g_showroomPos = {spot->x, spot->y, placeZ};
-        sa::ScriptCmd(0x00A1).Int(pedH).Float(g_showroomPos.x).Float(g_showroomPos.y).Float(g_showroomPos.z).Run(); // SET_CHAR_COORDINATES
-        sa::ScriptCmd(0x04D7).Int(pedH).Int(1).Run(); // FREEZE_CHAR_POSITION true
-        sa::ScriptCmd(0x0337).Int(pedH).Int(1).Run(); // SET_CHAR_VISIBLE true
+        sa::ScriptCmd(0x00A1).Int(pedH).Float(g_showroomPos.x).Float(g_showroomPos.y).Float(g_showroomPos.z).Run();
+        sa::ScriptCmd(0x04D7).Int(pedH).Int(1).Run();
+        sa::ScriptCmd(0x0337).Int(pedH).Int(1).Run();
         preferredCamAngle = spot->camDirAngle;
         hasPreferredAngle = true;
     } else {
@@ -164,13 +127,15 @@ void BeginClothesPreviewCam(sa::CPed* ped) {
     float fwdAngle  = hasPreferredAngle ? preferredCamAngle : std::atan2(fwd.y, fwd.x);
     sa::CVector eye{p.x, p.y, p.z + 0.35f};
 
+    float initAngle = preferredCamAngle;
+    float initDist  = 2.0f;
     if (hasPreferredAngle) {
-        float clearPref = ProbeRayClearDist(eye, preferredCamAngle, 2.75f);
+        float clearPref = sa::ProbeLineOfSightClearDist(eye, preferredCamAngle, 2.75f);
         if (clearPref >= 1.85f) {
-            g_camAngle = preferredCamAngle;
-            g_camDist  = std::clamp(clearPref - 0.30f, 1.65f, 2.20f);
+            initAngle = preferredCamAngle;
+            initDist  = std::clamp(clearPref - 0.30f, 1.65f, 2.20f);
         } else {
-            hasPreferredAngle = false; // Fall back to 16-ray open-aisle scan
+            hasPreferredAngle = false;
         }
     }
 
@@ -180,57 +145,46 @@ void BeginClothesPreviewCam(sa::CPed* ped) {
         float clearD[kRays];
         for (int i = 0; i < kRays; ++i) {
             float a = kPi2 * static_cast<float>(i) / static_cast<float>(kRays);
-            clearD[i] = ProbeRayClearDist(eye, a, kProbeMax);
+            clearD[i] = sa::ProbeLineOfSightClearDist(eye, a, kProbeMax);
         }
-
         int   bestIdx   = 0;
         float bestScore = -1.0f;
         for (int i = 0; i < kRays; ++i) {
-            float a       = kPi2 * static_cast<float>(i) / static_cast<float>(kRays);
-            float cSelf   = clearD[i];
-            float cLeft   = clearD[(i + kRays - 1) % kRays];
-            float cRight  = clearD[(i + 1) % kRays];
+            float a        = kPi2 * static_cast<float>(i) / static_cast<float>(kRays);
+            float cSelf    = clearD[i];
+            float cLeft    = clearD[(i + kRays - 1) % kRays];
+            float cRight   = clearD[(i + 1) % kRays];
             float widthMin = std::min({cSelf, cLeft * 0.94f + 0.15f, cRight * 0.94f + 0.15f});
-            float fwdAlign = std::cos(a - fwdAngle);
-            float score    = widthMin + 0.12f * fwdAlign;
+            float score    = widthMin + 0.12f * std::cos(a - fwdAngle);
             if (score > bestScore) {
                 bestScore = score;
                 bestIdx   = i;
             }
         }
-        g_camAngle = kPi2 * static_cast<float>(bestIdx) / static_cast<float>(kRays);
-        g_camDist  = std::clamp(clearD[bestIdx] - 0.32f, 1.45f, 2.20f);
+        initAngle = kPi2 * static_cast<float>(bestIdx) / static_cast<float>(kRays);
+        initDist  = std::clamp(clearD[bestIdx] - 0.32f, 1.45f, 2.20f);
     }
 
-    // Turn CJ cleanly forward facing the initial open showroom aisle (camera will orbit around CJ on Q/E!)
-    g_camBaseAngle  = g_camAngle;
-    g_camZoomOffset = 0.0f;
-    float toCamX = std::cos(g_camAngle);
-    float toCamY = std::sin(g_camAngle);
+    g_camRig.Begin(initAngle, initDist, 0.30f, 0.88f, 2.75f, 0.21f);
+    g_camRig.minClearDist = 0.72f;
+    g_camRig.wallMargin   = 0.22f;
+
+    float toCamX = std::cos(initAngle);
+    float toCamY = std::sin(initAngle);
     g_pedYawDeg  = std::atan2(-toCamX, toCamY) * (180.0f / kPi);
     if (pedH > 0) {
-        sa::ScriptCmd(0x0173).Int(pedH).Float(g_pedYawDeg).Run(); // SET_CHAR_HEADING
+        sa::ScriptCmd(0x0173).Int(pedH).Float(g_pedYawDeg).Run();
     }
-    g_camActive = true;
-}
-
-void BeginBarberPreviewCam(sa::CPed* ped) {
-    if (!sa::IsPedValid(ped)) return;
-    sa::CVector fwd    = ped->GetForward();
-    g_barberBaseAngle  = std::atan2(fwd.y, fwd.x);
-    g_barberOrbitOff   = 0.0f;
-    g_barberZoomOffset = 0.0f;
-    g_camActive        = true;
 }
 
 void EndPreviewCam() {
-    if (g_camActive) {
-        g_camActive = false;
+    if (g_camRig.active) {
+        g_camRig.Reset();
         sa::CPed* ped = sa::FindPlayerPed(0);
         int32_t pedH  = sa::GetPedHandle(ped);
         if (pedH > 0) {
             if (g_hasSavedPos) {
-                sa::ScriptCmd(0x04D7).Int(pedH).Int(0).Run(); // FREEZE_CHAR_POSITION false
+                sa::ScriptCmd(0x04D7).Int(pedH).Int(0).Run();
                 sa::ScriptCmd(0x00A1).Int(pedH).Float(g_savedPos.x).Float(g_savedPos.y).Float(g_savedPos.z - 0.95f).Run();
                 g_hasSavedPos = false;
             }
@@ -239,7 +193,7 @@ void EndPreviewCam() {
                 g_hasSavedHeading = false;
             }
         }
-        sa::ScriptCmd(0x02EB).Run(); // RESTORE_CAMERA_JUMPCUT
+        sa::ScriptCmd(0x02EB).Run();
     }
 }
 
@@ -247,7 +201,7 @@ void RebuildAvailableSlots() {
     g_availSlots.clear();
     if (!g_activeShop) return;
     const auto& cat = wardrobe::Catalog();
-    for (int s = 0; s < 7; ++s) { // 0..6 = Torso, Legs, Shoes, Chains, Watches, Glasses, Hats
+    for (int s = 0; s < 7; ++s) {
         uint32_t bp = wardrobe::kSlotBodyParts[s];
         bool hasAny = false;
         for (int idx : g_activeShop->itemIndices) {
@@ -277,55 +231,35 @@ void RebuildSlotItems(int slotIdx) {
 void PreviewHighlightedItem() {
     sa::CPed* ped = sa::FindPlayerPed(0);
     if (!sa::IsPedValid(ped) || g_itemCursor < 0 || g_itemCursor >= static_cast<int>(g_slotItems.size())) return;
-    if (g_mode == ShopMode::Barber) {
-        wardrobe::ApplyHaircutItem(ped, g_slotItems[g_itemCursor]);
-    } else {
-        wardrobe::ApplyClothItem(ped, g_slotItems[g_itemCursor], true);
-    }
+    wardrobe::ApplyClothItem(ped, g_slotItems[g_itemCursor], true);
 }
 
 void CloseShopCleanly() {
     sa::CPed* ped = sa::FindPlayerPed(0);
-    if ((g_mode == ShopMode::Barber || g_screen == Screen::Items) && g_savedSnap.valid) {
+    if (g_screen == Screen::Items && g_savedSnap.valid) {
         wardrobe::RestoreSnapshot(ped, g_savedSnap);
     }
     EndPreviewCam();
     g_shopActive       = false;
-    g_mode             = ShopMode::None;
     g_forwardExit      = true;
     g_exitPulseCounter = 0;
     ui::TriggerPostCloseShield(160);
     sa::PlayFrontendSound(sa::SFX_BACK);
 }
 
+int ClothReqRank(const wardrobe::ClothItemDef& item) {
+    return g_activeShop ? prog_rules::ClothItemRank(g_activeShop->shopKey.c_str(), item.price) : 1;
+}
+
 void HandleSelect() {
     sa::CPed* ped = sa::FindPlayerPed(0);
     if (!sa::IsPedValid(ped)) return;
 
-    if (g_mode == ShopMode::Barber) {
-        if (g_itemCursor < 0 || g_itemCursor >= static_cast<int>(g_slotItems.size())) return;
-        int hairIdx = g_slotItems[g_itemCursor];
-        const auto& item = wardrobe::HairCatalog()[hairIdx];
-
-        if (g_savedSnap.valid && g_savedSnap.texKeys[1] == item.texHash) {
-            sa::PlayFrontendSound(sa::SFX_SCROLL);
-            ui::ShowHelp("Эта причёска уже на вас!", "You already have this haircut!");
-            return;
-        }
-        if (item.price > 0 && sa::GetPlayerMoney() < item.price) {
-            sa::PlayFrontendSound(sa::SFX_ERROR);
-            ui::ShowHelp("~r~Недостаточно денег!", "~r~Not enough money!");
-            return;
-        }
-        if (item.price > 0) {
-            sa::AddPlayerMoney(-item.price);
-        }
-        // Apply haircut permanently AND STAY SEATED IN THE BARBER CHAIR (never kick CJ out!)
-        wardrobe::ApplyHaircutItem(ped, hairIdx);
-        g_savedSnap = wardrobe::CaptureSnapshot(ped);
-        sa::PlayFrontendSound(sa::SFX_BUY);
-        ui::ShowHelp("~g~Причёска сделана!~w~ Выберите ещё или ~y~ПКМ/Back~w~ для выхода.",
-                     "~g~Haircut done!~w~ Pick another style or press ~y~RMB/Back~w~ to leave.");
+    // SA-COOP F4 Custom Skin Safety: NEVER deduct money when CClothes cannot apply to non-CJ models!
+    if (integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) {
+        sa::PlayFrontendSound(sa::SFX_ERROR);
+        ui::ShowHelp("~y~Доступно только для стандартного облика.",
+                     "~y~Requires the default character model.");
         return;
     }
 
@@ -345,24 +279,31 @@ void HandleSelect() {
         const auto& item = wardrobe::Catalog()[idx];
         bool owned = wardrobe::IsClothOwned(idx);
 
+        if (!owned) {
+            int reqRank = ClothReqRank(item);
+            if (!modbus::IsRankUnlocked(reqRank)) {
+                sa::PlayFrontendSound(sa::SFX_ERROR);
+                ui::ShowRankLockedHelp(reqRank);
+                return;
+            }
+        }
+
         if (!owned && item.price > 0) {
             if (sa::GetPlayerMoney() < item.price) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
-                ui::ShowHelp("~r~Недостаточно денег!", "~r~Not enough money!");
+                ui::ShowHelp("~r~Недостаточно денег.", "~r~Not enough money.");
                 return;
             }
             sa::AddPlayerMoney(-item.price);
             wardrobe::MarkClothOwned(idx);
             wardrobe::SaveNow();
             sa::PlayFrontendSound(sa::SFX_BUY);
-            ui::ShowHelp("~g~Одежда куплена и добавлена в гардероб телефона!",
-                         "~g~Clothing purchased & added to your Phone Wardrobe!");
+            ui::ShowHelp("~g~Одежда добавлена в гардероб.", "~g~Clothing added to Wardrobe.");
         } else {
             sa::PlayFrontendSound(sa::SFX_SELECT);
-            ui::ShowHelp("~g~Одежда надета!", "~g~Clothing equipped!");
+            ui::ShowHelp("~g~Одежда надета.", "~g~Clothing equipped.");
         }
 
-        // Commit current preview as new saved snapshot!
         wardrobe::ApplyClothItem(ped, idx, true);
         g_savedSnap = wardrobe::CaptureSnapshot(ped);
     }
@@ -370,7 +311,7 @@ void HandleSelect() {
 
 void HandleBack() {
     sa::CPed* ped = sa::FindPlayerPed(0);
-    if (g_mode == ShopMode::Clothes && g_screen == Screen::Items) {
+    if (g_screen == Screen::Items) {
         if (g_savedSnap.valid) {
             wardrobe::RestoreSnapshot(ped, g_savedSnap);
         }
@@ -383,21 +324,14 @@ void HandleBack() {
 
 void ProcessInput() {
     auto in = ui::ListInput().Poll(true);
-    int* cur = (g_mode == ShopMode::Clothes && g_screen == Screen::Categories) ? &g_catCursor : &g_itemCursor;
-    int  cnt = (g_mode == ShopMode::Clothes && g_screen == Screen::Categories)
+    int* cur = (g_screen == Screen::Categories) ? &g_catCursor : &g_itemCursor;
+    int  cnt = (g_screen == Screen::Categories)
         ? static_cast<int>(g_availSlots.size())
         : static_cast<int>(g_slotItems.size());
 
-    if (cnt > 0) {
-        if (in.up) {
-            *cur = (*cur - 1 + cnt) % cnt;
-            sa::PlayFrontendSound(sa::SFX_SCROLL);
-            if (g_mode == ShopMode::Barber || g_screen == Screen::Items) PreviewHighlightedItem();
-        } else if (in.down) {
-            *cur = (*cur + 1) % cnt;
-            sa::PlayFrontendSound(sa::SFX_SCROLL);
-            if (g_mode == ShopMode::Barber || g_screen == Screen::Items) PreviewHighlightedItem();
-        }
+    if (cnt > 0 && ui::ListInput().ApplyToCursor(*cur, cnt, in)) {
+        sa::PlayFrontendSound(sa::SFX_SCROLL);
+        if (g_screen == Screen::Items) PreviewHighlightedItem();
     }
 
     if (in.accept) {
@@ -418,14 +352,17 @@ void __cdecl HookedMenuProcess(int8_t menuId) {
 void InstallHooks() {
     g_origMenuProcess = reinterpret_cast<FnMenuProcess>(
         mem::HookCall(0x0058FCDA, reinterpret_cast<uintptr_t>(&HookedMenuProcess)));
-    modlog::Info("[ClothesShop] Hooked CMenuSystem::Process at 0x0058FCDA (Clothes Stores + Stay-In-Chair Barber).");
+    modlog::Info("[ClothesShop] Hooked CMenuSystem::Process at 0x0058FCDA.");
+}
+
+bool ShouldClaimShopPanel() {
+    return g_shopActive || g_forwardExit || (GetInterceptedPanel() != nullptr);
 }
 
 void PreScriptsTick() {
     if (sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) return;
 
-    ShopMode detectedMode = ShopMode::None;
-    sa::tMenuPanel* panel = GetInterceptedPanel(&detectedMode);
+    sa::tMenuPanel* panel = GetInterceptedPanel();
 
     if (g_forwardExit) {
         if (!panel) {
@@ -455,61 +392,33 @@ void PreScriptsTick() {
         const char* shopKey = sa::shopping::GetLoadedShopName();
         sa::CPed* ped       = sa::FindPlayerPed(0);
 
-        if (detectedMode == ShopMode::Barber) {
-            g_activeShop = wardrobe::FindBarberCatalog(shopKey);
-            if (!g_activeShop || g_activeShop->itemIndices.empty()) return;
+        g_activeShop = wardrobe::FindShopCatalog(shopKey);
+        if (!g_activeShop) return;
 
-            g_shopActive = true;
-            g_mode       = ShopMode::Barber;
-            g_screen     = Screen::Items;
-            g_slotItems  = g_activeShop->itemIndices;
-            g_savedSnap  = wardrobe::CaptureSnapshot(ped);
-            g_itemCursor = 0;
-            for (size_t i = 0; i < g_slotItems.size(); ++i) {
-                if (wardrobe::IsHaircutWorn(ped, g_slotItems[i])) {
-                    g_itemCursor = static_cast<int>(i);
-                    break;
-                }
-            }
-            BeginBarberPreviewCam(ped);
-            ui::LockMenuInputBriefly(180);
-            ui::SyncIdleMouseEdges();
-            sa::PlayFrontendSound(sa::SFX_SELECT);
-            modlog::Info("[BarberShop] Opened Stay-In-Chair Barber UI '%s' (%zu styles).",
-                         g_activeShop->shopKey.c_str(), g_slotItems.size());
-        } else {
-            g_activeShop = wardrobe::FindShopCatalog(shopKey);
-            if (!g_activeShop) return;
-
-            g_shopActive = true;
-            g_mode       = ShopMode::Clothes;
-            g_screen     = Screen::Categories;
-            g_catCursor  = 0;
-            g_itemCursor = 0;
-            RebuildAvailableSlots();
-            wardrobe::SyncWornClothesToOwned(ped);
-            BeginClothesPreviewCam(ped);
-            ui::LockMenuInputBriefly(180);
-            ui::SyncIdleMouseEdges();
-            sa::PlayFrontendSound(sa::SFX_SELECT);
-            modlog::Info("[ClothesShop] Opened UI Kit Clothes Shop '%s' (open-aisle cam dist=%.2fm).",
-                         g_activeShop->shopKey.c_str(), g_camDist);
-        }
+        g_shopActive = true;
+        g_screen     = Screen::Categories;
+        g_catCursor  = 0;
+        g_itemCursor = 0;
+        RebuildAvailableSlots();
+        wardrobe::SyncWornClothesToOwned(ped);
+        BeginClothesPreviewCam(ped);
+        ui::LockMenuInputBriefly(180);
+        sa::PlayFrontendSound(sa::SFX_SELECT);
+        modlog::Info("[ClothesShop] Opened Clothes Shop '%s' (cam dist=%.2fm).",
+                     g_activeShop->shopKey.c_str(), g_camRig.baseDist);
     } else if (!panel && g_shopActive) {
         EndPreviewCam();
         g_shopActive = false;
-        g_mode       = ShopMode::None;
         return;
     }
 
     if (g_shopActive) {
         ProcessInput();
-        sa::ClearPadMenuInputs();
     }
 }
 
 void PostScriptsTick() {
-    if (!g_shopActive || !g_camActive || sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) return;
+    if (!g_shopActive || !g_camRig.active || sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) return;
     sa::CPed* ped = sa::FindPlayerPed(0);
     if (!sa::IsPedValid(ped)) return;
 
@@ -517,94 +426,42 @@ void PostScriptsTick() {
     auto cam = ui::ListInputController::PollCamera(dt, 1.85f, 1.40f);
     int32_t pedH  = sa::GetPedHandle(ped);
 
-    if (g_mode == ShopMode::Clothes) {
-        // Keep CJ standing steadily in the bright open showroom while CAMERA orbits 360° around him (Q/E) & zooms (Z/X)!
-        if (pedH > 0) {
-            sa::CVector curP = ped->GetPosition();
-            if (g_hasSavedPos && curP.Dist2D(g_showroomPos) > 0.45f) {
-                sa::ScriptCmd(0x00A1).Int(pedH).Float(g_showroomPos.x).Float(g_showroomPos.y).Float(g_showroomPos.z).Run();
-                sa::ScriptCmd(0x04D7).Int(pedH).Int(1).Run();
-            }
-            sa::ScriptCmd(0x0337).Int(pedH).Int(1).Run(); // SET_CHAR_VISIBLE(ped, TRUE)
-            sa::ScriptCmd(0x0173).Int(pedH).Float(g_pedYawDeg).Run(); // Hold CJ facing forward steadily!
+    if (pedH > 0) {
+        sa::CVector curP = ped->GetPosition();
+        if (g_hasSavedPos && curP.Dist2D(g_showroomPos) > 0.45f) {
+            sa::ScriptCmd(0x00A1).Int(pedH).Float(g_showroomPos.x).Float(g_showroomPos.y).Float(g_showroomPos.z).Run();
+            sa::ScriptCmd(0x04D7).Int(pedH).Int(1).Run();
         }
-
-        g_camAngle     += cam.orbitDelta;
-        g_camZoomOffset = std::clamp(g_camZoomOffset + cam.zoomDelta, -0.95f, 0.85f);
-        if (cam.resetCam) {
-            g_camAngle      = g_camBaseAngle;
-            g_camZoomOffset = 0.0f;
-        }
-
-        sa::CVector p = ped->GetPosition();
-        float baseDist = g_camDist;
-        float camZ     = p.z + 0.30f;
-        float lookZ    = p.z + 0.06f;
-
-        if (g_screen == Screen::Items && g_catCursor >= 0 && g_catCursor < static_cast<int>(g_availSlots.size())) {
-            int slotIdx = g_availSlots[g_catCursor];
-            if (slotIdx == 2) { // Shoes -> frame feet cleanly
-                baseDist = std::min(g_camDist, 1.65f);
-                camZ     = p.z - 0.12f;
-                lookZ    = p.z - 0.45f;
-            } else if (slotIdx == 5 || slotIdx == 6) { // Glasses / Hats -> close-up on head
-                baseDist = std::min(g_camDist, 1.32f);
-                camZ     = p.z + 0.62f;
-                lookZ    = p.z + 0.56f;
-            } else if (slotIdx == 3 || slotIdx == 4) { // Chains / Watches -> upper torso
-                baseDist = std::min(g_camDist, 1.55f);
-                camZ     = p.z + 0.42f;
-                lookZ    = p.z + 0.28f;
-            }
-        }
-
-        // Dynamic wall/rack collision clamp so 360° orbit + Z/X zoom NEVER clips behind interior walls!
-        float desiredDist = std::clamp(baseDist + g_camZoomOffset, 0.88f, 2.75f);
-        sa::CVector rayOrigin{p.x, p.y, lookZ + 0.15f};
-        float clearD = ProbeRayClearDist(rayOrigin, g_camAngle, desiredDist + 0.22f);
-        float dist   = std::clamp(clearD - 0.22f, 0.72f, desiredDist);
-
-        float cosA = std::cos(g_camAngle);
-        float sinA = std::sin(g_camAngle);
-        float camX = p.x + cosA * dist;
-        float camY = p.y + sinA * dist;
-
-        // Shift look-at slightly toward camera-LEFT so CJ stands prominently in the right 60% of the screen,
-        // 100% clear of the left ListMenu! (camRight = (-sinA, cosA), so -camRight = (+sinA, -cosA))
-        float sideShift = dist * 0.21f;
-        float lookX = p.x + sinA * sideShift;
-        float lookY = p.y - cosA * sideShift;
-
-        sa::ScriptCmd(0x015F).Float(camX).Float(camY).Float(camZ).Float(0.0f).Float(0.0f).Float(0.0f).Run();
-        sa::ScriptCmd(0x0160).Float(lookX).Float(lookY).Float(lookZ).Int(2).Run();
-    } else if (g_mode == ShopMode::Barber) {
-        g_barberOrbitOff   = std::clamp(g_barberOrbitOff + cam.orbitDelta, -2.0f, 2.0f);
-        g_barberZoomOffset = std::clamp(g_barberZoomOffset + cam.zoomDelta, -0.40f, 0.55f);
-        if (cam.resetCam) {
-            g_barberOrbitOff   = 0.0f;
-            g_barberZoomOffset = 0.0f;
-        }
-
-        sa::CVector p = ped->GetPosition();
-        float ang     = g_barberBaseAngle + g_barberOrbitOff;
-        sa::CVector headPos{p.x, p.y, p.z + 0.58f};
-        float desired = std::clamp(1.15f + g_barberZoomOffset, 0.72f, 1.65f);
-        float clearD  = ProbeRayClearDist(headPos, ang, desired + 0.22f);
-        float dist    = std::clamp(clearD - 0.22f, 0.65f, desired);
-
-        float cosA = std::cos(ang);
-        float sinA = std::sin(ang);
-        float camX = headPos.x + cosA * dist;
-        float camY = headPos.y + sinA * dist;
-        float camZ = headPos.z + 0.08f;
-
-        float sideShift = dist * 0.19f;
-        float lookX = headPos.x + sinA * sideShift;
-        float lookY = headPos.y - cosA * sideShift;
-
-        sa::ScriptCmd(0x015F).Float(camX).Float(camY).Float(camZ).Float(0.0f).Float(0.0f).Float(0.0f).Run();
-        sa::ScriptCmd(0x0160).Float(lookX).Float(lookY).Float(headPos.z).Int(2).Run();
+        sa::ScriptCmd(0x0337).Int(pedH).Int(1).Run();
+        sa::ScriptCmd(0x0173).Int(pedH).Float(g_pedYawDeg).Run();
     }
+
+    sa::CVector p = ped->GetPosition();
+    float slotBaseDist = g_camRig.baseDist;
+    float camHeightOff = 0.30f;
+    float lookZOff     = 0.06f;
+
+    if (g_screen == Screen::Items && g_catCursor >= 0 && g_catCursor < static_cast<int>(g_availSlots.size())) {
+        int slotIdx = g_availSlots[g_catCursor];
+        if (slotIdx == 2) {
+            slotBaseDist = std::min(g_camRig.baseDist, 1.65f);
+            camHeightOff = -0.12f;
+            lookZOff     = -0.45f;
+        } else if (slotIdx == 5 || slotIdx == 6) {
+            slotBaseDist = std::min(g_camRig.baseDist, 1.32f);
+            camHeightOff = 0.62f;
+            lookZOff     = 0.56f;
+        } else if (slotIdx == 3 || slotIdx == 4) {
+            slotBaseDist = std::min(g_camRig.baseDist, 1.55f);
+            camHeightOff = 0.42f;
+            lookZOff     = 0.28f;
+        }
+    }
+
+    g_camRig.Update(cam);
+    g_camRig.dist         = std::clamp(slotBaseDist + g_camRig.zoomOffset, g_camRig.minDist, g_camRig.maxDist);
+    g_camRig.heightOffset = camHeightOff;
+    g_camRig.Apply(p, lookZOff, lookZOff + 0.15f);
 }
 
 void Render2D() {
@@ -613,44 +470,13 @@ void Render2D() {
     const int32_t money = sa::GetPlayerMoney();
 
     ui::ListMenu menu;
-    menu.SetPosition(24.0f, 72.0f, 206.0f).SetMaxVisible(11);
-
-    if (g_mode == ShopMode::Barber) {
-        const auto& hairs = wardrobe::HairCatalog();
-        menu.SetTitle(ui::Loc(g_activeShop->nameRus.c_str(), g_activeShop->nameEng.c_str()))
-            .SetColumns(ui::Loc("ПРИЧЁСКА", "HAIRCUT"), ui::Loc("ЦЕНА", "PRICE"))
-            .SetFooter(ui::StandardFooter("Подстричься", "Buy Cut", "Встать", "Leave", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom"));
-
-        for (int hairIdx : g_slotItems) {
-            const auto& item = hairs[hairIdx];
-            bool worn = g_savedSnap.valid && (g_savedSnap.texKeys[1] == item.texHash);
-            std::string right = worn ? ui::Loc("Сейчас", "Current") : ui::FormatPrice(item.price);
-            sa::CRGBA col     = worn
-                ? sa::CRGBA{115, 225, 130, 255}
-                : ((money >= item.price) ? sa::CRGBA{220, 220, 220, 255} : sa::CRGBA{235, 95, 95, 255});
-            menu.AddItem(wardrobe::GetClothDisplayNameGame(item), right, col, true);
-        }
-        menu.SetSelected(g_itemCursor);
-        menu.Render();
-
-        if (g_itemCursor >= 0 && g_itemCursor < static_cast<int>(g_slotItems.size())) {
-            const auto& item = hairs[g_slotItems[g_itemCursor]];
-            ui::StatsCard card;
-            card.SetTitle(ui::Loc("СТИЛЬ", "STYLE"), wardrobe::GetClothDisplayNameGame(item))
-                .SetAnchor(true, 148.0f, 16.0f, 18.0f)
-                .SetNote(ui::Loc("CJ остаётся в кресле после стрижки", "CJ stays in the chair after haircut"))
-                .AddBar(ui::Loc("Авторитет", "Respect"),    item.respect, item.respect, 30, "")
-                .AddBar(ui::Loc("Привлекат.", "Sex Appeal"), item.sexy,    item.sexy,    30, "");
-            card.Render();
-        }
-        return;
-    }
+    menu.SetPosition(24.0f, 72.0f, 194.0f).SetMaxVisible(11);
 
     const auto& cat = wardrobe::Catalog();
     if (g_screen == Screen::Categories) {
         menu.SetTitle(ui::Loc(g_activeShop->nameRus.c_str(), g_activeShop->nameEng.c_str()))
-            .SetColumns(ui::Loc("КАТЕГОРИЯ ОДЕЖДЫ", "CLOTHING CATEGORY"), ui::Loc("КУПЛЕНО", "OWNED"))
-            .SetFooter(ui::StandardFooter("Выбр.", "Select", "Выход", "Exit", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom"));
+            .SetColumns(ui::Loc("КАТЕГОРИЯ", "CATEGORY"), ui::Loc("КУПЛЕНО", "OWNED"))
+            .SetFooter(ui::StandardFooter("Выбрать", "Select", "Выход", "Exit", "Q/E Кам. Z/X Прибл.", "Q/E Cam Z/X Zoom"));
 
         for (int slotIdx : g_availSlots) {
             uint32_t bp = wardrobe::kSlotBodyParts[slotIdx];
@@ -664,43 +490,53 @@ void Render2D() {
             char cb[24];
             std::snprintf(cb, sizeof(cb), "%d/%d", own, tot);
             menu.AddItem(ui::Loc(wardrobe::SlotNameRus(slotIdx), wardrobe::SlotNameEng(slotIdx)),
-                         cb, (own > 0) ? sa::CRGBA{120, 225, 130, 255} : sa::CRGBA{190, 190, 190, 255}, true);
+                         cb, (own > 0) ? ui::ColorSuccess() : ui::ColorNormal(), true);
         }
         menu.SetSelected(g_catCursor);
     } else {
         int slotIdx = g_availSlots[std::clamp(g_catCursor, 0, static_cast<int>(g_availSlots.size()) - 1)];
         menu.SetTitle(ui::Loc(wardrobe::SlotNameRus(slotIdx), wardrobe::SlotNameEng(slotIdx)))
-            .SetColumns(ui::Loc("ОДЕЖДА", "ITEM"), ui::Loc("ЦЕНА / СТАТУС", "PRICE / STATUS"))
-            .SetFooter(ui::StandardFooter("Куп./Над.", "Buy/Wear", "Назад", "Back", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom"));
+            .SetColumns(ui::Loc("ОДЕЖДА", "ITEM"), ui::Loc("ЦЕНА", "PRICE"))
+            .SetFooter(ui::StandardFooter("Купить", "Buy", "Назад", "Back", "Q/E Кам. Z/X Прибл.", "Q/E Cam Z/X Zoom"));
 
         for (int idx : g_slotItems) {
             const auto& item = cat[idx];
-            bool owned = wardrobe::IsClothOwned(idx);
-            std::string right;
-            sa::CRGBA col;
-            if (owned) {
-                right = ui::Loc("Куплено", "Owned");
-                col   = {115, 225, 130, 255};
+            bool owned   = wardrobe::IsClothOwned(idx);
+            int  reqRank = ClothReqRank(item);
+            if (!owned && !modbus::IsRankUnlocked(reqRank)) {
+                menu.AddItem(wardrobe::GetClothDisplayNameGame(item), ui::FormatRankLock(reqRank), ui::ColorDisabled(), false);
             } else {
-                right = ui::FormatPrice(item.price);
-                col   = (money >= item.price) ? sa::CRGBA{220, 220, 220, 255} : sa::CRGBA{235, 95, 95, 255};
+                std::string right = owned ? ui::Loc("Куплено", "Owned")
+                                          : common::FormatPrice(item.price, ui::UseRussianFlag());
+                sa::CRGBA col     = owned
+                    ? ui::ColorSuccess()
+                    : ((money >= item.price) ? ui::ColorNormal() : ui::ColorDanger());
+                menu.AddItem(wardrobe::GetClothDisplayNameGame(item), right, col, true);
             }
-            menu.AddItem(wardrobe::GetClothDisplayNameGame(item), right, col, true);
         }
         menu.SetSelected(g_itemCursor);
     }
     menu.Render();
 
-    // Right StatsCard when previewing items (shows Respect & Sex Appeal bonus!)
     if (g_screen == Screen::Items && g_itemCursor >= 0 && g_itemCursor < static_cast<int>(g_slotItems.size())) {
         const auto& item = cat[g_slotItems[g_itemCursor]];
+        bool owned   = wardrobe::IsClothOwned(g_slotItems[g_itemCursor]);
+        int  reqRank = ClothReqRank(item);
+        std::string note;
+        if (owned) {
+            note = ui::Loc("Уже в гардеробе", "In Wardrobe");
+        } else if (!modbus::IsRankUnlocked(reqRank)) {
+            char lb[64];
+            std::snprintf(lb, sizeof(lb), "%s: %d", ui::Loc("Нужен уровень", "Requires Rank").c_str(), reqRank);
+            note = lb;
+        } else {
+            note = ui::Loc("Будет доступно в Телефоне", "Available in Phone after purchase");
+        }
         ui::StatsCard card;
         card.SetTitle(ui::Loc("СТИЛЬ", "STYLE"), wardrobe::GetClothDisplayNameGame(item))
-            .SetAnchor(true, 148.0f, 16.0f, 18.0f)
-            .SetNote(wardrobe::IsClothOwned(g_slotItems[g_itemCursor])
-                ? ui::Loc("Уже в гардеробе (надеть беспл.)", "In Wardrobe (equip free)")
-                : ui::Loc("После покупки доступно в Телефоне", "Available in Phone after purchase"))
-            .AddBar(ui::Loc("Авторитет", "Respect"),    item.respect, item.respect, 30, "")
+            .SetAnchor(true, 0.0f, 16.0f, 18.0f)
+            .SetNote(note)
+            .AddBar(ui::Loc("Авторитет",  "Respect"),    item.respect, item.respect, 30, "")
             .AddBar(ui::Loc("Привлекат.", "Sex Appeal"), item.sexy,    item.sexy,    30, "");
         card.Render();
     }
@@ -711,7 +547,6 @@ bool IsShopActive() { return g_shopActive || g_forwardExit; }
 void Reset() {
     EndPreviewCam();
     g_shopActive  = false;
-    g_mode        = ShopMode::None;
     g_forwardExit = false;
     g_activeShop  = nullptr;
 }

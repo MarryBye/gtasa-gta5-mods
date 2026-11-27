@@ -1,6 +1,7 @@
-#include <cstring>
 #include <windows.h>
 #include "clothes_shop.hpp"
+#include "common_utils.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
 #include "memory.hpp"
 #include "mod_bus.hpp"
@@ -9,6 +10,8 @@
 #include "sa_sdk.hpp"
 #include "ui_kit.hpp"
 #include "wardrobe.hpp"
+
+namespace phone {
 
 namespace {
 
@@ -19,44 +22,48 @@ using FnLoadOp    = bool(__cdecl*)(char*);
 
 FnVoid      g_origScriptsProcess = nullptr;
 FnVoid      g_origDrawAfterFade  = nullptr;
+FnVoid      g_origReInitGame     = nullptr;
 FnIntArg    g_origMakeSaveName   = nullptr;
 FnGenericOp g_origGenericSave    = nullptr;
 FnLoadOp    g_origGenericLoad    = nullptr;
 
-int  g_pendingSaveSlot1to8 = 0;
-bool g_loadedSaveThisBoot  = false;
-bool g_initializedInWorld  = false;
-int  g_lastGameState       = -1;
+common::SaveSlotTracker g_save;
 
-// Bus callbacks exposed to all other mods!
-bool __cdecl BusIsPhoneOpen()       { return phoneui::IsOpen() || clothesshop::IsShopActive(); }
-void __cdecl BusClosePhone()        { phoneui::Close(); }
-void __cdecl BusReturnToPhone()     { phoneui::ReturnToMain(); }
-bool __cdecl BusIsClothesClaimed()  { return clothesshop::IsShopActive(); }
+bool __cdecl BusIsPhoneOpen()      { return phoneui::IsOpen() || clothesshop::IsShopActive(); }
+void __cdecl BusClosePhone()       { phoneui::Close(); }
+void __cdecl BusReturnToPhone()    { phoneui::ReturnToMain(); }
+bool __cdecl BusIsClothesClaimed() { return clothesshop::ShouldClaimShopPanel(); }
 
 void RegisterWithBus() {
     if (auto* b = modbus::GetBus()) {
-        b->phoneInstalled    = true; // Automatically suppresses Garage F6 & Inventory F7!
+        b->phoneInstalled    = true;
+        b->phoneKey          = pcfg::Get().phoneKey;
         b->phoneIsOpen       = &BusIsPhoneOpen;
         b->phoneClose        = &BusClosePhone;
         b->phoneReturnToMain = &BusReturnToPhone;
     }
     modbus::RegisterPanelClaim("CLOT", &BusIsClothesClaimed);
-    modbus::RegisterPanelClaim("HAIR", &BusIsClothesClaimed);
+}
+
+void __cdecl HookedReInitGame() {
+    clothesshop::Reset();
+    phoneui::Reset();
+    wardrobe::Reset();
+    wardrobe::OnNewGame();
+    phoneui::OnNewGame();
+    g_save.OnWorldRestart();
+    if (g_origReInitGame) g_origReInitGame();
 }
 
 void __cdecl HookedMakeValidSaveName(int32_t slot0to7) {
-    if (slot0to7 >= 0 && slot0to7 <= 7) g_pendingSaveSlot1to8 = slot0to7 + 1;
+    g_save.OnMakeValidSaveName(slot0to7);
     if (g_origMakeSaveName) g_origMakeSaveName(slot0to7);
 }
 
 bool __cdecl HookedGenericSave(int32_t arg) {
     bool ok = g_origGenericSave ? g_origGenericSave(arg) : false;
     if (ok) {
-        int slot = g_pendingSaveSlot1to8;
-        if (slot < 1 || slot > 8) {
-            slot = sa::ParseSaveSlotFromPath(reinterpret_cast<const char*>(0x00C16F18));
-        }
+        int slot = g_save.ResolveCurrentSaveSlot();
         wardrobe::OnGameSave(slot);
         phoneui::OnGameSave(slot);
     }
@@ -66,13 +73,7 @@ bool __cdecl HookedGenericSave(int32_t arg) {
 bool __cdecl HookedGenericLoad(char* outFlag) {
     bool ok = g_origGenericLoad ? g_origGenericLoad(outFlag) : false;
     if (ok) {
-        int slot = sa::ParseSaveSlotFromPath(reinterpret_cast<const char*>(0x00C16F18));
-        if (slot < 1 || slot > 8) {
-            int8_t menuSlot = *reinterpret_cast<const int8_t*>(0x00BA6748 + 0x15F);
-            if (menuSlot >= 0 && menuSlot <= 7) slot = menuSlot + 1;
-        }
-        g_loadedSaveThisBoot = true;
-        g_initializedInWorld = true;
+        int slot = g_save.OnGenericLoadSuccess(integrations::sacoop::IsCoopClient(true));
         clothesshop::Reset();
         phoneui::Reset();
         wardrobe::OnGameLoad(slot);
@@ -84,11 +85,11 @@ bool __cdecl HookedGenericLoad(char* outFlag) {
 void __cdecl HookedScriptsProcess() {
     const int gs = sa::GetGameState();
     if (gs == 9) {
-        if (!g_initializedInWorld) {
-            g_initializedInWorld = true;
+        if (!g_save.initializedInWorld) {
+            g_save.initializedInWorld = true;
             wardrobe::EnsureCatalogLoaded();
-            if (!g_loadedSaveThisBoot) {
-                if (sa::IsCoopModLoaded()) {
+            if (!g_save.loadedSaveThisBoot) {
+                if (integrations::sacoop::IsCoopClient(true)) {
                     wardrobe::OnGameLoad(0);
                     phoneui::OnGameLoad(0);
                 } else {
@@ -97,22 +98,22 @@ void __cdecl HookedScriptsProcess() {
                 }
             }
         }
-        if (g_lastGameState != 9 && g_lastGameState != -1) {
+        if (g_save.lastGameState != 9 && g_save.lastGameState != -1) {
             clothesshop::Reset();
             phoneui::Reset();
             wardrobe::Reset();
         }
+        ui::SyncFromSharedBus();
         ui::Keys().Update();
         clothesshop::PreScriptsTick();
         phoneui::PreScriptsTick();
-    } else if (g_lastGameState == 9 && gs != 9) {
+    } else if (g_save.lastGameState == 9 && gs != 9) {
         clothesshop::Reset();
         phoneui::Reset();
         wardrobe::Reset();
-        g_initializedInWorld = false;
-        g_loadedSaveThisBoot = false;
+        g_save.OnLeftWorld();
     }
-    g_lastGameState = gs;
+    g_save.lastGameState = gs;
 
     if (g_origScriptsProcess) g_origScriptsProcess();
 
@@ -131,7 +132,13 @@ void __cdecl HookedDrawAfterFade() {
     }
 }
 
-void InstallAllHooks() {
+} // namespace
+
+void Init(HMODULE hModule) {
+    pcfg::Load(hModule);
+    ui::SetUseRussian(pcfg::Get().useRussian);
+    modlog::Enabled() = pcfg::Get().enableLog;
+    modlog::Init(hModule, "GTA5Phone");
     if (!sa::IsSA10US()) {
         modlog::Info("[Phone] ERROR: Unsupported GTA SA exe! Requires 1.0 US (Hoodlum).");
         return;
@@ -147,26 +154,29 @@ void InstallAllHooks() {
         mem::HookCall(0x00619081, reinterpret_cast<uintptr_t>(&HookedGenericSave)));
     g_origGenericLoad = reinterpret_cast<FnLoadOp>(
         mem::HookCall(0x0053C70B, reinterpret_cast<uintptr_t>(&HookedGenericLoad)));
+    g_origReInitGame = reinterpret_cast<FnVoid>(
+        mem::HookCall(0x0053C6DB, reinterpret_cast<uintptr_t>(&HookedReInitGame)));
 
     clothesshop::InstallHooks();
+    phoneui::InstallHooks();
     RegisterWithBus();
-
-    modlog::Info("[Phone] GTA5Phone v1.0 hooks & Addon Hub Bus registered (F6 Phone + Contacts + Wardrobe + Clothes Shops)!");
+    modlog::Info("[Phone] GTA5Phone hooks & Addon Hub Bus registered.");
 }
 
-} // namespace
+void Shutdown() {
+    clothesshop::Reset();
+    wardrobe::Reset();
+    phoneui::Shutdown();
+}
+
+} // namespace phone
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        pcfg::Load(hModule);
-        ui::SetUseRussian(pcfg::Get().useRussian);
-        modlog::Enabled() = pcfg::Get().enableLog;
-        modlog::Init(hModule, "GTA5Phone");
-        InstallAllHooks();
+        phone::Init(hModule);
     } else if (reason == DLL_PROCESS_DETACH) {
-        clothesshop::Reset();
-        phoneui::Reset();
+        phone::Shutdown();
     }
     return TRUE;
 }

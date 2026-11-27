@@ -1,23 +1,26 @@
-#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
-#include <vector>
 #include <windows.h>
+#include "common_utils.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
 #include "memory.hpp"
 #include "sa_sdk.hpp"
 
+namespace early_unlock {
+
 namespace {
 
 struct EarlyUnlockConfig {
-    bool enableLog             = true;
-    bool unlockModShops        = true;
-    bool unlockAmmuNation      = true;
-    bool unlockClothes         = true;
-    bool unlockBarbersTattoos  = true;
-    bool unlockGyms            = true;
-    bool unlockFoodAndMisc     = true;
-    bool addMapIcons           = true;
+    bool enableLog            = true;
+    bool unlockModShops       = true;
+    bool unlockAmmuNation     = true;
+    bool unlockClothes        = true;
+    bool unlockBarbersTattoos = true;
+    bool unlockGyms           = true;
+    bool unlockFoodAndMisc    = true;
+    bool addMapIcons          = true;
 };
 
 EarlyUnlockConfig g_cfg;
@@ -26,16 +29,15 @@ using FnVoid   = void(__cdecl*)();
 using FnLoadOp = bool(__cdecl*)(char*);
 
 FnVoid   g_origScriptsProcess = nullptr;
+FnVoid   g_origReInitGame     = nullptr;
 FnLoadOp g_origGenericLoad    = nullptr;
 
-int      g_lastGameState      = -1;
-bool     g_wasOnMission       = false;
-bool     g_appliedIcons       = false;
-uint32_t g_lastUnlockMs       = 0;
+int      g_lastGameState = -1;
+bool     g_wasOnMission  = false;
+bool     g_appliedIcons  = false;
+uint32_t g_worldEnterMs  = 0;
+uint32_t g_lastUnlockMs  = 0;
 
-// ----------------------------------------------------------------------------
-// Verified Mod Shop Data (from main.scm & IPLs)
-// ----------------------------------------------------------------------------
 struct ModShopUnlock {
     const char* name;
     int32_t     garageType;
@@ -51,7 +53,6 @@ constexpr ModShopUnlock kModShops[5] = {
     {"VECMOD",  38, 0x2878,  2382.2f,  1044.0f,  9.8f}, // TransFender LV
 };
 
-// Verified Exterior Shop Coordinates from data\maps\**\*.ipl for non-duplicate map blips
 struct ShopBlipDef {
     uint8_t cat; // 1=Ammu, 2=Clothes, 3=Barber, 4=Tattoo, 5=Gym
     int32_t sprite;
@@ -72,24 +73,24 @@ constexpr ShopBlipDef kShopBlips[] = {
     {1, 6,  2159.5f,   943.3f,  9.8f},
     {1, 6,  2539.0f,  2083.6f,  9.8f},
 
-    // Clothing Shops (sprite 45) — Binco, ProLaps, Sub Urban, ZIP, Victim, Didier Sachs
-    {2, 45,  2244.5f, -1665.4f, 14.5f}, // Binco Ganton LS
-    {2, 45,  2112.7f, -1211.7f, 23.0f}, // Sub Urban LS
-    {2, 45,   499.6f, -1360.4f, 15.4f}, // ProLaps LS
-    {2, 45,  1456.8f, -1138.0f, 23.3f}, // ZIP LS
-    {2, 45,   461.2f, -1500.0f, 30.2f}, // Victim LS
-    {2, 45,   453.9f, -1478.1f, 30.0f}, // Didier Sachs LS
-    {2, 45, -2375.3f,   910.3f, 44.5f}, // Binco SF
-    {2, 45, -2492.0f,   -29.1f, 24.8f}, // Sub Urban SF
-    {2, 45, -1883.2f,   865.5f, 34.3f}, // ZIP SF
-    {2, 45, -1694.8f,   951.6f, 24.3f}, // Victim SF
-    {2, 45,  1657.0f,  1733.3f, 10.0f}, // Binco LV
-    {2, 45,  2102.7f,  2257.5f, 10.1f}, // Binco LV North
-    {2, 45,  2779.1f,  2453.5f, 10.1f}, // Sub Urban LV
-    {2, 45,  2825.7f,  2407.4f, 10.1f}, // ProLaps LV
-    {2, 45,  2090.6f,  2224.2f, 10.1f}, // ZIP LV
-    {2, 45,  2572.1f,  1904.8f, 10.0f}, // ZIP LV East
-    {2, 45,  2802.3f,  2430.6f, 10.1f}, // Victim LV
+    // Clothing Shops (sprite 45)
+    {2, 45,  2244.5f, -1665.4f, 14.5f},
+    {2, 45,  2112.7f, -1211.7f, 23.0f},
+    {2, 45,   499.6f, -1360.4f, 15.4f},
+    {2, 45,  1456.8f, -1138.0f, 23.3f},
+    {2, 45,   461.2f, -1500.0f, 30.2f},
+    {2, 45,   453.9f, -1478.1f, 30.0f},
+    {2, 45, -2375.3f,   910.3f, 44.5f},
+    {2, 45, -2492.0f,   -29.1f, 24.8f},
+    {2, 45, -1883.2f,   865.5f, 34.3f},
+    {2, 45, -1694.8f,   951.6f, 24.3f},
+    {2, 45,  1657.0f,  1733.3f, 10.0f},
+    {2, 45,  2102.7f,  2257.5f, 10.1f},
+    {2, 45,  2779.1f,  2453.5f, 10.1f},
+    {2, 45,  2825.7f,  2407.4f, 10.1f},
+    {2, 45,  2090.6f,  2224.2f, 10.1f},
+    {2, 45,  2572.1f,  1904.8f, 10.0f},
+    {2, 45,  2802.3f,  2430.6f, 10.1f},
 
     // Barbers (sprite 7)
     {3, 7,  2070.9f, -1793.8f, 12.7f},
@@ -110,51 +111,18 @@ constexpr ShopBlipDef kShopBlips[] = {
     {5, 54,  1968.7f,  2295.3f, 15.5f},
 };
 
-// Verified CRadar::ms_RadarTrace (0x00BA86F0, 175 entries, stride 0x28):
-//   +0x08 CVector m_vecPos
-//   +0x24 uint8_t m_nRadarSprite
-//   +0x25 uint8_t flags (bit 1 = 0x02 = m_bInUse)
-int CountActiveRadarBlips() {
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(0x00BA86F0);
-    int used = 0;
-    for (int i = 0; i < 175; ++i) {
-        if ((base[i * 0x28 + 0x25] & 0x02) != 0) ++used;
-    }
-    return used;
-}
-
-bool HasExistingRadarBlip(float x, float y, int32_t sprite, float radius = 45.0f) {
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(0x00BA86F0);
-    const float r2 = radius * radius;
-    for (int i = 0; i < 175; ++i) {
-        const uint8_t* e = base + i * 0x28;
-        if ((e[0x25] & 0x02) == 0) continue;
-        if (e[0x24] != static_cast<uint8_t>(sprite)) continue;
-        float bx = *reinterpret_cast<const float*>(e + 0x08);
-        float by = *reinterpret_cast<const float*>(e + 0x0C);
-        float dx = bx - x, dy = by - y;
-        if (dx * dx + dy * dy <= r2) return true;
-    }
-    return false;
-}
-
 void UnlockEnexList(const char* const* names, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         sa::ScriptCmd(0x07FB).Str8(names[i]).Int(1).Run();
     }
 }
 
-// Verified against gta_sa.exe 1.0 US (0x00447570..0x00447588):
-//   CGarages::NumGarages @ 0x0096C024 (int32_t, max 50)
-//   CGarages::aGarages   @ 0x0096C048 (stride 0xD8, m_anName[8] @ +0x44, m_nType @ +0x4C)
 int GetGarageCurrentType(const char* name) {
     if (!name || !name[0]) return -1;
-    int32_t count = *reinterpret_cast<const int32_t*>(0x0096C024);
-    if (count < 0) count = 0;
-    if (count > 50) count = 50;
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(0x0096C048);
+    const int32_t count = sa::garages::GetCount();
     for (int32_t i = 0; i < count; ++i) {
-        const uint8_t* g = base + static_cast<size_t>(i) * 0xD8;
+        const uint8_t* g = sa::garages::GetGarageAt(i);
+        if (!g) continue;
         const char* gname = reinterpret_cast<const char*>(g + 0x44);
         if (_strnicmp(gname, name, 8) == 0) {
             return static_cast<int>(g[0x4C]);
@@ -164,24 +132,30 @@ int GetGarageCurrentType(const char* name) {
 }
 
 void ApplyShopUnlocks(bool tryAddBlips) {
-    // Never fight story mission interior locks while a mission is active!
     if (sa::IsOnMission()) return;
+
+    const bool isCoop = integrations::sacoop::IsLoaded();
 
     if (g_cfg.unlockModShops) {
         uint8_t* scriptSpace = reinterpret_cast<uint8_t*>(0x00A49960);
         for (const auto& u : kModShops) {
-            // CRITICAL: Only call 0x02FA CHANGE_GARAGE_TYPE if this garage isn't already set to its target type!
-            // Re-running 0x02FA every 4 seconds resets CGarage::m_nDoorState to CLOSED, causing open-door replay loops!
+            // Only change garage type when not already set (avoids resetting door state every 4s)
             if (GetGarageCurrentType(u.name) != u.garageType) {
                 sa::ScriptCmd(0x02FA).Str8(u.name).Int(u.garageType).Run();
                 sa::ScriptCmd(0x0299).Str8(u.name).Run();
             }
-            if (tryAddBlips && g_cfg.addMapIcons) {
-                int32_t& blipVar = *reinterpret_cast<int32_t*>(scriptSpace + u.blipGlobalOff);
-                if (blipVar == 0 && !HasExistingRadarBlip(u.x, u.y, 27, 45.0f)) {
+            if (tryAddBlips && g_cfg.addMapIcons && !sa::radar::HasBlipNear(u.x, u.y, 45.0f, 27)) {
+                // SA-COOP uses custom main.scm — never touch vanilla scriptSpace offsets under SA-COOP!
+                if (isCoop) {
                     int32_t blip = 0;
                     sa::ScriptCmd(0x04CE).Float(u.x).Float(u.y).Float(u.z).Int(27).Out(blip).Run();
-                    if (blip > 0) blipVar = blip;
+                } else {
+                    int32_t& blipVar = *reinterpret_cast<int32_t*>(scriptSpace + u.blipGlobalOff);
+                    if (blipVar == 0) {
+                        int32_t blip = 0;
+                        sa::ScriptCmd(0x04CE).Float(u.x).Float(u.y).Float(u.z).Int(27).Out(blip).Run();
+                        if (blip > 0) blipVar = blip;
+                    }
                 }
             }
         }
@@ -191,22 +165,18 @@ void ApplyShopUnlocks(bool tryAddBlips) {
         static constexpr const char* kAmmu[] = {"AMMUN1", "AMMUN2", "AMMUN3", "AMMUN4", "AMMUN5"};
         UnlockEnexList(kAmmu, sizeof(kAmmu) / sizeof(kAmmu[0]));
     }
-
     if (g_cfg.unlockClothes) {
         static constexpr const char* kClothes[] = {"CSCHP", "CSSPRT", "LACS1", "CLOTHGP", "CSDESGN", "CSEXL"};
         UnlockEnexList(kClothes, sizeof(kClothes) / sizeof(kClothes[0]));
     }
-
     if (g_cfg.unlockBarbersTattoos) {
         static constexpr const char* kStyle[] = {"BARBERS", "BARBER2", "BARBER3", "TATTOO", "TATTO2", "TATTO3"};
         UnlockEnexList(kStyle, sizeof(kStyle) / sizeof(kStyle[0]));
     }
-
     if (g_cfg.unlockGyms) {
         static constexpr const char* kGyms[] = {"GYM1", "GYM2", "GYM3"};
         UnlockEnexList(kGyms, sizeof(kGyms) / sizeof(kGyms[0]));
     }
-
     if (g_cfg.unlockFoodAndMisc) {
         static constexpr const char* kFood[] = {
             "FDBURG", "FDCHICK", "FDPIZA", "FDREST1", "FDDONUT",
@@ -218,9 +188,9 @@ void ApplyShopUnlocks(bool tryAddBlips) {
     if (tryAddBlips && g_cfg.addMapIcons && !g_appliedIcons) {
         g_appliedIcons = true;
         int added = 0;
-        int used  = CountActiveRadarBlips();
+        int used  = sa::radar::CountUsedBlips();
         for (const auto& b : kShopBlips) {
-            if (used >= 152) break; // Always preserve safe headroom for mission/story radar blips!
+            if (used >= 152) break; // Always preserve safe headroom for mission/story radar blips
             bool enabled = false;
             if (b.cat == 1) enabled = g_cfg.unlockAmmuNation;
             else if (b.cat == 2) enabled = g_cfg.unlockClothes;
@@ -228,7 +198,7 @@ void ApplyShopUnlocks(bool tryAddBlips) {
             else if (b.cat == 5) enabled = g_cfg.unlockGyms;
             if (!enabled) continue;
 
-            if (!HasExistingRadarBlip(b.x, b.y, b.sprite, 45.0f)) {
+            if (!sa::radar::HasBlipNear(b.x, b.y, 45.0f, static_cast<uint8_t>(b.sprite))) {
                 int32_t blip = 0;
                 sa::ScriptCmd(0x04CE).Float(b.x).Float(b.y).Float(b.z).Int(b.sprite).Out(blip).Run();
                 if (blip > 0) {
@@ -241,34 +211,40 @@ void ApplyShopUnlocks(bool tryAddBlips) {
     }
 }
 
+void __cdecl HookedReInitGame() {
+    g_appliedIcons = false;
+    g_lastUnlockMs = 0;
+    g_worldEnterMs = sa::GetTimeMs();
+    g_wasOnMission = false;
+    if (g_origReInitGame) g_origReInitGame();
+}
+
 bool __cdecl HookedGenericLoad(char* outFlag) {
     bool ok = g_origGenericLoad ? g_origGenericLoad(outFlag) : false;
     if (ok) {
         g_appliedIcons = false;
         g_lastUnlockMs = 0;
+        g_worldEnterMs = sa::GetTimeMs();
     }
     return ok;
 }
 
 void __cdecl HookedScriptsProcess() {
-    if (g_origScriptsProcess) {
-        g_origScriptsProcess();
-    }
+    if (g_origScriptsProcess) g_origScriptsProcess();
 
     const int gs = sa::GetGameState();
     if (gs == 9) {
+        const uint32_t now = sa::GetTimeMs();
         if (g_lastGameState != 9) {
             g_appliedIcons = false;
             g_lastUnlockMs = 0;
+            g_worldEnterMs = now;
         }
-        bool onMission = sa::IsOnMission();
-        uint32_t now = sa::GetTimeMs();
+        const bool onMission = sa::IsOnMission();
 
-        // Apply immediately on enter world (after 1.5s so main.scm init finishes),
-        // right when exiting a mission, and periodically every 4s outside interiors
         if (!onMission && sa::GetActiveInterior() == 0) {
             bool missionEnded = g_wasOnMission && !onMission;
-            bool needIcons = !g_appliedIcons && (now > 1500);
+            bool needIcons    = !g_appliedIcons && ((now - g_worldEnterMs) >= 1500);
             if (missionEnded || needIcons || (g_lastUnlockMs == 0) || (now - g_lastUnlockMs >= 4000)) {
                 g_lastUnlockMs = now;
                 ApplyShopUnlocks(needIcons || missionEnded);
@@ -278,49 +254,59 @@ void __cdecl HookedScriptsProcess() {
     } else if (g_lastGameState == 9) {
         g_appliedIcons = false;
         g_lastUnlockMs = 0;
+        g_worldEnterMs = 0;
         g_wasOnMission = false;
     }
     g_lastGameState = gs;
 }
 
 void LoadConfig(HMODULE selfModule) {
-    char buf[MAX_PATH] = {};
-    GetModuleFileNameA(selfModule, buf, MAX_PATH);
-    std::string full(buf);
-    size_t slash = full.find_last_of("\\/");
-    std::string dir = (slash != std::string::npos) ? full.substr(0, slash) : ".";
-    std::string ini = dir + "\\GTA5EarlyUnlock.ini";
+    const std::string ini = common::GetModuleDir(selfModule) + "\\GTA5EarlyUnlock.ini";
     const char* p = ini.c_str();
 
-    g_cfg.enableLog            = GetPrivateProfileIntA("General", "EnableLog", 1, p) != 0;
-    g_cfg.unlockModShops       = GetPrivateProfileIntA("Unlock", "UnlockModShops", 1, p) != 0;
-    g_cfg.unlockAmmuNation     = GetPrivateProfileIntA("Unlock", "UnlockAmmuNation", 1, p) != 0;
-    g_cfg.unlockClothes        = GetPrivateProfileIntA("Unlock", "UnlockClothes", 1, p) != 0;
-    g_cfg.unlockBarbersTattoos = GetPrivateProfileIntA("Unlock", "UnlockBarbersAndTattoos", 1, p) != 0;
-    g_cfg.unlockGyms           = GetPrivateProfileIntA("Unlock", "UnlockGyms", 1, p) != 0;
-    g_cfg.unlockFoodAndMisc    = GetPrivateProfileIntA("Unlock", "UnlockFoodAndMisc", 1, p) != 0;
-    g_cfg.addMapIcons          = GetPrivateProfileIntA("Unlock", "AddMapIcons", 1, p) != 0;
+    g_cfg.enableLog            = common::IniReadBool(p, "General", "EnableLog",               true);
+    g_cfg.unlockModShops       = common::IniReadBool(p, "Unlock",  "UnlockModShops",          true);
+    g_cfg.unlockAmmuNation     = common::IniReadBool(p, "Unlock",  "UnlockAmmuNation",        true);
+    g_cfg.unlockClothes        = common::IniReadBool(p, "Unlock",  "UnlockClothes",           true);
+    g_cfg.unlockBarbersTattoos = common::IniReadBool(p, "Unlock",  "UnlockBarbersAndTattoos", true);
+    g_cfg.unlockGyms           = common::IniReadBool(p, "Unlock",  "UnlockGyms",              true);
+    g_cfg.unlockFoodAndMisc    = common::IniReadBool(p, "Unlock",  "UnlockFoodAndMisc",       true);
+    g_cfg.addMapIcons          = common::IniReadBool(p, "Unlock",  "AddMapIcons",             true);
 }
 
 } // namespace
 
+void Init(HMODULE hModule) {
+    LoadConfig(hModule);
+    modlog::Enabled() = g_cfg.enableLog;
+    modlog::Init(hModule, "GTA5EarlyUnlock");
+    if (!sa::IsSA10US()) {
+        modlog::Info("[EarlyUnlock] ERROR: Unsupported GTA SA exe! Requires 1.0 US (Hoodlum).");
+        return;
+    }
+    g_origScriptsProcess = reinterpret_cast<FnVoid>(
+        mem::HookCall(0x0053BFC7, reinterpret_cast<uintptr_t>(&HookedScriptsProcess)));
+    g_origGenericLoad = reinterpret_cast<FnLoadOp>(
+        mem::HookCall(0x0053C70B, reinterpret_cast<uintptr_t>(&HookedGenericLoad)));
+    g_origReInitGame = reinterpret_cast<FnVoid>(
+        mem::HookCall(0x0053C6DB, reinterpret_cast<uintptr_t>(&HookedReInitGame)));
+    modlog::Info("GTA5EarlyUnlock attached (ModShops=%d, Ammu=%d, Clothes=%d, Style=%d, Gyms=%d, Food=%d, Blips=%d).",
+                 g_cfg.unlockModShops, g_cfg.unlockAmmuNation, g_cfg.unlockClothes,
+                 g_cfg.unlockBarbersTattoos, g_cfg.unlockGyms, g_cfg.unlockFoodAndMisc, g_cfg.addMapIcons);
+}
+
+void Shutdown() {
+    g_appliedIcons = false;
+}
+
+} // namespace early_unlock
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        LoadConfig(hModule);
-        modlog::Enabled() = g_cfg.enableLog;
-        modlog::Init(hModule, "GTA5EarlyUnlock");
-        if (!sa::IsSA10US()) {
-            modlog::Info("[Init] ERROR: Unsupported GTA SA exe! Requires 1.0 US (Hoodlum).");
-            return TRUE;
-        }
-        g_origScriptsProcess = reinterpret_cast<FnVoid>(
-            mem::HookCall(0x0053BFC7, reinterpret_cast<uintptr_t>(&HookedScriptsProcess)));
-        g_origGenericLoad = reinterpret_cast<FnLoadOp>(
-            mem::HookCall(0x0053C70B, reinterpret_cast<uintptr_t>(&HookedGenericLoad)));
-        modlog::Info("GTA5EarlyUnlock v1.0 attached (ModShops=%d, Ammu=%d, Clothes=%d, Style=%d, Gyms=%d, Food=%d, Blips=%d).",
-                     g_cfg.unlockModShops, g_cfg.unlockAmmuNation, g_cfg.unlockClothes,
-                     g_cfg.unlockBarbersTattoos, g_cfg.unlockGyms, g_cfg.unlockFoodAndMisc, g_cfg.addMapIcons);
+        early_unlock::Init(hModule);
+    } else if (reason == DLL_PROCESS_DETACH) {
+        early_unlock::Shutdown();
     }
     return TRUE;
 }

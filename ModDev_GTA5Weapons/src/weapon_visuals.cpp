@@ -3,10 +3,11 @@
 #include <cmath>
 #include <cstdint>
 #include <vector>
-#include "config.hpp"
+#include "integrations/proper_shaders.hpp"
 #include "log.hpp"
 #include "memory.hpp"
 #include "sa_sdk.hpp"
+#include "weapon_config.hpp"
 #include "weapon_storage.hpp"
 
 namespace wvis {
@@ -225,30 +226,6 @@ struct MeshBuilder {
     }
 };
 
-struct SavedRwState {
-    uintptr_t tex, zTest, zWrite, vAlpha, srcB, dstB, shade, cull;
-    void Save() {
-        sa::rw::RenderStateGet(sa::rw::STATE_TEXTURERASTER,     &tex);
-        sa::rw::RenderStateGet(sa::rw::STATE_ZTESTENABLE,       &zTest);
-        sa::rw::RenderStateGet(sa::rw::STATE_ZWRITEENABLE,      &zWrite);
-        sa::rw::RenderStateGet(sa::rw::STATE_VERTEXALPHAENABLE, &vAlpha);
-        sa::rw::RenderStateGet(sa::rw::STATE_SRCBLEND,          &srcB);
-        sa::rw::RenderStateGet(sa::rw::STATE_DESTBLEND,         &dstB);
-        sa::rw::RenderStateGet(sa::rw::STATE_SHADEMODE,         &shade);
-        sa::rw::RenderStateGet(sa::rw::STATE_CULLMODE,          &cull);
-    }
-    void Restore() const {
-        sa::rw::RenderStateSet(sa::rw::STATE_TEXTURERASTER,     tex);
-        sa::rw::RenderStateSet(sa::rw::STATE_ZTESTENABLE,       zTest);
-        sa::rw::RenderStateSet(sa::rw::STATE_ZWRITEENABLE,      zWrite);
-        sa::rw::RenderStateSet(sa::rw::STATE_VERTEXALPHAENABLE, vAlpha);
-        sa::rw::RenderStateSet(sa::rw::STATE_SRCBLEND,          srcB);
-        sa::rw::RenderStateSet(sa::rw::STATE_DESTBLEND,         dstB);
-        sa::rw::RenderStateSet(sa::rw::STATE_SHADEMODE,         shade);
-        sa::rw::RenderStateSet(sa::rw::STATE_CULLMODE,          cull);
-    }
-};
-
 void RenderAttachmentsAndLaser() {
     if (sa::GetGameState() != 9 || sa::IsCutsceneRunning() || sa::IsPauseMenuActive()) return;
     if (!wcfg::Get().enable3DAttachments && !wcfg::Get().enableLaserSight) return;
@@ -270,7 +247,9 @@ void RenderAttachmentsAndLaser() {
     } else {
         L = wstore::Store().Find(wid);
     }
-    if (!L || !L->HasAnyMod()) return;
+    const wdata::WeaponLoadout cleanL = wdata::SanitizeLoadout(wid, *L);
+    if (!cleanL.HasAnyMod()) return;
+    L = &cleanL;
 
     void* clump = ped->GetWeaponClump();
     if (!clump) return;
@@ -295,20 +274,12 @@ void RenderAttachmentsAndLaser() {
     const float br       = std::max(0.012f, m.barrelRadius);
     const float tipA     = bf.barrelLen;
 
-    SavedRwState saved{};
-    saved.Save();
+    // RAII Proper Shaders / RenderWare 3.6 state guard (preserves SHADEMODE=7, FOG, ALPHATEST, FILTER!)
+    integrations::proper_shaders::RwRenderStateGuard rwGuard;
 
     for (int hand = 0; hand < ltmCount; ++hand) {
         const sa::CMatrix* ltm = &ltms[hand];
-
-        sa::rw::RenderStateSet(sa::rw::STATE_TEXTURERASTER,     0);
-        sa::rw::RenderStateSet(sa::rw::STATE_ZTESTENABLE,       1);
-        sa::rw::RenderStateSet(sa::rw::STATE_ZWRITEENABLE,      1);
-        sa::rw::RenderStateSet(sa::rw::STATE_VERTEXALPHAENABLE, 1);
-        sa::rw::RenderStateSet(sa::rw::STATE_SRCBLEND,          5);
-        sa::rw::RenderStateSet(sa::rw::STATE_DESTBLEND,         6);
-        sa::rw::RenderStateSet(sa::rw::STATE_SHADEMODE,         2);
-        sa::rw::RenderStateSet(sa::rw::STATE_CULLMODE,          1);
+        rwGuard.Configure3DUnlit(true, true, false);
 
         if (wcfg::Get().enable3DAttachments) {
             static MeshBuilder mb;
@@ -454,9 +425,7 @@ void RenderAttachmentsAndLaser() {
                 uint8_t lg = (L->laser == 1) ? 28  : 255;
                 uint8_t lb = (L->laser == 1) ? 28  : 75;
 
-                sa::rw::RenderStateSet(sa::rw::STATE_ZWRITEENABLE, 0);
-                sa::rw::RenderStateSet(sa::rw::STATE_SRCBLEND,     5);
-                sa::rw::RenderStateSet(sa::rw::STATE_DESTBLEND,    2);
+                rwGuard.Configure3DUnlit(true, false, true);
 
                 sa::rw::RwIm3DVertex lineVerts[2] = {};
                 lineVerts[0].x = startW.x; lineVerts[0].y = startW.y; lineVerts[0].z = startW.z;
@@ -482,8 +451,6 @@ void RenderAttachmentsAndLaser() {
             }
         }
     }
-
-    saved.Restore();
 }
 
 void CapturePlayerWeaponHandLtm(void* clump, int handSlot) {

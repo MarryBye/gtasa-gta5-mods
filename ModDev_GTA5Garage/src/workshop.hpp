@@ -18,6 +18,7 @@ void Render2D();
 
 bool          IsWorkshopActive();
 bool          IsCustomWorkshopMenuDrawing();
+bool          ShouldClaimWorkshopPanel();
 sa::CVehicle* GetWorkshopVehicle();
 
 void Reset();

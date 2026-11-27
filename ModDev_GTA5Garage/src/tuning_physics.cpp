@@ -8,8 +8,11 @@
 #include <string>
 #include <windows.h>
 #include "audio.hpp"
-#include "config.hpp"
+#include "garage_config.hpp"
+#include "integrations/limit_adjusters.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
+#include "mod_bus.hpp"
 
 namespace tuning {
 
@@ -28,26 +31,59 @@ struct TrackedVehicle {
     mod::PerformanceTuning cfg{};
     mod::VehicleWear       wear{};
     mod::VehicleWear       lastAppliedWear{};
+    float                  appliedSkill01 = 0.0f;
 
     // Live runtime state
     float    lastHealth   = 1000.0f;
     float    turboBoost   = 0.0f;
-    float    smoothRpm    = 0.0f;
     float    prevGas      = 0.0f;
     uint8_t  prevGear     = 0;
     uint32_t lastBovMs    = 0;
-    uint32_t lastPopMs    = 0;
     uint32_t lastSputterMs= 0;
 };
 
 TrackedVehicle g_tracked[MAX_TRACKED_VEHICLES];
 
 struct CachedModelHandling {
-    bool              valid       = false;
-    bool              isFourWheel = true;
+    bool              valid    = false;
+    uint32_t          subClass = sa::VEHICLE_AUTOMOBILE;
     sa::tHandlingData handling{};
 };
 CachedModelHandling g_modelBaseCache[212]; // Models 400..611
+
+inline bool IsFourWheelSubClass(uint32_t subClass) {
+    return subClass == sa::VEHICLE_AUTOMOBILE ||
+           subClass == sa::VEHICLE_MTRUCK ||
+           subClass == sa::VEHICLE_QUAD;
+}
+
+inline float GetPlayerVehicleSkill01(uint32_t subClass) {
+    switch (subClass) {
+        case sa::VEHICLE_AUTOMOBILE:
+        case sa::VEHICLE_MTRUCK:
+        case sa::VEHICLE_QUAD:
+            return sa::stats::GetNormalized01(sa::stats::STAT_DRIVING_SKILL);
+        case sa::VEHICLE_BIKE:
+            return sa::stats::GetNormalized01(sa::stats::STAT_BIKE_SKILL);
+        case sa::VEHICLE_BMX:
+            return sa::stats::GetNormalized01(sa::stats::STAT_CYCLING_SKILL);
+        case sa::VEHICLE_HELI:
+        case sa::VEHICLE_PLANE:
+        case sa::VEHICLE_FHELI:
+        case sa::VEHICLE_FPLANE:
+            return sa::stats::GetNormalized01(sa::stats::STAT_FLYING_SKILL);
+        default:
+            return 0.0f;
+    }
+}
+
+inline float GetTargetDriverSkill01(const sa::CVehicle* veh, const sa::CPed* playerPed) {
+    if (!sa::IsVehicleValid(veh)) return 0.0f;
+    const sa::CPed* drv = veh->GetDriver();
+    // SA-COOP safety: never apply local CJ's driving skill while another player or NPC is driving!
+    if (drv != nullptr && drv != playerPed) return 0.0f;
+    return GetPlayerVehicleSkill01(veh->GetSubClass());
+}
 
 inline bool IsHandlingSane(const sa::tHandlingData* h) {
     if (!h) return false;
@@ -59,22 +95,22 @@ inline bool IsHandlingSane(const sa::tHandlingData* h) {
            std::isfinite(h->m_fMass) && h->m_fMass >= 50.0f && h->m_fMass <= 200000.0f;
 }
 
-void CacheModelHandling(int32_t modelId, bool isFourWheel, const sa::tHandlingData* h) {
+void CacheModelHandling(int32_t modelId, uint32_t subClass, const sa::tHandlingData* h) {
     if (modelId < 400 || modelId > 611 || !IsHandlingSane(h)) return;
     auto& slot = g_modelBaseCache[modelId - 400];
-    slot.valid       = true;
-    slot.isFourWheel = isFourWheel;
+    slot.valid    = true;
+    slot.subClass = subClass;
     std::memcpy(&slot.handling, h, sizeof(sa::tHandlingData));
 }
 
-bool LoadHandlingFromCfgFallback(int32_t modelId, sa::tHandlingData& out, bool& outIsFourWheel) {
+bool LoadHandlingFromCfgFallback(int32_t modelId, sa::tHandlingData& out, uint32_t& outSubClass) {
     if (modelId < 400 || modelId > 611) return false;
     const std::string& gDir = mod::Config().gameDir;
     if (gDir.empty()) return false;
 
     // 1. Resolve modelId -> handling name & vehicle type from data\vehicles.ide
     std::string handlingName;
-    outIsFourWheel = true;
+    outSubClass = sa::VEHICLE_AUTOMOBILE;
     {
         std::ifstream f(gDir + "\\data\\vehicles.ide");
         std::string line;
@@ -87,9 +123,16 @@ bool LoadHandlingFromCfgFallback(int32_t modelId, sa::tHandlingData& out, bool& 
             std::string dff, txd, vtype, hname;
             if ((iss >> id >> dff >> txd >> vtype >> hname) && id == modelId) {
                 handlingName = hname;
-                outIsFourWheel = (_stricmp(vtype.c_str(), "car") == 0 ||
-                                  _stricmp(vtype.c_str(), "mtruck") == 0 ||
-                                  _stricmp(vtype.c_str(), "quad") == 0);
+                if (_stricmp(vtype.c_str(), "mtruck") == 0)       outSubClass = sa::VEHICLE_MTRUCK;
+                else if (_stricmp(vtype.c_str(), "quad") == 0)    outSubClass = sa::VEHICLE_QUAD;
+                else if (_stricmp(vtype.c_str(), "bike") == 0)    outSubClass = sa::VEHICLE_BIKE;
+                else if (_stricmp(vtype.c_str(), "bmx") == 0)     outSubClass = sa::VEHICLE_BMX;
+                else if (_stricmp(vtype.c_str(), "heli") == 0)    outSubClass = sa::VEHICLE_HELI;
+                else if (_stricmp(vtype.c_str(), "plane") == 0)   outSubClass = sa::VEHICLE_PLANE;
+                else if (_stricmp(vtype.c_str(), "boat") == 0)    outSubClass = sa::VEHICLE_BOAT;
+                else if (_stricmp(vtype.c_str(), "train") == 0)   outSubClass = sa::VEHICLE_TRAIN;
+                else if (_stricmp(vtype.c_str(), "trailer") == 0) outSubClass = sa::VEHICLE_TRAILER;
+                else                                              outSubClass = sa::VEHICLE_AUTOMOBILE;
                 break;
             }
         }
@@ -169,7 +212,7 @@ TrackedVehicle* AllocSlot(sa::CVehicle* veh) {
             if (g_tracked[i].origHandling) {
                 std::memcpy(&g_tracked[i].baseHandling, g_tracked[i].origHandling, sizeof(sa::tHandlingData));
                 std::memcpy(&g_tracked[i].customHandling, g_tracked[i].origHandling, sizeof(sa::tHandlingData));
-                CacheModelHandling(g_tracked[i].modelId, veh->IsFourWheelLike(), g_tracked[i].origHandling);
+                CacheModelHandling(g_tracked[i].modelId, veh->GetSubClass(), g_tracked[i].origHandling);
             }
             g_tracked[i].lastHealth = veh->Health();
             g_tracked[i].prevGear   = veh->GetCurrentGear();
@@ -179,10 +222,10 @@ TrackedVehicle* AllocSlot(sa::CVehicle* veh) {
     return nullptr;
 }
 
-// Compute tuned handling from a clean base handling snapshot + ETS 2 wear penalties
+// Compute tuned handling from a clean base handling snapshot + ETS 2 wear penalties + CJ driver skill
 void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
                         const mod::PerformanceTuning& c, const mod::VehicleWear& wear,
-                        sa::tHandlingData& out) {
+                        float driverSkill01, sa::tHandlingData& out) {
     std::memcpy(&out, &base, sizeof(sa::tHandlingData));
 
     // 1. Engine (0..4): realistic percentage-based gains that preserve class hierarchy!
@@ -313,6 +356,17 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
         out.m_fCollisionDamageMultiplier *= (1.0f + 0.85f * wC);
     }
 
+    // 8. CJ Vehicle Skill Mastery (Driving / Bike / Cycling / Flying — gentle realistic bonus over stock + tuning + wear!)
+    // Preserves vanilla CStats::GetFatAndMuscleModifier mid-air & bike balance while improving grip, braking & throttle response!
+    if (driverSkill01 > 0.001f) {
+        const float sk = std::clamp(driverSkill01, 0.0f, 1.0f);
+        out.m_transmissionData.m_fEngineAcceleration *= (1.0f + 0.05f * sk);
+        out.m_transmissionData.m_fEngineInertia      *= (1.0f - 0.06f * sk);
+        out.m_fBrakeDeceleration                     *= (1.0f + 0.08f * sk);
+        out.m_fTractionMultiplier                    *= (1.0f + 0.10f * sk);
+        out.m_fTractionLoss                          *= (1.0f + 0.08f * sk);
+    }
+
     // Recompute ALL forward gear curves (1..m_nNumberOfGears) + reverse via GTA SA's native InitGearRatios (0x006D0460)!
     // Ensures upgraded 4->5 gear cars (e.g. Hermes) shift smoothly all the way up to top speed without choking!
     if (out.m_transmissionData.m_fMaxGearVelocity > 0.05f) {
@@ -320,11 +374,12 @@ void BuildTunedHandling(const sa::tHandlingData& base, bool isFourWheel,
     }
 }
 
-void RebuildHandling(TrackedVehicle& tv) {
+void RebuildHandling(TrackedVehicle& tv, float driverSkill01) {
     if (!tv.origHandling || !sa::IsVehicleValid(tv.veh)) return;
 
     tv.wear.ClampAll();
-    BuildTunedHandling(tv.baseHandling, tv.veh->IsFourWheelLike(), tv.cfg, tv.wear, tv.customHandling);
+    tv.appliedSkill01 = std::clamp(driverSkill01, 0.0f, 1.0f);
+    BuildTunedHandling(tv.baseHandling, tv.veh->IsFourWheelLike(), tv.cfg, tv.wear, tv.appliedSkill01, tv.customHandling);
     tv.veh->HandlingData() = &tv.customHandling;
     tv.lastAppliedWear = tv.wear;
 
@@ -335,11 +390,22 @@ void RebuildHandling(TrackedVehicle& tv) {
     }
 }
 
-VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, bool isFourWheel,
-                                      const mod::PerformanceTuning& cfg, const mod::VehicleWear& wear) {
-    VehicleStats st{};
+struct RawVehicleScores {
+    int   topSpeedKmh = 0;
+    int   topSpeedMph = 0;
+    float accelRaw    = 0.0f;
+    float brakeRaw    = 0.0f;
+    float handRaw     = 0.0f;
+    int   armorPct    = 100;
+    int   numGears    = 5;
+};
+
+RawVehicleScores EvaluateVehicleScores(const sa::tHandlingData& base, bool isFourWheel,
+                                       const mod::PerformanceTuning& cfg, const mod::VehicleWear& wear,
+                                       float driverSkill01) {
+    RawVehicleScores r{};
     sa::tHandlingData sim{};
-    BuildTunedHandling(base, isFourWheel, cfg, wear, sim);
+    BuildTunedHandling(base, isFourWheel, cfg, wear, driverSkill01, sim);
 
     float rawMax = sim.m_transmissionData.m_fMaxGearVelocity;
     if (rawMax < 0.08f) {
@@ -355,29 +421,62 @@ VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, bool isFour
     float wE = std::clamp(wear.engine, 0.0f, 100.0f) * 0.01f;
     float kmh = rawMax * 180.0f * dragFactor;
     if (cfg.turbo) kmh *= (1.0f + 0.025f * (1.0f - 0.40f * wE));
-    st.topSpeedKmh = std::clamp(static_cast<int>(std::round(kmh)), 25, 380);
-    st.topSpeedMph = std::clamp(static_cast<int>(std::round(kmh * 0.621371f)), 16, 240);
+    r.topSpeedKmh = std::clamp(static_cast<int>(std::round(kmh)), 25, 380);
+    r.topSpeedMph = std::clamp(static_cast<int>(std::round(kmh * 0.621371f)), 16, 240);
 
     float rawAccel = sim.m_transmissionData.m_fEngineAcceleration * 1000.0f;
     float inertiaBonus = (base.m_transmissionData.m_fEngineInertia > 0.1f)
         ? (base.m_transmissionData.m_fEngineInertia / std::max(1.0f, sim.m_transmissionData.m_fEngineInertia))
         : 1.0f;
-    float accelScore = rawAccel * 185.0f * (0.75f + 0.25f * inertiaBonus);
-    if (cfg.turbo) accelScore *= (1.0f + 0.045f * (1.0f - 0.45f * wE));
-    st.accelRating = std::clamp(static_cast<int>(std::round(accelScore)), 6, 150);
+    r.accelRaw = rawAccel * 185.0f * (0.75f + 0.25f * inertiaBonus);
+    if (cfg.turbo) r.accelRaw *= (1.0f + 0.045f * (1.0f - 0.45f * wE));
 
-    float brakeScore = sim.m_fBrakeDeceleration * 11500.0f;
-    st.brakeRating = std::clamp(static_cast<int>(std::round(brakeScore)), 6, 150);
+    r.brakeRaw = sim.m_fBrakeDeceleration * 11500.0f;
 
     float wS = std::clamp(wear.suspension, 0.0f, 100.0f) * 0.01f;
     float suspBonus = (1.0f + static_cast<float>(cfg.suspensionLevel) * 0.055f) * (1.0f - 0.22f * wS);
-    float handScore = (sim.m_fTractionMultiplier * 52.0f + sim.m_fTractionLoss * 28.0f) * suspBonus;
-    st.handlingRating = std::clamp(static_cast<int>(std::round(handScore)), 8, 150);
+    r.handRaw = (sim.m_fTractionMultiplier * 52.0f + sim.m_fTractionLoss * 28.0f) * suspBonus;
 
     float wC = std::clamp(wear.chassis, 0.0f, 100.0f) * 0.01f;
     int baseArmor = 100 + std::clamp<int>(cfg.armorLevel, 0, 5) * 20;
-    st.armorPercent = std::clamp(static_cast<int>(std::round(static_cast<float>(baseArmor) * (1.0f - 0.48f * wC))), 20, 200);
-    st.numGears     = std::clamp<int>(sim.m_transmissionData.m_nNumberOfGears, 1, 5);
+    r.armorPct = std::clamp(static_cast<int>(std::round(static_cast<float>(baseArmor) * (1.0f - 0.48f * wC))), 20, 200);
+    r.numGears = std::clamp<int>(sim.m_transmissionData.m_nNumberOfGears, 1, 5);
+    return r;
+}
+
+inline void ComputeSkillBonus(int baseInt, float baseRaw, float skilledRaw, int& outBonus, int& outPct) {
+    if (baseInt <= 0 || baseRaw <= 0.001f || skilledRaw <= baseRaw + 0.01f) {
+        outBonus = 0;
+        outPct   = 0;
+        return;
+    }
+    const float ratio   = skilledRaw / baseRaw;
+    const int   skilled = static_cast<int>(std::round(static_cast<float>(baseInt) * ratio));
+    outBonus = std::max(0, skilled - baseInt);
+    outPct   = (outBonus > 0) ? std::max(1, static_cast<int>(std::round((ratio - 1.0f) * 100.0f))) : 0;
+}
+
+VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, uint32_t subClass,
+                                      const mod::PerformanceTuning& cfg, const mod::VehicleWear& wear) {
+    const bool isFourWheel = IsFourWheelSubClass(subClass);
+    const RawVehicleScores baseR = EvaluateVehicleScores(base, isFourWheel, cfg, wear, 0.0f);
+
+    VehicleStats st{};
+    st.topSpeedKmh    = baseR.topSpeedKmh;
+    st.topSpeedMph    = baseR.topSpeedMph;
+    st.accelRating    = std::clamp(static_cast<int>(std::round(baseR.accelRaw)), 6, 150);
+    st.brakeRating    = std::clamp(static_cast<int>(std::round(baseR.brakeRaw)), 6, 150);
+    st.handlingRating = std::clamp(static_cast<int>(std::round(baseR.handRaw)),  8, 150);
+    st.armorPercent   = baseR.armorPct;
+    st.numGears       = baseR.numGears;
+
+    const float liveSkill = GetPlayerVehicleSkill01(subClass);
+    if (liveSkill > 0.001f) {
+        const RawVehicleScores skillR = EvaluateVehicleScores(base, isFourWheel, cfg, wear, liveSkill);
+        ComputeSkillBonus(st.accelRating,    baseR.accelRaw, skillR.accelRaw, st.accelSkillBonus,    st.accelSkillPct);
+        ComputeSkillBonus(st.brakeRating,    baseR.brakeRaw, skillR.brakeRaw, st.brakeSkillBonus,    st.brakeSkillPct);
+        ComputeSkillBonus(st.handlingRating, baseR.handRaw,  skillR.handRaw,  st.handlingSkillBonus, st.handlingSkillPct);
+    }
 
     return st;
 }
@@ -387,15 +486,16 @@ VehicleStats ComputeStatsFromHandling(const sa::tHandlingData& base, bool isFour
 VehicleStats ComputeStats(sa::CVehicle* veh, const mod::PerformanceTuning& cfg, const mod::VehicleWear& wear) {
     if (!sa::IsVehicleValid(veh)) return VehicleStats{};
 
+    const uint32_t sc = veh->GetSubClass();
     const sa::tHandlingData* base = nullptr;
     if (auto* tv = FindSlot(veh)) {
         base = &tv->baseHandling;
     } else {
         base = veh->HandlingData();
-        CacheModelHandling(veh->GetModelIndex(), veh->IsFourWheelLike(), base);
+        CacheModelHandling(veh->GetModelIndex(), sc, base);
     }
     if (!base) return VehicleStats{};
-    return ComputeStatsFromHandling(*base, veh->IsFourWheelLike(), cfg, wear);
+    return ComputeStatsFromHandling(*base, sc, cfg, wear);
 }
 
 VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning& cfg, const mod::VehicleWear& wear) {
@@ -404,14 +504,14 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
     // Tier 1: Live tracked vehicle of this model (100% exact clean base handling snapshot!)
     for (int i = 0; i < MAX_TRACKED_VEHICLES; ++i) {
         if (g_tracked[i].inUse && g_tracked[i].modelId == modelId && IsHandlingSane(&g_tracked[i].baseHandling)) {
-            bool is4w = sa::IsVehicleValid(g_tracked[i].veh) ? g_tracked[i].veh->IsFourWheelLike() : true;
-            CacheModelHandling(modelId, is4w, &g_tracked[i].baseHandling);
-            return ComputeStatsFromHandling(g_tracked[i].baseHandling, is4w, cfg, wear);
+            uint32_t sc = sa::IsVehicleValid(g_tracked[i].veh) ? g_tracked[i].veh->GetSubClass() : sa::VEHICLE_AUTOMOBILE;
+            CacheModelHandling(modelId, sc, &g_tracked[i].baseHandling);
+            return ComputeStatsFromHandling(g_tracked[i].baseHandling, sc, cfg, wear);
         }
     }
 
     // Tier 2: Any live vehicle of this model currently spawned in GTA SA's vehicle pool
-    if (auto* pool = sa::GetVehiclePool(); pool && pool->objects && pool->byteMap && pool->size > 0 && pool->size < 2000) {
+    if (auto* pool = sa::GetVehiclePool(); pool && pool->objects && pool->byteMap && pool->size > 0 && pool->size < 65536) {
         for (int i = 0; i < pool->size; ++i) {
             if ((pool->byteMap[i] & 0x80) != 0) continue;
             auto* v = reinterpret_cast<sa::CVehicle*>(pool->objects + static_cast<size_t>(i) * sa::VEHICLE_POOL_STRIDE);
@@ -419,8 +519,9 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
                 const sa::tHandlingData* h = v->HandlingData();
                 if (auto* tv = FindSlot(v)) h = &tv->baseHandling;
                 if (IsHandlingSane(h)) {
-                    CacheModelHandling(modelId, v->IsFourWheelLike(), h);
-                    return ComputeStatsFromHandling(*h, v->IsFourWheelLike(), cfg, wear);
+                    uint32_t sc = v->GetSubClass();
+                    CacheModelHandling(modelId, sc, h);
+                    return ComputeStatsFromHandling(*h, sc, cfg, wear);
                 }
             }
         }
@@ -429,27 +530,26 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
     // Tier 3: Previously cached live handling snapshot for this model
     if (g_modelBaseCache[modelId - 400].valid) {
         const auto& c = g_modelBaseCache[modelId - 400];
-        return ComputeStatsFromHandling(c.handling, c.isFourWheel, cfg, wear);
+        return ComputeStatsFromHandling(c.handling, c.subClass, cfg, wear);
     }
 
-    // Tier 4: Runtime-patched gHandlingDataMgr lookup (follows Open Limit Adjuster if relocated!)
-    uintptr_t miTableAddr = *reinterpret_cast<const uintptr_t*>(0x006B0B22 + 3);
-    uintptr_t hTableAddr  = *reinterpret_cast<const uintptr_t*>(0x006B0BA2 + 2);
-    auto** modelInfoPtrs  = reinterpret_cast<uint8_t**>(miTableAddr ? miTableAddr : 0x00A9B0C8u);
-    uintptr_t handlingTbl = hTableAddr ? hTableAddr : 0x00C2B9DCu;
+    // Tier 4: Runtime-patched gHandlingDataMgr lookup via shared Limit Adjusters integration!
+    uint8_t* handlingBase = integrations::limits::GetHandlingDataMgrBase();
+    const bool handlingRelocated = (reinterpret_cast<uintptr_t>(handlingBase) != 0x00C2B9DCu);
+    const int  maxHandlingId     = handlingRelocated ? 1024 : 210;
 
-    uint8_t* mi = modelInfoPtrs ? modelInfoPtrs[modelId] : nullptr;
-    if (mi) {
+    uint8_t* mi = reinterpret_cast<uint8_t*>(integrations::limits::GetModelInfo(modelId));
+    if (mi && handlingBase) {
         uint8_t hid = *reinterpret_cast<const uint8_t*>(mi + 0x4A);
         int32_t vtype = *reinterpret_cast<const int32_t*>(mi + 0x3C);
-        bool isFourWheel = (vtype == 0 || vtype == 1 || vtype == 2);
+        uint32_t sc = (vtype >= 0 && vtype <= 11) ? static_cast<uint32_t>(vtype) : sa::VEHICLE_AUTOMOBILE;
 
-        if (hid < 210) {
+        if (static_cast<int>(hid) < maxHandlingId) {
             const auto* base = reinterpret_cast<const sa::tHandlingData*>(
-                handlingTbl + static_cast<uintptr_t>(hid) * 0xE0u);
+                handlingBase + static_cast<size_t>(hid) * 0xE0u);
             if (IsHandlingSane(base)) {
-                CacheModelHandling(modelId, isFourWheel, base);
-                return ComputeStatsFromHandling(*base, isFourWheel, cfg, wear);
+                CacheModelHandling(modelId, sc, base);
+                return ComputeStatsFromHandling(*base, sc, cfg, wear);
             }
         }
 
@@ -459,12 +559,12 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
         if (gxt[0] != '\0') {
             using FnGetHid = int32_t(__thiscall*)(void*, const char*);
             int32_t hid2 = reinterpret_cast<FnGetHid>(0x006F4FD0)(reinterpret_cast<void*>(0x00C2B9C8), gxt);
-            if (hid2 >= 0 && hid2 < 210) {
+            if (hid2 >= 0 && hid2 < maxHandlingId) {
                 const auto* base2 = reinterpret_cast<const sa::tHandlingData*>(
-                    handlingTbl + static_cast<uintptr_t>(hid2) * 0xE0u);
+                    handlingBase + static_cast<size_t>(hid2) * 0xE0u);
                 if (IsHandlingSane(base2)) {
-                    CacheModelHandling(modelId, isFourWheel, base2);
-                    return ComputeStatsFromHandling(*base2, isFourWheel, cfg, wear);
+                    CacheModelHandling(modelId, sc, base2);
+                    return ComputeStatsFromHandling(*base2, sc, cfg, wear);
                 }
             }
         }
@@ -472,12 +572,12 @@ VehicleStats ComputeStatsForModel(int32_t modelId, const mod::PerformanceTuning&
 
     // Tier 5: Direct data\vehicles.ide + data\handling.cfg file fallback
     sa::tHandlingData cfgFallback{};
-    bool fbFourWheel = true;
-    if (LoadHandlingFromCfgFallback(modelId, cfgFallback, fbFourWheel)) {
-        CacheModelHandling(modelId, fbFourWheel, &cfgFallback);
+    uint32_t fbSubClass = sa::VEHICLE_AUTOMOBILE;
+    if (LoadHandlingFromCfgFallback(modelId, cfgFallback, fbSubClass)) {
+        CacheModelHandling(modelId, fbSubClass, &cfgFallback);
         modlog::Info("[Tuning] Used handling.cfg fallback for model %d (maxVel=%.2f).",
                      modelId, cfgFallback.m_transmissionData.m_fMaxGearVelocity * 180.0f);
-        return ComputeStatsFromHandling(cfgFallback, fbFourWheel, cfg, wear);
+        return ComputeStatsFromHandling(cfgFallback, fbSubClass, cfg, wear);
     }
 
     return VehicleStats{};
@@ -495,7 +595,7 @@ void ApplyTuning(sa::CVehicle* veh, const mod::PerformanceTuning& cfg, const mod
         tv->wear = *wearOverride;
         tv->wear.ClampAll();
     }
-    RebuildHandling(*tv);
+    RebuildHandling(*tv, GetTargetDriverSkill01(veh, sa::FindPlayerPed(0)));
 }
 
 void SetLiveWear(sa::CVehicle* veh, const mod::VehicleWear& wear) {
@@ -504,7 +604,7 @@ void SetLiveWear(sa::CVehicle* veh, const mod::VehicleWear& wear) {
     if (!tv) return;
     tv->wear = wear;
     tv->wear.ClampAll();
-    RebuildHandling(*tv);
+    RebuildHandling(*tv, GetTargetDriverSkill01(veh, sa::FindPlayerPed(0)));
 }
 
 mod::VehicleWear GetLiveWear(const sa::CVehicle* veh) {
@@ -587,7 +687,7 @@ void EnsureStreetVehicleWear(sa::CVehicle* veh) {
 }
 
 void TickAll() {
-    if (sa::IsPauseMenuActive() || !sa::IsGameWindowFocused() || sa::GetGameState() != 9) {
+    if (sa::IsPauseMenuActive() || !integrations::sacoop::IsGameWindowFocused() || sa::GetGameState() != 9) {
         audio::StopAll();
         return;
     }
@@ -599,6 +699,14 @@ void TickAll() {
     // Street-picked vehicles start with 35%-85% mechanical wear so Dealership 0%-wear purchases stay valuable!
     if (playerDriving && playerVeh->IsLandVehicle()) {
         EnsureStreetVehicleWear(playerVeh);
+        // Also ensure stock / untuned vehicles receive CJ's live vehicle skill bonus!
+        const float liveSkill = GetPlayerVehicleSkill01(playerVeh->GetSubClass());
+        if (liveSkill > 0.005f && !FindSlot(playerVeh) &&
+            sa::FindHideoutGarageIndexAt(playerVeh->GetPosition()) < 0) {
+            if (auto* tv = AllocSlot(playerVeh)) {
+                RebuildHandling(*tv, liveSkill);
+            }
+        }
     }
 
     const float dt = std::clamp(sa::GetTimeStep() / 50.0f, 0.001f, 0.05f);
@@ -622,6 +730,12 @@ void TickAll() {
         sa::CVehicle* v = tv.veh;
         const auto& c = tv.cfg;
 
+        // Keep CJ's live vehicle skill synced in real time (and stripped cleanly if another player/NPC drives in SA-COOP!)
+        const float targetSkill = GetTargetDriverSkill01(v, playerPed);
+        if (std::fabs(targetSkill - tv.appliedSkill01) >= 0.01f) {
+            RebuildHandling(tv, targetSkill);
+        }
+
         if (v->HandlingData() != &tv.customHandling && tv.origHandling != nullptr) {
             v->HandlingData() = &tv.customHandling;
         }
@@ -642,11 +756,11 @@ void TickAll() {
             }
         }
 
-        // 2. Armor / Body damage mitigation + Impact Mechanical Wear!
+        // 2. Armor / Body damage mitigation + Impact Mechanical Wear (Proper Vehicle Damage compatible!)
         float curHp = v->Health();
         if (curHp > 0.0f && curHp < tv.lastHealth && tv.lastHealth <= 1050.0f) {
             float dmg = tv.lastHealth - curHp;
-            if (dmg > 0.1f && dmg < 650.0f) {
+            if (dmg > 0.1f && dmg < 2500.0f) {
                 // Accumulate crash wear onto mechanical subsystems (ETS 2 style!)
                 if (mod::Config().enableWearSystem && dmg > 4.0f) {
                     const float rate = mod::Config().wearRateMult;
@@ -709,7 +823,7 @@ void TickAll() {
                     std::fabs(tv.wear.chassis      - tv.lastAppliedWear.chassis)
                 });
                 if (maxDelta >= 1.0f) {
-                    RebuildHandling(tv);
+                    RebuildHandling(tv, targetSkill);
                 }
 
                 // Severe wear symptoms (>85% Engine sputter, >92% non-BP Tire blowout risk)
@@ -782,10 +896,14 @@ void TickAll() {
                 }
             }
 
-            // Custom Horn
+            // Custom Horn (focus, overlay, and modal-menu guarded so SA-COOP chat 'H' never honks!)
             if (c.hornType >= 1 && c.hornType <= 4) {
+                bool canKeyHorn = integrations::sacoop::IsGameWindowFocused() &&
+                                  !integrations::sacoop::IsOverlayActive() &&
+                                  !modbus::IsAnyModalMenuOpen() &&
+                                  (sa::GetNumMenusInUse() == 0);
                 bool hornPressed = (v->GetHornState() > 0) ||
-                                   ((GetAsyncKeyState('H') & 0x8000) != 0);
+                                   (canKeyHorn && ((GetAsyncKeyState('H') & 0x8000) != 0));
                 audio::UpdateCustomHorn(c.hornType, hornPressed);
                 hornAudioHandled = true;
             }

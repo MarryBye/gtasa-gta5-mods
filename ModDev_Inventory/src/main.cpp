@@ -1,7 +1,8 @@
 #include <algorithm>
-#include <cstring>
 #include <windows.h>
+#include "common_utils.hpp"
 #include "food_shop.hpp"
+#include "integrations/sacoop.hpp"
 #include "inv_data.hpp"
 #include "inv_menu.hpp"
 #include "log.hpp"
@@ -9,6 +10,8 @@
 #include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "ui_kit.hpp"
+
+namespace inventory {
 
 namespace {
 
@@ -19,19 +22,16 @@ using FnLoadOp    = bool(__cdecl*)(char*);
 
 FnVoid      g_origScriptsProcess = nullptr;
 FnVoid      g_origDrawAfterFade  = nullptr;
+FnVoid      g_origReInitGame     = nullptr;
 FnIntArg    g_origMakeSaveName   = nullptr;
 FnGenericOp g_origGenericSave    = nullptr;
 FnLoadOp    g_origGenericLoad    = nullptr;
 
-int  g_pendingSaveSlot1to8 = 0;
-bool g_loadedSaveThisBoot  = false;
-bool g_initializedInWorld  = false;
-int  g_lastGameState       = -1;
+common::SaveSlotTracker g_save;
 
-// Bus callbacks exposed to GTA5Phone & GTA5AmmuNation & GTA5UIKit!
 void __cdecl BusOpenInventory(bool fromPhone, int tab) { invmenu::Open(fromPhone, tab); }
 bool __cdecl BusIsInventoryOpen()                      { return invmenu::IsOpen() || foodshop::IsShopActive(); }
-bool __cdecl BusIsFoodShopClaimed()                    { return foodshop::IsShopActive(); }
+bool __cdecl BusIsFoodShopClaimed()                    { return foodshop::ShouldClaimFoodPanel(); }
 int  __cdecl BusGetTotalFood()                         { return inv::Store().GetTotalFood(); }
 
 int __cdecl BusGetArmorCount(int tier) {
@@ -81,19 +81,23 @@ void RegisterWithBus() {
     modbus::RegisterPanelClaim("FOOD", &BusIsFoodShopClaimed);
 }
 
+void __cdecl HookedReInitGame() {
+    foodshop::Reset();
+    invmenu::Reset();
+    inv::Store().StartFreshNewGame();
+    g_save.OnWorldRestart();
+    if (g_origReInitGame) g_origReInitGame();
+}
+
 void __cdecl HookedMakeValidSaveName(int32_t slot0to7) {
-    if (slot0to7 >= 0 && slot0to7 <= 7) g_pendingSaveSlot1to8 = slot0to7 + 1;
+    g_save.OnMakeValidSaveName(slot0to7);
     if (g_origMakeSaveName) g_origMakeSaveName(slot0to7);
 }
 
 bool __cdecl HookedGenericSave(int32_t arg) {
     bool ok = g_origGenericSave ? g_origGenericSave(arg) : false;
     if (ok) {
-        int slot = g_pendingSaveSlot1to8;
-        if (slot < 1 || slot > 8) {
-            slot = sa::ParseSaveSlotFromPath(reinterpret_cast<const char*>(0x00C16F18));
-        }
-        inv::Store().SaveToSlot(slot);
+        inv::Store().SaveToSlot(g_save.ResolveCurrentSaveSlot());
     }
     return ok;
 }
@@ -101,13 +105,7 @@ bool __cdecl HookedGenericSave(int32_t arg) {
 bool __cdecl HookedGenericLoad(char* outFlag) {
     bool ok = g_origGenericLoad ? g_origGenericLoad(outFlag) : false;
     if (ok) {
-        int slot = sa::ParseSaveSlotFromPath(reinterpret_cast<const char*>(0x00C16F18));
-        if (slot < 1 || slot > 8) {
-            int8_t menuSlot = *reinterpret_cast<const int8_t*>(0x00BA6748 + 0x15F);
-            if (menuSlot >= 0 && menuSlot <= 7) slot = menuSlot + 1;
-        }
-        g_loadedSaveThisBoot = true;
-        g_initializedInWorld = true;
+        int slot = g_save.OnGenericLoadSuccess(integrations::sacoop::IsCoopClient(true));
         foodshop::Reset();
         invmenu::Reset();
         inv::Store().LoadFromSlot(slot);
@@ -118,27 +116,27 @@ bool __cdecl HookedGenericLoad(char* outFlag) {
 void __cdecl HookedScriptsProcess() {
     const int gs = sa::GetGameState();
     if (gs == 9) {
-        if (!g_initializedInWorld) {
-            g_initializedInWorld = true;
-            if (!g_loadedSaveThisBoot) {
-                if (sa::IsCoopModLoaded()) inv::Store().LoadFromSlot(0);
-                else                       inv::Store().StartFreshNewGame();
+        if (!g_save.initializedInWorld) {
+            g_save.initializedInWorld = true;
+            if (!g_save.loadedSaveThisBoot) {
+                if (integrations::sacoop::IsCoopClient(true)) inv::Store().LoadFromSlot(0);
+                else                                          inv::Store().StartFreshNewGame();
             }
         }
-        if (g_lastGameState != 9 && g_lastGameState != -1) {
+        if (g_save.lastGameState != 9 && g_save.lastGameState != -1) {
             foodshop::Reset();
             invmenu::Reset();
         }
+        ui::SyncFromSharedBus();
         ui::Keys().Update();
         foodshop::PreScriptsTick();
         invmenu::PreScriptsTick();
-    } else if (g_lastGameState == 9 && gs != 9) {
+    } else if (g_save.lastGameState == 9 && gs != 9) {
         foodshop::Reset();
         invmenu::Reset();
-        g_initializedInWorld = false;
-        g_loadedSaveThisBoot = false;
+        g_save.OnLeftWorld();
     }
-    g_lastGameState = gs;
+    g_save.lastGameState = gs;
 
     if (g_origScriptsProcess) g_origScriptsProcess();
 }
@@ -151,7 +149,13 @@ void __cdecl HookedDrawAfterFade() {
     }
 }
 
-void InstallAllHooks() {
+} // namespace
+
+void Init(HMODULE hModule) {
+    inv::LoadConfig(hModule);
+    ui::SetUseRussian(inv::Cfg().useRussian);
+    modlog::Enabled() = inv::Cfg().enableLog;
+    modlog::Init(hModule, "GTA5Inventory");
     if (!sa::IsSA10US()) {
         modlog::Info("[Inv] ERROR: Unsupported GTA SA exe! Requires 1.0 US (Hoodlum).");
         return;
@@ -167,26 +171,27 @@ void InstallAllHooks() {
         mem::HookCall(0x00619081, reinterpret_cast<uintptr_t>(&HookedGenericSave)));
     g_origGenericLoad = reinterpret_cast<FnLoadOp>(
         mem::HookCall(0x0053C70B, reinterpret_cast<uintptr_t>(&HookedGenericLoad)));
+    g_origReInitGame = reinterpret_cast<FnVoid>(
+        mem::HookCall(0x0053C6DB, reinterpret_cast<uintptr_t>(&HookedReInitGame)));
 
     foodshop::InstallHooks();
     RegisterWithBus();
-
-    modlog::Info("[Inv] GTA5Inventory v1.0 hooks & Bus registered (Take-Out Restaurants + Pocket Snacks & Armor)!");
+    modlog::Info("[Inv] GTA5Inventory hooks & Bus registered.");
 }
 
-} // namespace
+void Shutdown() {
+    foodshop::Reset();
+    invmenu::Shutdown();
+}
+
+} // namespace inventory
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        inv::LoadConfig(hModule);
-        ui::SetUseRussian(inv::Cfg().useRussian);
-        modlog::Enabled() = inv::Cfg().enableLog;
-        modlog::Init(hModule, "GTA5Inventory");
-        InstallAllHooks();
+        inventory::Init(hModule);
     } else if (reason == DLL_PROCESS_DETACH) {
-        foodshop::Reset();
-        invmenu::Reset();
+        inventory::Shutdown();
     }
     return TRUE;
 }

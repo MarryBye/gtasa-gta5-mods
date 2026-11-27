@@ -1,13 +1,17 @@
 #include "garage.hpp"
 #include <cmath>
+#include <cstdio>
 #include <cstring>
-#include "config.hpp"
+#include "common_utils.hpp"
 #include "delivery.hpp"
+#include "garage_config.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
 #include "memory.hpp"
+#include "mod_bus.hpp"
 #include "storage.hpp"
 #include "tuning_physics.hpp"
-#include "ui_menu.hpp"
+#include "ui_kit.hpp"
 #include "workshop.hpp"
 
 namespace garage {
@@ -26,14 +30,26 @@ uint32_t      g_lastSafehouseScanMs = 0;
 bool          g_safehouseDirtySave  = false;
 bool          g_safehouseHooksInstalled = false;
 
-// Fix GTA SA's x87 FPU NaN bug in CGarage::IsPointInsideGarage (0x00448740):
-// Because 0x00448740 uses fcomp + test ah,0x05/0x41 without NaN checks, ANY vehicle with (NaN,NaN,NaN)
-// coordinates returns TRUE and gets permanently vacuumed into aCarsInSafeHouse, eating a garage slot forever!
-bool __fastcall HookedGarageIsPointInside(const void* garage, int /*edx*/, float x, float y, float z) {
+using FnIsPointInside = bool(__thiscall*)(const void*, float, float, float);
+FnIsPointInside g_origIsPointInside1 = nullptr;
+FnIsPointInside g_origIsPointInside2 = nullptr;
+FnIsPointInside g_origIsPointInside3 = nullptr;
+
+// Fix GTA SA's x87 FPU NaN bug in CGarage::IsPointInsideGarage while chaining any SilentPatch / external hook!
+bool SafeIsPointInside(FnIsPointInside origFn, const void* garage, float x, float y, float z) {
     if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return false;
     if (std::fabs(x) > 5000.0f || std::fabs(y) > 5000.0f || std::fabs(z) > 2000.0f) return false;
-    using Fn = bool(__thiscall*)(const void*, float, float, float);
-    return reinterpret_cast<Fn>(0x00448740)(garage, x, y, z);
+    return origFn ? origFn(garage, x, y, z) : false;
+}
+
+bool __fastcall HookedGarageIsPointInside1(const void* garage, int, float x, float y, float z) {
+    return SafeIsPointInside(g_origIsPointInside1, garage, x, y, z);
+}
+bool __fastcall HookedGarageIsPointInside2(const void* garage, int, float x, float y, float z) {
+    return SafeIsPointInside(g_origIsPointInside2, garage, x, y, z);
+}
+bool __fastcall HookedGarageIsPointInside3(const void* garage, int, float x, float y, float z) {
+    return SafeIsPointInside(g_origIsPointInside3, garage, x, y, z);
 }
 
 // Purge corrupted NaN / out-of-world ghost cars from all 20 safehouse garages (heals existing saves too!)
@@ -58,7 +74,7 @@ void SanitizeSafehouseStoredCars() {
     }
 
     auto* pool = sa::GetVehiclePool();
-    if (!pool || !pool->objects || !pool->byteMap || pool->size <= 0 || pool->size > 2000) return;
+    if (!pool || !pool->objects || !pool->byteMap || pool->size <= 0 || pool->size > 65536) return;
     sa::CVehicle* playerVeh = sa::FindPlayerVehicle(0, false);
     for (int i = 0; i < pool->size; ++i) {
         if ((pool->byteMap[i] & 0x80) != 0) continue;
@@ -277,9 +293,9 @@ void TickSafehousePersistence() {
     SanitizeSafehouseStoredCars();
 
     auto* pool = sa::GetVehiclePool();
-    if (!pool || !pool->objects || !pool->byteMap || pool->size <= 0 || pool->size > 2000) return;
+    if (!pool || !pool->objects || !pool->byteMap || pool->size <= 0 || pool->size > 65536) return;
 
-    const bool coopActive = sa::IsCoopModLoaded();
+    const bool coopActive = integrations::sacoop::IsInMultiplayer();
 
     for (int i = 0; i < pool->size; ++i) {
         if ((pool->byteMap[i] & 0x80) != 0) continue;
@@ -405,9 +421,12 @@ void InstallSafehouseHooks() {
     //   0x0044998C (StoreAndRemoveCarsForThisHideout #1)
     //   0x00449ADC (StoreAndRemoveCarsForThisHideout #2)
     //   0x0156146F (CountCarsWithCenterPointWithinGarage)
-    mem::HookCall(0x0044998C, reinterpret_cast<uintptr_t>(&HookedGarageIsPointInside));
-    mem::HookCall(0x00449ADC, reinterpret_cast<uintptr_t>(&HookedGarageIsPointInside));
-    mem::HookCall(0x0156146F, reinterpret_cast<uintptr_t>(&HookedGarageIsPointInside));
+    g_origIsPointInside1 = reinterpret_cast<FnIsPointInside>(
+        mem::HookCall(0x0044998C, reinterpret_cast<uintptr_t>(&HookedGarageIsPointInside1)));
+    g_origIsPointInside2 = reinterpret_cast<FnIsPointInside>(
+        mem::HookCall(0x00449ADC, reinterpret_cast<uintptr_t>(&HookedGarageIsPointInside2)));
+    g_origIsPointInside3 = reinterpret_cast<FnIsPointInside>(
+        mem::HookCall(0x0156146F, reinterpret_cast<uintptr_t>(&HookedGarageIsPointInside3)));
     g_safehouseHooksInstalled = true;
     modlog::Info("[Garage] Installed safehouse NaN-ghost guard hooks (0x0044998C, 0x00449ADC, 0x0156146F).");
 }
@@ -514,47 +533,7 @@ void SnapshotVehicleToSlot(sa::CVehicle* veh, int slotIdx) {
     dst.destroyed       = false;
     dst.modelId         = veh->GetModelIndex();
     dst.displayNameGame = sa::GetVehicleDisplayNameGameEncoded(dst.modelId);
-
-    // Colors
-    int32_t handle = sa::GetVehicleHandle(veh);
-    if (handle > 0) {
-        int32_t c1 = veh->PrimaryColor();
-        int32_t c2 = veh->SecondaryColor();
-        sa::ScriptCmd(0x03F3).Int(handle).Out(c1).Out(c2).Run();
-        dst.visuals.primaryColor   = static_cast<uint8_t>(c1);
-        dst.visuals.secondaryColor = static_cast<uint8_t>(c2);
-
-        // Paintjob
-        int32_t pj = -1;
-        sa::ScriptCmd(0x0988).Int(handle).Out(pj).Run();
-        dst.visuals.paintjob = (pj >= 0 && pj <= 3) ? static_cast<int8_t>(pj) : -1;
-    } else {
-        dst.visuals.primaryColor   = veh->PrimaryColor();
-        dst.visuals.secondaryColor = veh->SecondaryColor();
-        dst.visuals.paintjob       = -1;
-    }
-
-    // All 15 vanilla upgrade slots (deduplicate Nitro 1008/1009/1010 so only one clean Nitro is stored!)
-    const int16_t* upgs = veh->Upgrades();
-    int16_t lastNitro = -1;
-    for (int i = 0; i < 15; ++i) {
-        if (upgs[i] == 1008 || upgs[i] == 1009 || upgs[i] == 1010) lastNitro = upgs[i];
-    }
-    int writeIdx = 0;
-    for (int i = 0; i < 15; ++i) dst.visuals.upgrades[i] = -1;
-    bool wroteNitro = false;
-    for (int i = 0; i < 15 && writeIdx < 15; ++i) {
-        int16_t u = upgs[i];
-        if (u < 1000) continue;
-        if (u == 1008 || u == 1009 || u == 1010) {
-            if (!wroteNitro && lastNitro >= 1000) {
-                dst.visuals.upgrades[writeIdx++] = lastNitro;
-                wroteNitro = true;
-            }
-            continue;
-        }
-        dst.visuals.upgrades[writeIdx++] = u;
-    }
+    dst.visuals         = CaptureVisuals(veh);
 
     // GTA 5 performance & visual tuning + ETS 2 wear state
     if (const auto* live = tuning::GetLiveTuning(veh)) {
@@ -717,11 +696,9 @@ void DismissCurrentPersonalVehicle(bool deleteEntity) {
             SaveNow();
         }
         int32_t h = g_activeVehHandle;
-        // SA-COOP safety: never DELETE_CAR out from under a co-op teammate driving our personal vehicle!
-        sa::CPed* driver = v->GetDriver();
-        bool occupiedByOther = (driver != nullptr && driver != sa::FindPlayerPed(0));
+        bool safeToDelete = integrations::sacoop::IsSafeToDeleteVehicle(v, sa::FindPlayerPed(0));
         tuning::DetachVehicle(v);
-        if (deleteEntity && !occupiedByOther && h > 0) {
+        if (deleteEntity && safeToDelete && h > 0) {
             sa::ScriptCmd(0x00A6).Int(h).Run(); // DELETE_CAR
         } else if (h > 0) {
             sa::ScriptCmd(0x01C3).Int(h).Run(); // MARK_CAR_AS_NO_LONGER_NEEDED
@@ -772,10 +749,17 @@ void Tick() {
             ClearDeliveryBlip();
             RemovePersonalSlotFromSafehouses(g_activeSlot, true);
             SaveNow();
-            ui::ShowHelp(
-                "~r~Ваш личный транспорт уничтожен!~w~ Вы можете восстановить его в меню ~y~F6~w~ (износ сильно вырос!).",
-                "~r~Your personal vehicle was destroyed!~w~ Restore it via ~y~F6~w~ (heavy mechanical wear incurred!).",
-                true);
+            auto* bus = modbus::GetBus();
+            int keyVk = (bus && bus->phoneInstalled) ? modbus::GetPhoneKey() : mod::Config().callMenuKey;
+            std::string keyLbl = common::GetVirtualKeyLabel(keyVk);
+            char rmsg[160], emsg[160];
+            std::snprintf(rmsg, sizeof(rmsg),
+                          "~r~Ваш личный транспорт уничтожен.~w~ Восстановите его через ~y~%s~w~.",
+                          keyLbl.c_str());
+            std::snprintf(emsg, sizeof(emsg),
+                          "~r~Your personal vehicle was destroyed.~w~ Restore it via ~y~%s~w~.",
+                          keyLbl.c_str());
+            ui::ShowHelp(rmsg, emsg, true);
             modlog::Info("[Garage] Slot %d vehicle destroyed! Avg wear now %.1f%%.", g_activeSlot, slot.wear.Average());
         }
         tuning::DetachVehicle(g_activeVeh);
@@ -815,9 +799,9 @@ void Tick() {
         }
     }
 
-    // Protect personal vehicle paint color from Pay 'n' Spray resprays!
-    // (Pay 'n' Spray still repairs the car & clears wanted level, while keeping custom paint untouched!)
-    if (!workshop::IsWorkshopActive() && g_activeVehHandle > 0) {
+    // Protect personal vehicle paint color from Pay 'n' Spray resprays (only while local player is driving!)
+    if (!workshop::IsWorkshopActive() && g_activeVehHandle > 0 &&
+        g_activeVeh->GetDriver() == sa::FindPlayerPed(0)) {
         if (g_activeVeh->PrimaryColor() != slot.visuals.primaryColor ||
             g_activeVeh->SecondaryColor() != slot.visuals.secondaryColor) {
             sa::ScriptCmd(0x0229)

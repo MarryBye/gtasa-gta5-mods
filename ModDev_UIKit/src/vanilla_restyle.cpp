@@ -37,13 +37,20 @@ FnInputMenu   g_origInGrid2         = nullptr;
 FnPrintString g_origHelpPrintString = nullptr;
 FnInsertKeys  g_origInsertHelpKeys  = nullptr;
 
-bool     g_wasManagingVanillaPanel       = false;
-bool     g_blockTriangleAfterVanillaMenu = false;
-uint32_t g_blockTriangleUntilMs          = 0;
+bool                  g_wasManagingVanillaPanel       = false;
+bool                  g_blockTriangleAfterVanillaMenu = false;
+uint32_t              g_blockTriangleUntilMs          = 0;
+const sa::tMenuPanel* g_lastManagedPanel              = nullptr;
+char                  g_lastManagedTitle[12]          = {};
+char                  g_lastManagedRow0[12]           = {};
+uint8_t               g_lastManagedRows               = 0;
+uint8_t               g_lastManagedCols               = 0;
+uint8_t               g_lastManagedInteractive        = 0;
+ui::OrbitCameraRig    g_vanillaOrbit{};
 
 // Captured right BEFORE CHud::SetHelpMessage substitutes ~k~~...~ control tokens into localized text!
-bool     g_lastHelpIsStoryPhone          = false;
-bool     g_lastHelpHasMenuControlTokens  = false;
+bool                  g_lastHelpIsStoryPhone          = false;
+bool                  g_lastHelpHasMenuControlTokens  = false;
 
 std::string ResolveGxtKey(const char* rawKey, int maxBytes = 10) {
     if (!rawKey || !rawKey[0]) return "";
@@ -96,16 +103,38 @@ bool IsPanelUnclaimed(const sa::tMenuPanel* p) {
     return !modbus::IsPanelClaimed(titleBuf);
 }
 
-sa::tMenuPanel* GetActiveUnclaimedVanillaPanel() {
+// Non-interactive buy/cancel confirmation panels used by vanilla barber.scm ($25C4 HAIRCHO) & mission clothes.scm:
+// panel has m_bInteractive == 0, player controls are locked, and a Space/F confirm help prompt is active!
+bool IsConfirmOnlyVanillaPanel(const sa::tMenuPanel* p, bool helpVisible) {
+    if (!p || p->m_bInteractive || p->m_nNumRows == 0) return false;
+    if (!IsPanelUnclaimed(p)) return false;
+    if (!sa::IsPlayerControlsDisabled()) return false;
+    if (std::strncmp(p->m_aaacRowItems[0][0], "BOUGHT", 6) == 0) return false;
+    const bool isKnownShopConfirm =
+        (std::strncmp(p->m_acTitle, "HAIR", 4) == 0) ||
+        (std::strncmp(p->m_acTitle, "TATT", 4) == 0) ||
+        (std::strncmp(p->m_acTitle, "CLOT", 4) == 0);
+    return isKnownShopConfirm || (helpVisible && g_lastHelpHasMenuControlTokens);
+}
+
+bool SupportsVanillaOrbitCamera(const sa::tMenuPanel* p) {
+    if (!p) return false;
+    if (sa::camera::GetActiveCamMode() != 15) return false; // 15 = MODE_FIXED (shop preview camera)
+    return (std::strncmp(p->m_acTitle, "HAIR", 4) == 0) ||
+           (std::strncmp(p->m_acTitle, "TATT", 4) == 0);
+}
+
+sa::tMenuPanel* GetActiveUnclaimedVanillaPanel(bool helpVisible) {
     auto* bus = modbus::GetBus();
     if (!bus || !bus->restyleVanillaMenus) return nullptr;
     if (sa::GetNumMenusInUse() == 0) return nullptr;
 
     int8_t focus = sa::GetCurrentMenuInFocus();
     sa::tMenuPanel* p = (focus >= 0 && focus <= 1) ? sa::GetMenuPanel(focus) : nullptr;
-    if (!p || !p->m_bInteractive) p = sa::GetMenuPanel(0);
-    if (!p || !p->m_bInteractive) p = sa::GetMenuPanel(1);
-    if (!p || !p->m_bInteractive || p->m_nNumRows == 0) return nullptr;
+    if (!p || (!p->m_bInteractive && !IsConfirmOnlyVanillaPanel(p, helpVisible))) p = sa::GetMenuPanel(0);
+    if (!p || (!p->m_bInteractive && !IsConfirmOnlyVanillaPanel(p, helpVisible))) p = sa::GetMenuPanel(1);
+    if (!p || p->m_nNumRows == 0) return nullptr;
+    if (!p->m_bInteractive && !IsConfirmOnlyVanillaPanel(p, helpVisible)) return nullptr;
     if (!IsPanelUnclaimed(p)) return nullptr;
     return p;
 }
@@ -133,13 +162,15 @@ void __cdecl HookedInsertHelpKeys(char* rawHelpText) {
     if (g_origInsertHelpKeys) g_origInsertHelpKeys(rawHelpText);
 }
 
-// Unified Controls Injector for ALL Unclaimed Vanilla CMenuSystem Menus (Gym, Tattoo, Barber on mission, Betting, Color Grids!):
-// Makes Enter / Space / LMB = SELECT (ButtonCross) and Backspace / Esc / RMB / F = BACK/EXIT (ButtonTriangle),
-// plus Mouse Wheel / Arrows / WASD scrolling!
-// Crucially holds ButtonTriangle suppressed after Accept until Enter/LMB/F are released so Gym scripts (gymbench/dumb/tread/bike)
-// NEVER mistake the tail end of an Enter press on Frame 2 for "Exit Equipment"!
+// Unified Controls Injector for ALL Unclaimed Vanilla CMenuSystem Menus (Gym, Tattoo, Barber, Betting, Mission Menus, Color Grids!):
+// Uses unified ListInputController (Wheel/Arrows/WASD = Scroll, LMB/F/Enter = Select, RMB/Backspace = Back/Exit)
+// and preserves exact CMenuSystem::InputStandardMenu m_nAcceptedRow semantics (0x0058094F) so 2-frame
+// press->release->GET_MENU_ITEM_ACCEPTED scripts (barber.scm, tattoo.scm) always read the chosen row!
 void __cdecl HookedScriptsProcess() {
-    if (sa::GetGameState() == 9) {
+    const bool inWorld = (sa::GetGameState() == 9);
+    const bool livePlay = inWorld && !sa::IsPauseMenuActive() && !sa::IsCutsceneRunning();
+
+    if (inWorld) {
         const bool helpVisible = (*reinterpret_cast<const int32_t*>(0x00BAA474) != 0);
         if (!helpVisible) {
             g_lastHelpIsStoryPhone         = false;
@@ -150,71 +181,104 @@ void __cdecl HookedScriptsProcess() {
             bus->storyPhonePriority = (helpVisible && g_lastHelpIsStoryPhone) || sa::IsStoryPhoneRinging();
         }
 
-        if (!sa::IsPauseMenuActive() && !sa::IsCutsceneRunning()) {
+        if (livePlay) {
             ui::Keys().Update();
 
-            sa::tMenuPanel* p = GetActiveUnclaimedVanillaPanel();
-            if (p && !modbus::IsAnyModalMenuOpen()) {
+            sa::tMenuPanel* p = GetActiveUnclaimedVanillaPanel(helpVisible);
+            if (p && !modbus::IsAnyModalMenuOpen("vanilla")) {
+                const bool panelChanged =
+                    !g_wasManagingVanillaPanel ||
+                    (p != g_lastManagedPanel) ||
+                    (std::strncmp(p->m_acTitle, g_lastManagedTitle, 10) != 0) ||
+                    (std::strncmp(p->m_aaacRowItems[0][0], g_lastManagedRow0, 10) != 0) ||
+                    (p->m_nNumRows != g_lastManagedRows) ||
+                    (p->m_nNumColumns != g_lastManagedCols) ||
+                    (p->m_bInteractive != g_lastManagedInteractive);
+
                 if (!g_wasManagingVanillaPanel) {
-                    g_wasManagingVanillaPanel = true;
+                    g_wasManagingVanillaPanel       = true;
                     g_blockTriangleAfterVanillaMenu = false;
+                }
+                if (panelChanged) {
+                    g_lastManagedPanel       = p;
+                    std::memcpy(g_lastManagedTitle, p->m_acTitle, 10);
+                    g_lastManagedTitle[10]   = '\0';
+                    std::memcpy(g_lastManagedRow0, p->m_aaacRowItems[0][0], 10);
+                    g_lastManagedRow0[10]    = '\0';
+                    g_lastManagedRows        = p->m_nNumRows;
+                    g_lastManagedCols        = p->m_nNumColumns;
+                    g_lastManagedInteractive = p->m_bInteractive;
+                    g_vanillaOrbit.Reset();
                     ui::LockMenuInputBriefly(150);
                 }
 
-                // Poll unified ListInputController: Wheel/Arrows/WASD = Scroll, F/Enter/LMB = Select, Backspace/Esc/RMB = Back/Exit!
-                auto in = ui::ListInput().Poll(true);
-                p->m_nAcceptedRow = static_cast<int8_t>(-99);
+                if (auto* bus = modbus::GetBus()) {
+                    bus->vanillaMenuOpen = true;
+                }
 
-                if (p->m_nType == 0) {
-                    int n   = std::clamp<int>(p->m_nNumRows, 1, 12);
-                    int cur = std::clamp<int>(p->m_nSelectedRow, 0, n - 1);
-                    if (in.up || in.down) {
-                        int step = in.down ? +1 : -1;
-                        int next = cur;
-                        for (int tries = 0; tries < n; ++tries) {
-                            next = (next + step + n) % n;
-                            if (IsPanelRowSelectable(p, next)) break;
+                // Poll unified ListInputController: Wheel/Arrows/WASD = Scroll, LMB/F/Enter = Select, RMB/Backspace = Back/Exit!
+                auto in = ui::ListInput().Poll(true);
+
+                if (p->m_bInteractive) {
+                    // Match vanilla CMenuSystem::InputStandardMenu @ 0x0058094F: keep m_nAcceptedRow intact
+                    // while selection hasn't moved so Frame-2 release->GET_MENU_ITEM_ACCEPTED reads the chosen row!
+                    if (p->m_nAcceptedRow != p->m_nSelectedRow) {
+                        p->m_nAcceptedRow = static_cast<int8_t>(-99);
+                    }
+
+                    if (p->m_nType == 0) {
+                        int n   = std::clamp<int>(p->m_nNumRows, 1, 12);
+                        int cur = std::clamp<int>(p->m_nSelectedRow, 0, n - 1);
+                        if (in.up || in.down) {
+                            int step = in.down ? +1 : -1;
+                            int next = cur;
+                            for (int tries = 0; tries < n; ++tries) {
+                                next = (next + step + n) % n;
+                                if (IsPanelRowSelectable(p, next)) break;
+                            }
+                            if (next != cur) {
+                                p->m_nSelectedRow = static_cast<int8_t>(next);
+                                p->m_nAcceptedRow = static_cast<int8_t>(-99);
+                                sa::PlayFrontendSound(sa::SFX_SCROLL);
+                            }
                         }
+                    } else if (p->m_nType == 1) {
+                        int cols  = std::clamp<int>(p->m_nNumColumns, 1, 8);
+                        int rows  = std::clamp<int>(p->m_nNumRows,    1, 8);
+                        int total = std::min(64, cols * rows);
+                        int cur   = std::clamp<int>(p->m_nSelectedRow, 0, std::max(0, total - 1));
+                        int next  = cur;
+                        if (in.left)       next = (cur - 1 + total) % total;
+                        else if (in.right) next = (cur + 1) % total;
+                        else if (in.up)    next = (cur - cols + total) % total;
+                        else if (in.down)  next = (cur + cols) % total;
                         if (next != cur) {
                             p->m_nSelectedRow = static_cast<int8_t>(next);
+                            p->m_nAcceptedRow = static_cast<int8_t>(-99);
                             sa::PlayFrontendSound(sa::SFX_SCROLL);
                         }
-                    }
-                } else if (p->m_nType == 1) {
-                    int cols  = std::clamp<int>(p->m_nNumColumns, 1, 8);
-                    int rows  = std::clamp<int>(p->m_nNumRows,    1, 8);
-                    int total = std::min(64, cols * rows);
-                    int cur   = std::clamp<int>(p->m_nSelectedRow, 0, std::max(0, total - 1));
-                    int next  = cur;
-                    if (in.left)       next = (cur - 1 + total) % total;
-                    else if (in.right) next = (cur + 1) % total;
-                    else if (in.up)    next = (cur - cols + total) % total;
-                    else if (in.down)  next = (cur + cols) % total;
-                    if (next != cur) {
-                        p->m_nSelectedRow = static_cast<int8_t>(next);
-                        sa::PlayFrontendSound(sa::SFX_SCROLL);
                     }
                 }
 
                 uint8_t* pad = sa::GetPad0();
                 if (in.accept) {
-                    // Feed BOTH CMenuSystem m_nAcceptedRow (0x08D8) AND ButtonCross rising-edge (0x00E1(0,16) for GYM!)
-                    if (p->m_nType == 1 || IsPanelRowSelectable(p, p->m_nSelectedRow)) {
+                    // Feed BOTH CMenuSystem m_nAcceptedRow (0x08D8) AND ButtonCross rising-edge (0x00E1(0,16) for Gym/Barber/Tattoo!)
+                    if (p->m_bInteractive && (p->m_nType == 1 || IsPanelRowSelectable(p, p->m_nSelectedRow))) {
                         p->m_nAcceptedRow = p->m_nSelectedRow;
                     }
                     *reinterpret_cast<int16_t*>(pad + 0x20) = 255; // NewState.ButtonCross
                     *reinterpret_cast<int16_t*>(pad + 0x50) = 0;   // OldState.ButtonCross
-                    *reinterpret_cast<int16_t*>(pad + 0x1E) = 0;   // NewState.ButtonTriangle = 0 even if Enter was pressed!
+                    *reinterpret_cast<int16_t*>(pad + 0x1E) = 0;   // NewState.ButtonTriangle = 0 even if F/Enter was pressed!
                     *reinterpret_cast<int16_t*>(pad + 0x4E) = 0;
                     sa::PlayFrontendSound(sa::SFX_SELECT);
 
-                    // CRITICAL GYM FIX: After gymbench/dumb/tread/bike deletes its menu on Frame 1,
-                    // keep ButtonTriangle suppressed until Enter/LMB/F are physically released so Frame 2 NEVER aborts the workout!
+                    // Hold ButtonTriangle suppressed AFTER the menu closes so Gym/Shop scripts never abort on Frame 2,
+                    // and debounce input across multi-step submenus (Tattoo Body -> List -> Buy, Barber List -> Confirm)!
                     g_blockTriangleAfterVanillaMenu = true;
                     g_blockTriangleUntilMs          = GetTickCount() + 260;
-                    ui::TriggerPostCloseShield(260);
+                    ui::LockMenuInputBriefly(160);
                 } else if (in.back) {
-                    // Feed clean native ButtonTriangle (Cancel/Back) rising-edge!
+                    p->m_nAcceptedRow = static_cast<int8_t>(-99);
                     *reinterpret_cast<int16_t*>(pad + 0x1E) = 255; // NewState.ButtonTriangle
                     *reinterpret_cast<int16_t*>(pad + 0x4E) = 0;   // OldState.ButtonTriangle
                     *reinterpret_cast<int16_t*>(pad + 0x20) = 0;
@@ -223,42 +287,97 @@ void __cdecl HookedScriptsProcess() {
 
                     g_blockTriangleAfterVanillaMenu = true;
                     g_blockTriangleUntilMs          = GetTickCount() + 220;
-                    ui::TriggerPostCloseShield(220);
+                    ui::LockMenuInputBriefly(160);
                 }
             } else {
+                const bool justClosed = g_wasManagingVanillaPanel;
                 g_wasManagingVanillaPanel = false;
-                ui::SyncIdleMouseEdges();
+                g_lastManagedPanel        = nullptr;
+                g_vanillaOrbit.Reset();
+                if (auto* bus = modbus::GetBus()) {
+                    bus->vanillaMenuOpen = false;
+                }
+                if (justClosed) {
+                    ui::TriggerPostCloseShield(220);
+                }
 
-                // Hold ButtonTriangle & Esc suppressed until F/Enter/Esc/Mouse are released after accepting/exiting a vanilla menu!
+                // Hold ButtonTriangle suppressed until F/Enter/Back/Mouse are released after accepting/exiting a vanilla menu!
                 if (g_blockTriangleAfterVanillaMenu) {
                     const auto& k = ui::Keys();
                     bool keysHeld = k.IsDown(VK_RETURN) || k.IsDown('F') ||
                                     k.IsDown(VK_LBUTTON) || k.IsDown(VK_RBUTTON) ||
-                                    k.IsDown(VK_BACK) || k.IsDown(VK_ESCAPE);
+                                    k.IsDown(VK_BACK);
                     uint8_t* pad = sa::GetPad0();
                     *reinterpret_cast<int16_t*>(pad + 0x1E) = 0; // ButtonTriangle
                     *reinterpret_cast<int16_t*>(pad + 0x4E) = 0;
                     *reinterpret_cast<int16_t*>(pad + 0x22) = 0; // ButtonCircle (prevent LMB punch!)
-                    *reinterpret_cast<int16_t*>(0x00B733A8) = 0; // NewKeyState.esc (prevent Pause Menu!)
                     if (!keysHeld && static_cast<int32_t>(GetTickCount() - g_blockTriangleUntilMs) >= 0) {
                         g_blockTriangleAfterVanillaMenu = false;
                     }
                 }
 
-                if (!modbus::IsAnyModalMenuOpen()) {
+                if (!modbus::IsAnyModalMenuOpen("vanilla")) {
                     ui::UpdatePostCloseShield();
                 }
             }
         } else {
             g_wasManagingVanillaPanel       = false;
             g_blockTriangleAfterVanillaMenu = false;
+            g_lastManagedPanel              = nullptr;
+            g_vanillaOrbit.Reset();
+            if (auto* bus = modbus::GetBus()) bus->vanillaMenuOpen = false;
         }
     } else {
         g_wasManagingVanillaPanel       = false;
         g_blockTriangleAfterVanillaMenu = false;
+        g_lastManagedPanel              = nullptr;
+        g_vanillaOrbit.Reset();
+        if (auto* bus = modbus::GetBus()) bus->vanillaMenuOpen = false;
     }
 
     if (g_origScriptsProcess) g_origScriptsProcess();
+
+    // Post-scripts 3D preview orbit camera for vanilla Barber (HAIR*) & Tattoo (TATT*) menus:
+    // Leaves vanilla script camera 100% intact until user presses Q/E/Z/X, then orbits symmetrically
+    // around Carl's actual live animated bone (BONE_HEAD for Barber, BONE_SPINE1 for Tattoo)!
+    if (livePlay && g_wasManagingVanillaPanel && !modbus::IsAnyModalMenuOpen("vanilla")) {
+        const bool helpNow = (*reinterpret_cast<const int32_t*>(0x00BAA474) != 0);
+        sa::tMenuPanel* activeP = GetActiveUnclaimedVanillaPanel(helpNow);
+        if (activeP && SupportsVanillaOrbitCamera(activeP)) {
+            sa::CPed* ped = sa::FindPlayerPed(0);
+            if (sa::IsPedValid(ped)) {
+                const bool isBarber = (std::strncmp(activeP->m_acTitle, "HAIR", 4) == 0);
+                sa::CVector headPos{};
+                sa::CVector pivot{};
+                ped->GetBonePosition(headPos, sa::CPed::BONE_HEAD, true);
+                if (isBarber) {
+                    pivot = headPos;
+                } else {
+                    ped->GetBonePosition(pivot, sa::CPed::BONE_SPINE1, true);
+                }
+                const float wallRayZOff = isBarber ? 0.05f : std::max(0.32f, headPos.z - pivot.z);
+
+                const float dt = std::clamp(sa::GetTimeStep() / 50.0f, 0.001f, 0.05f);
+                const auto camIn = ui::ListInputController::PollCamera(dt, 1.85f, 1.45f);
+                const bool wantsOrbit = (camIn.orbitDelta != 0.0f || camIn.zoomDelta != 0.0f);
+
+                if (!g_vanillaOrbit.active && wantsOrbit) {
+                    // Use buildings-only horizontal wall probe at head height so seated chairs (even CBuilding chairs!)
+                    // never trap zoom while exterior room walls stay solid.
+                    g_vanillaOrbit.BeginFromCurrentCamera(pivot, isBarber ? 0.52f : 0.48f, isBarber ? 2.00f : 2.60f, 0.0f, false);
+                    g_vanillaOrbit.minClearDist = 0.42f;
+                }
+                if (g_vanillaOrbit.active) {
+                    g_vanillaOrbit.Update(camIn);
+                    g_vanillaOrbit.Apply(pivot, 0.0f, wallRayZOff);
+                }
+            }
+        } else {
+            g_vanillaOrbit.Reset();
+        }
+    } else {
+        g_vanillaOrbit.Reset();
+    }
 }
 
 void RenderStandardPanelWithUIKit(uint8_t panelId, uint8_t isActive) {
@@ -298,9 +417,17 @@ void RenderStandardPanelWithUIKit(uint8_t panelId, uint8_t isActive) {
         .SetPosition(x640, y448, w640)
         .SetMaxVisible(12);
 
+    const bool helpVisible = (*reinterpret_cast<const int32_t*>(0x00BAA474) != 0);
+    const bool confirmOnly = IsConfirmOnlyVanillaPanel(p, helpVisible);
+    const bool hasOrbitCam = SupportsVanillaOrbitCamera(p);
+    const char* camRus = hasOrbitCam ? "Q/E Кам. Z/X Прибл." : nullptr;
+    const char* camEng = hasOrbitCam ? "Q/E Cam Z/X Zoom"    : nullptr;
+
     if (p->m_bInteractive) {
-        menu.SetFooter(isActive ? ui::StandardFooter("Выбрать", "Select", "Выход", "Exit") : "");
-        if (!isActive) menu.SetAccent({140, 140, 140, 35});
+        menu.SetFooter(isActive ? ui::StandardFooter("Выбрать", "Select", "Выход", "Exit", camRus, camEng) : "");
+        if (!isActive) menu.SetAccent(ui::Theme().selectMuted);
+    } else if (confirmOnly) {
+        menu.SetFooter(ui::StandardFooter("Купить", "Buy", "Назад", "Back", camRus, camEng));
     } else {
         menu.SetAccent({0, 0, 0, 0});
     }
@@ -319,8 +446,8 @@ void RenderStandardPanelWithUIKit(uint8_t panelId, uint8_t isActive) {
         bool enabled     = (p->m_anRowEnabled[r] != 0);
         bool highlighted = (p->m_anRowHighlighted[r] != 0);
         sa::CRGBA rightCol = highlighted
-            ? sa::CRGBA{115, 225, 130, 255}
-            : (enabled ? sa::CRGBA{218, 218, 218, 255} : sa::CRGBA{120, 120, 120, 255});
+            ? ui::ColorSuccess()
+            : (enabled ? ui::ColorNormal() : ui::ColorDisabled());
 
         if (leftTxt.empty() && rightTxt.empty()) leftTxt = " ";
         menu.AddItem(leftTxt, rightTxt, rightCol, enabled || !p->m_bInteractive, r);
@@ -353,7 +480,7 @@ void RenderGridPanelWithUIKit(uint8_t panelId, uint8_t isActive) {
         .SetGrid(cols, rows, std::clamp<int>(p->m_nSelectedRow, 0, std::max(0, total - 1)))
         .SetColors(colors.data(), total)
         .SetPosition(24.0f, 72.0f)
-        .SetFooter(isActive ? ui::StandardFooter("Выбрать", "Apply", "Назад", "Back") : "");
+        .SetFooter(isActive ? ui::StandardFooter("Применить", "Apply", "Назад", "Back") : "");
     grid.Render();
 }
 
@@ -420,10 +547,33 @@ void __cdecl HookedHelpPrintString(float x, float y, const char* text) {
         const int32_t fade  = *reinterpret_cast<const int32_t*>(0x00BAA478);
         const float alpha   = (state == 1) ? 1.0f : std::clamp(static_cast<float>(fade) / 200.0f, 0.0f, 1.0f);
         const float rawW    = *reinterpret_cast<const float*>(0x008D0934);
-        const float boxW    = (rawW >= 120.0f && rawW <= 320.0f) ? std::clamp(rawW, 170.0f, 235.0f) : 196.0f;
+        const float boxW    = (rawW >= 120.0f && rawW <= 320.0f) ? std::clamp(rawW, 175.0f, 235.0f) : 198.0f;
+
+        // Classify toast header & semantic tone cleanly outside dumb ui::HelpToast (Rule 1a & 1c!)
+        std::string toastTitle;
+        ui::ToastTone tone = ui::ToastTone::Neutral;
+        if (isStoryPhone) {
+            toastTitle = ui::Loc("ЗВОНОК", "CALL");
+            tone       = ui::ToastTone::Warning;
+        } else if (std::strstr(text, "~r~") != nullptr) {
+            toastTitle = ui::Loc("ВНИМАНИЕ", "WARNING");
+            tone       = ui::ToastTone::Danger;
+        } else if (std::strstr(text, "~g~") != nullptr) {
+            toastTitle = ui::Loc("УВЕДОМЛЕНИЕ", "NOTICE");
+            tone       = ui::ToastTone::Success;
+        } else if (g_lastHelpHasMenuControlTokens || std::strstr(text, "~k~") != nullptr) {
+            toastTitle = ui::Loc("ОБУЧЕНИЕ", "TUTORIAL");
+            tone       = ui::ToastTone::Warning;
+        } else if (std::strstr(text, "~y~") != nullptr) {
+            toastTitle = ui::Loc("ПОДСКАЗКА", "HINT");
+            tone       = ui::ToastTone::Warning;
+        } else {
+            toastTitle = ui::Loc("УВЕДОМЛЕНИЕ", "NOTICE");
+            tone       = ui::ToastTone::Neutral;
+        }
 
         ui::HelpToast toast;
-        toast.SetText(text).SetAlpha(alpha).SetWidth640(boxW);
+        toast.SetTitle(toastTitle).SetText(text).SetTone(tone).SetAlpha(alpha).SetWidth640(boxW);
         toast.Render();
         return;
     }

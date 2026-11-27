@@ -6,14 +6,18 @@
 #include <string>
 #include <vector>
 #include <windows.h>
-#include "config.hpp"
+#include "common_utils.hpp"
 #include "delivery.hpp"
 #include "garage.hpp"
+#include "garage_config.hpp"
+#include "garage_ui.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
 #include "mod_bus.hpp"
+#include "progression_rules.hpp"
 #include "sa_sdk.hpp"
 #include "tuning_physics.hpp"
-#include "ui_menu.hpp"
+#include "ui_kit.hpp"
 #include "workshop.hpp"
 
 namespace dealership {
@@ -284,15 +288,15 @@ struct DealershipSite {
 };
 
 constexpr DealershipSite kSites[3] = {
-    {"Coutt & Schutz (Лос-Сантос)", "Coutt & Schutz (Los Santos)",
+    {"Coutt & Schutz - Лос-Сантос", "Coutt & Schutz - Los Santos",
       2131.8f, -1150.2f, 24.1f,
       2128.0f, -1139.0f, 25.0f, 210.0f,
       2135.5f, -1142.0f, 24.8f, 180.0f},
-    {"Wang Cars (Сан-Фиерро)", "Wang Cars (San Fierro)",
+    {"Wang Cars - Сан-Фиерро", "Wang Cars - San Fierro",
      -1974.5f,   288.0f, 35.2f,
      -1963.0f,   293.5f, 35.5f, 115.0f,
      -1980.0f,   284.0f, 35.1f, 180.0f},
-    {"Auto Bahn (Лас-Вентурас)", "Auto Bahn (Las Venturas)",
+    {"Auto Bahn - Лас-Вентурас", "Auto Bahn - Las Venturas",
       1949.0f,  2068.8f, 10.8f,
       1958.0f,  2065.0f, 11.0f, 140.0f,
       1942.0f,  2078.0f, 10.8f, 270.0f},
@@ -317,10 +321,8 @@ uint32_t g_reenterBlockMs  = 0;
 
 int32_t  g_previewVehHandle     = -1;
 int32_t  g_previewModelId       = 0;
-bool     g_previewFrozen        = false;
-uint32_t g_previewSettleUntilMs = 0;
-float    g_camAngle             = 0.7f;
-float    g_camDist              = 5.6f;
+float    g_camAngle             = 0.75f;
+float    g_camDist              = 5.8f;
 
 bool     g_blipsPlaced          = false;
 int32_t  g_siteBlips[3]         = {0, 0, 0};
@@ -358,15 +360,18 @@ void DestroySiteMarkers() {
 
 void DestroyPreviewVehicle() {
     if (g_previewVehHandle > 0) {
-        sa::ScriptCmd(0x00A6).Int(g_previewVehHandle).Run(); // DELETE_CAR
+        sa::CVehicle* pv = sa::GetVehicleFromHandle(g_previewVehHandle);
+        if (integrations::sacoop::IsSafeToDeleteVehicle(pv, sa::FindPlayerPed(0))) {
+            sa::ScriptCmd(0x00A6).Int(g_previewVehHandle).Run(); // DELETE_CAR
+        } else {
+            sa::ScriptCmd(0x01C3).Int(g_previewVehHandle).Run(); // MARK_CAR_AS_NO_LONGER_NEEDED
+        }
         g_previewVehHandle = -1;
     }
     if (g_previewModelId >= 400) {
         sa::ScriptCmd(0x0249).Int(g_previewModelId).Run(); // MARK_MODEL_AS_NO_LONGER_NEEDED
         g_previewModelId = 0;
     }
-    g_previewFrozen        = false;
-    g_previewSettleUntilMs = 0;
 }
 
 void SpawnShowroomPreview(int32_t modelId) {
@@ -403,17 +408,16 @@ void SpawnShowroomPreview(int32_t modelId) {
         sa::ScriptCmd(0x0878).Int(vh).Float(0.0f).Run(); // clean shine
         sa::ScriptCmd(0x020A).Int(vh).Int(2).Run();      // locked preview
         sa::ScriptCmd(0x02AC).Int(vh).Int(1).Int(1).Int(1).Int(1).Int(1).Run(); // proofs
-        g_previewVehHandle     = vh;
-        g_previewModelId       = modelId;
-        g_previewFrozen        = false;
-        g_previewSettleUntilMs = 0;
+        g_previewVehHandle = vh;
+        g_previewModelId   = modelId;
     } else {
         sa::ScriptCmd(0x0249).Int(modelId).Run();
     }
 }
 
 void CloseDealership(bool returnToPhone) {
-    bool wasShowroom = (!g_remoteMode && g_screen != Screen::Closed);
+    bool wasOpen     = (g_screen != Screen::Closed);
+    bool wasShowroom = (!g_remoteMode && wasOpen);
     bool goPhone     = returnToPhone && g_openedFromPhone;
     int  prevSite    = g_siteIdx;
 
@@ -428,8 +432,8 @@ void CloseDealership(bool returnToPhone) {
         g_waitLeaveSiteIdx = prevSite;
     }
 
-    if (wasShowroom) {
-        sa::ScriptCmd(0x02EB).Run();             // RESTORE_CAMERA_JUMPCUT
+    if (wasOpen && wasShowroom) {
+        sa::ScriptCmd(0x02EB).Run();               // RESTORE_CAMERA_JUMPCUT
         sa::ScriptCmd(0x01B4).Int(0).Int(1).Run(); // SET_PLAYER_CONTROL true
         sa::ScriptCmd(0x07CC).Int(0).Int(1).Run(); // SET_PLAYER_ENTER_CAR_BUTTON true
         sa::GetPad0()[0x119] = 0;
@@ -463,8 +467,19 @@ void OpenShowroomAt(int siteIdx) {
     sa::PlayFrontendSound(sa::SFX_SELECT);
 }
 
+int VehicleReqRank(const CatalogVehicle* cv) {
+    if (!cv) return 1;
+    return prog_rules::DealershipVehicleRank(static_cast<int>(cv->vclass), cv->modelId, cv->basePrice);
+}
+
 void CompletePurchase(const CatalogVehicle* cv) {
     if (!cv) return;
+    int reqRank = VehicleReqRank(cv);
+    if (!modbus::IsRankUnlocked(reqRank)) {
+        sa::PlayFrontendSound(sa::SFX_ERROR);
+        ui::ShowRankLockedHelp(reqRank);
+        return;
+    }
     int price = ScaledPrice(cv->basePrice);
     if (sa::GetPlayerMoney() < price) {
         sa::PlayFrontendSound(sa::SFX_ERROR);
@@ -475,7 +490,7 @@ void CompletePurchase(const CatalogVehicle* cv) {
     int freeSlot = garage::FindFreeSlot();
     if (freeSlot < 0) {
         sa::PlayFrontendSound(sa::SFX_ERROR);
-        ui::ShowHelp("~r~Личный гараж полон (10/10)! Освободите слот.", "~r~Personal garage is full (10/10)!");
+        ui::ShowHelp("~r~Личный гараж полон. Освободите место.", "~r~Personal garage is full.");
         return;
     }
 
@@ -530,13 +545,13 @@ void CompletePurchase(const CatalogVehicle* cv) {
                 sa::ScriptCmd(0x0168).Int(blip).Int(2).Run();
             }
             garage::SetActivePersonalVehicle(v, freeSlot, blip);
-            ui::ShowHelp("~g~Поздравляем с покупкой!~w~ Ваш новый транспорт ждёт на стоянке (отмечен на карте).",
-                         "~g~Congratulations!~w~ Your new vehicle is waiting outside (marked on radar).");
+            ui::ShowHelp("~g~Поздравляем с покупкой.~w~ Новый транспорт ждёт на стоянке и отмечен на карте.",
+                         "~g~Congratulations.~w~ Your new vehicle is waiting outside and marked on radar.");
             return;
         }
     }
 
-    // Remote purchase (or non-land craft): immediately deliver land vehicles or confirm garage registration!
+    // Remote purchase (or non-land craft): immediately deliver land vehicles or confirm garage registration
     if (wasRemote && cv->isLand && sa::GetActiveInterior() == 0) {
         if (delivery::StartDeliveryForSlot(freeSlot)) {
             return;
@@ -545,10 +560,10 @@ void CompletePurchase(const CatalogVehicle* cv) {
 
     char rusBuf[160], engBuf[160];
     std::snprintf(rusBuf, sizeof(rusBuf),
-                  "~g~Куплено и оформлено в гараж (слот #%d)!~w~ Вызовите через Механика.",
+                  "~g~Куплено и оформлено в гараж, место #%d.~w~ Вызовите через Механика.",
                   freeSlot + 1);
     std::snprintf(engBuf, sizeof(engBuf),
-                  "~g~Purchased & registered to Garage Slot #%d!~w~ Call Mechanic anytime.",
+                  "~g~Purchased and registered to Garage Slot #%d.~w~ Call Mechanic anytime.",
                   freeSlot + 1);
     ui::ShowHelp(rusBuf, engBuf);
 }
@@ -556,32 +571,15 @@ void CompletePurchase(const CatalogVehicle* cv) {
 void EnsureDealershipBlips() {
     if (g_blipsPlaced || !mod::Config().enableDealership) return;
     if (sa::GetTimeMs() < 1500) return;
-
-    // Count active radar blips first to stay safely under 175 limit
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(0x00BA86F0);
-    int used = 0;
-    for (int i = 0; i < 175; ++i) {
-        if ((base[i * 0x28 + 0x25] & 0x02) != 0) ++used;
-    }
-    if (used >= 164) return;
+    if (sa::radar::CountUsedBlips() >= 164) return;
 
     for (int i = 0; i < 3; ++i) {
         if (g_siteBlips[i] > 0) continue;
-        // Check for existing sprite 55 blip nearby
-        bool exists = false;
-        for (int b = 0; b < 175; ++b) {
-            const uint8_t* e = base + b * 0x28;
-            if ((e[0x25] & 0x02) == 0 || e[0x24] != 55) continue;
-            float bx = *reinterpret_cast<const float*>(e + 0x08);
-            float by = *reinterpret_cast<const float*>(e + 0x0C);
-            float dx = bx - kSites[i].mx, dy = by - kSites[i].my;
-            if (dx * dx + dy * dy < 1600.0f) { exists = true; break; }
-        }
-        if (!exists) {
+        if (!sa::radar::HasBlipNear(kSites[i].mx, kSites[i].my, 40.0f, 55)) {
             int32_t bh = 0;
             sa::ScriptCmd(0x04CE)
                 .Float(kSites[i].mx).Float(kSites[i].my).Float(kSites[i].mz)
-                .Int(55) // RADAR_SPRITE_IMPOUND (Car Dealership icon!)
+                .Int(55) // RADAR_SPRITE_IMPOUND (Car Dealership icon)
                 .Out(bh).Run();
             g_siteBlips[i] = bh;
         }
@@ -596,9 +594,12 @@ void UpdateShowroomCamera() {
     float dt = std::clamp(sa::GetTimeStep() / 50.0f, 0.001f, 0.05f);
     auto cam = ui::ListInputController::PollCamera(dt, 1.45f, 2.6f);
     if (cam.orbitDelta != 0.0f) g_camAngle += cam.orbitDelta;
-    else                        g_camAngle += dt * 0.22f; // gentle showroom turntable rotation!
+    else                        g_camAngle += dt * 0.22f; // gentle showroom turntable rotation
     if (cam.zoomDelta != 0.0f)  g_camDist = std::clamp(g_camDist + cam.zoomDelta, 3.2f, 9.5f);
-    if (cam.resetCam)           g_camDist = 5.8f;
+    if (cam.resetCam) {
+        g_camDist  = 5.8f;
+        g_camAngle = 0.75f;
+    }
 
     sa::CVector focus{site.px, site.py, site.pz + 0.45f};
     if (sa::CVehicle* pv = sa::GetVehicleFromHandle(g_previewVehHandle)) {
@@ -625,11 +626,7 @@ void HandleMenuInput() {
 
     if (g_screen == Screen::Categories) {
         const int n = static_cast<int>(VehClass::Count);
-        if (up) {
-            g_catCursor = (g_catCursor - 1 + n) % n;
-            sa::PlayFrontendSound(sa::SFX_SCROLL);
-        } else if (down) {
-            g_catCursor = (g_catCursor + 1) % n;
+        if (ui::ListInput().ApplyToCursor(g_catCursor, n, in)) {
             sa::PlayFrontendSound(sa::SFX_SCROLL);
         } else if (accept) {
             g_vehCursor = 0;
@@ -649,12 +646,7 @@ void HandleMenuInput() {
     if (g_screen == Screen::VehicleList) {
         const int n = static_cast<int>(g_catList.size());
         if (n > 0) {
-            if (up) {
-                g_vehCursor = (g_vehCursor - 1 + n) % n;
-                SpawnShowroomPreview(g_catList[g_vehCursor]->modelId);
-                sa::PlayFrontendSound(sa::SFX_SCROLL);
-            } else if (down) {
-                g_vehCursor = (g_vehCursor + 1) % n;
+            if (ui::ListInput().ApplyToCursor(g_vehCursor, n, in)) {
                 SpawnShowroomPreview(g_catList[g_vehCursor]->modelId);
                 sa::PlayFrontendSound(sa::SFX_SCROLL);
             } else if (left || right) {
@@ -662,9 +654,15 @@ void HandleMenuInput() {
                 SpawnShowroomPreview(g_catList[g_vehCursor]->modelId);
                 sa::PlayFrontendSound(sa::SFX_SCROLL);
             } else if (accept) {
-                g_confirmCursor = 0;
-                g_screen = Screen::ConfirmBuy;
-                sa::PlayFrontendSound(sa::SFX_SELECT);
+                int reqRank = VehicleReqRank(g_catList[g_vehCursor]);
+                if (!modbus::IsRankUnlocked(reqRank)) {
+                    sa::PlayFrontendSound(sa::SFX_ERROR);
+                    ui::ShowRankLockedHelp(reqRank);
+                } else {
+                    g_confirmCursor = 0;
+                    g_screen = Screen::ConfirmBuy;
+                    sa::PlayFrontendSound(sa::SFX_SELECT);
+                }
             }
         }
         if (back) {
@@ -703,8 +701,6 @@ void PreScriptsTick() {
     }
     if (g_screen != Screen::Closed) {
         HandleMenuInput();
-    } else {
-        ui::SyncIdleMouseEdges();
     }
 }
 
@@ -777,8 +773,8 @@ void Tick() {
             g_siteMarkers[i] = 0;
         }
 
-        // Automatically enter dealership showroom when walking into the red marker on foot!
-        if (!ped->IsInVehicle() && !g_waitLeaveMarker &&
+        // Automatically enter dealership showroom when walking into the red marker on foot
+        if (!ped->IsInVehicle() && !g_waitLeaveMarker && !integrations::sacoop::IsOverlayActive() &&
             d < 1.35f && std::fabs(pPos.z - g_siteMarkerZ[i]) < 2.2f &&
             sa::GetTimeMs() >= g_reenterBlockMs) {
             OpenShowroomAt(i);
@@ -793,80 +789,84 @@ void Render2D() {
     const int32_t money    = sa::GetPlayerMoney();
     const int     occupied = garage::CountOccupied();
     const int     maxVeh   = std::min(mod::Config().maxVehicles, mod::MAX_OWNED_VEHICLES);
+    const bool    useRus   = ui::UseRussianFlag();
 
-    ui::MenuDrawSpec spec;
-    spec.x640           = 24.0f;
-    spec.y448           = 72.0f;
-    spec.w640           = 206.0f;
-    spec.maxVisibleRows = 10;
+    ui::ListMenu menu;
+    menu.SetPosition(24.0f, 72.0f, 206.0f).SetMaxVisible(10);
 
     if (g_screen == Screen::Categories) {
-        spec.titleGame = (!g_remoteMode && g_siteIdx >= 0)
-            ? ui::Loc(kSites[g_siteIdx].nameRus, kSites[g_siteIdx].nameEng)
-            : ui::Loc("АВТОСАЛОН ОНЛАЙН", "ONLINE DEALERSHIP");
-        spec.colLeftGame = ui::Loc("КЛАСС ТРАНСПОРТА", "VEHICLE CLASS");
         char gbuf[32];
         std::snprintf(gbuf, sizeof(gbuf), "%s %d/%d", ui::Loc("Гараж", "Garage").c_str(), occupied, maxVeh);
-        spec.colRightGame  = gbuf;
-        spec.footerGame    = ui::StandardFooter("Открыть", "Open", "Выход", "Exit");
-        spec.selectedIndex = g_catCursor;
+        menu.SetTitle((!g_remoteMode && g_siteIdx >= 0)
+                          ? ui::Loc(kSites[g_siteIdx].nameRus, kSites[g_siteIdx].nameEng)
+                          : ui::Loc("АВТОСАЛОН", "DEALERSHIP"))
+            .SetColumns(ui::Loc("КЛАСС ТРАНСПОРТА", "VEHICLE CLASS"), gbuf)
+            .SetFooter(ui::StandardFooter("Открыть", "Open", "Выход", "Exit"))
+            .SetSelected(g_catCursor);
 
         for (int i = 0; i < static_cast<int>(VehClass::Count); ++i) {
             int cnt = 0;
             for (size_t k = 0; k < kCatalogCount; ++k) {
                 if (kCatalog[k].vclass == kClasses[i].id) ++cnt;
             }
-            ui::MenuRow r;
-            r.leftGame   = ui::Loc(kClasses[i].rus, kClasses[i].eng);
-            r.rightGame  = std::to_string(cnt);
-            r.rightColor = {195, 195, 195, 255};
-            spec.rows.push_back(std::move(r));
+            menu.AddItem(ui::Loc(kClasses[i].rus, kClasses[i].eng), std::to_string(cnt), ui::ColorMuted());
         }
     } else if (g_screen == Screen::VehicleList) {
         const auto& ci = kClasses[std::clamp(g_catCursor, 0, static_cast<int>(VehClass::Count) - 1)];
         const auto& pc = kShowroomColors[g_colorIdx % kShowroomColorCount];
-        spec.titleGame     = ui::Loc(ci.rus, ci.eng);
-        spec.colLeftGame   = ui::Loc("МОДЕЛЬ", "MODEL");
-        spec.colRightGame  = ui::Loc(pc.rus, pc.eng);
-        spec.footerGame    = g_remoteMode
-            ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет", "A/D Color")
-            : ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет, Q/E Кам., Z/X Зум", "A/D Color, Q/E Cam, Z/X Zoom");
-        spec.selectedIndex = g_vehCursor;
+        menu.SetTitle(ui::Loc(ci.rus, ci.eng))
+            .SetColumns(ui::Loc("МОДЕЛЬ", "MODEL"), ui::Loc(pc.rus, pc.eng))
+            .SetFooter(g_remoteMode
+                           ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "A/D Цвет", "A/D Color")
+                           : ui::StandardFooter("Купить", "Buy", "Назад", "Back",
+                                                "A/D Цвет, Q/E Кам., Z/X Прибл.", "A/D Color, Q/E Cam, Z/X Zoom"))
+            .SetSelected(g_vehCursor);
 
         for (const auto* cv : g_catList) {
-            int price = ScaledPrice(cv->basePrice);
-            ui::MenuRow r;
-            r.leftGame   = sa::GetVehicleDisplayNameGameEncoded(cv->modelId);
-            r.rightGame  = ui::FormatPrice(price);
-            r.rightColor = (money >= price) ? sa::CRGBA{125, 235, 135, 255} : sa::CRGBA{235, 95, 95, 255};
-            spec.rows.push_back(std::move(r));
+            int reqRank = VehicleReqRank(cv);
+            if (!modbus::IsRankUnlocked(reqRank)) {
+                menu.AddItem(sa::GetVehicleDisplayNameGameEncoded(cv->modelId),
+                             ui::FormatRankLock(reqRank), ui::ColorDisabled(), false);
+            } else {
+                int price = ScaledPrice(cv->basePrice);
+                menu.AddItem(sa::GetVehicleDisplayNameGameEncoded(cv->modelId),
+                             common::FormatPrice(price, useRus),
+                             (money >= price) ? ui::ColorSuccess() : ui::ColorDanger(), true);
+            }
         }
     } else if (g_screen == Screen::ConfirmBuy && g_vehCursor >= 0 && g_vehCursor < static_cast<int>(g_catList.size())) {
         const auto* cv = g_catList[g_vehCursor];
         int price = ScaledPrice(cv->basePrice);
         const auto& pc = kShowroomColors[g_colorIdx % kShowroomColorCount];
-        spec.titleGame     = ui::Loc("ОФОРМЛЕНИЕ ПОКУПКИ", "CONFIRM PURCHASE");
-        spec.colLeftGame   = sa::GetVehicleDisplayNameGameEncoded(cv->modelId);
-        spec.colRightGame  = ui::Loc(pc.rus, pc.eng);
-        spec.footerGame    = ui::StandardFooter("Подтвердить", "Confirm", "Назад", "Back");
-        spec.selectedIndex = g_confirmCursor;
+        menu.SetTitle(ui::Loc("ОФОРМЛЕНИЕ ПОКУПКИ", "CONFIRM PURCHASE"))
+            .SetColumns(sa::GetVehicleDisplayNameGameEncoded(cv->modelId), ui::Loc(pc.rus, pc.eng))
+            .SetFooter(ui::StandardFooter("Подтвердить", "Confirm", "Назад", "Back"))
+            .SetSelected(g_confirmCursor);
 
         bool canBuy = (money >= price) && (garage::FindFreeSlot() >= 0);
-        spec.rows.push_back({ui::Loc("Купить официально", "Buy Officially"), ui::FormatPrice(price), canBuy, false,
-                             canBuy ? sa::CRGBA{125, 235, 135, 255} : sa::CRGBA{235, 95, 95, 255}});
-        spec.rows.push_back({ui::Loc("Отмена", "Cancel"), "", true, false, {200, 200, 200, 255}});
+        menu.AddItem(ui::Loc("Купить", "Purchase"), common::FormatPrice(price, useRus),
+                     canBuy ? ui::ColorSuccess() : ui::ColorDanger(), canBuy);
+        menu.AddItem(ui::Loc("Отмена", "Cancel"), "", ui::ColorNormal());
     }
 
-    ui::DrawVanillaMenu(spec);
+    menu.Render();
 
-    // Live Vehicle StatsCard on the right whenever browsing vehicles!
+    // Live Vehicle StatsCard on the right whenever browsing vehicles
     if ((g_screen == Screen::VehicleList || g_screen == Screen::ConfirmBuy) &&
         g_vehCursor >= 0 && g_vehCursor < static_cast<int>(g_catList.size())) {
         const auto* cv = g_catList[g_vehCursor];
         auto stats = tuning::ComputeStatsForModel(cv->modelId, mod::PerformanceTuning{}, mod::VehicleWear{});
         const auto& pc = kShowroomColors[g_colorIdx % kShowroomColorCount];
-        std::string note = ui::Loc("Новый (Износ 0%), ", "Factory New (0% Wear), ") + ui::Loc(pc.rus, pc.eng);
-        ui::DrawVehicleStatsPanel(sa::GetVehicleDisplayNameGameEncoded(cv->modelId), stats, stats, true, note, nullptr);
+        int reqRank = VehicleReqRank(cv);
+        std::string note;
+        if (!modbus::IsRankUnlocked(reqRank)) {
+            char lb[64];
+            std::snprintf(lb, sizeof(lb), "%s: %d", ui::Loc("Нужен уровень", "Requires Rank").c_str(), reqRank);
+            note = lb;
+        } else {
+            note = ui::Loc("Новый, ", "Factory new, ") + ui::Loc(pc.rus, pc.eng);
+        }
+        garage_ui::RenderVehicleStatsCard(sa::GetVehicleDisplayNameGameEncoded(cv->modelId), stats, stats, true, note, nullptr);
     }
 }
 
@@ -876,6 +876,7 @@ void OpenRemote(bool fromPhone) {
         return;
     }
     if (workshop::IsWorkshopActive() || sa::IsPauseMenuActive() || sa::IsCutsceneRunning()) return;
+    if (!fromPhone && modbus::IsAnyModalMenuOpen("garage")) return;
     g_siteIdx         = -1;
     g_remoteMode      = true;
     g_openedFromPhone = fromPhone;
@@ -890,6 +891,11 @@ void OpenRemote(bool fromPhone) {
 bool IsActive() { return g_screen != Screen::Closed; }
 
 void Reset() {
+    if (g_screen != Screen::Closed && !g_remoteMode) {
+        sa::ScriptCmd(0x01B4).Int(0).Int(1).Run();
+        sa::ScriptCmd(0x07CC).Int(0).Int(1).Run();
+        sa::GetPad0()[0x119] = 0;
+    }
     DestroyPreviewVehicle();
     DestroySiteMarkers();
     g_screen           = Screen::Closed;

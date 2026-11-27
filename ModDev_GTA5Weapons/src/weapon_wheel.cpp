@@ -6,15 +6,17 @@
 #include <vector>
 #include <windows.h>
 #include "ammu_shop.hpp"
-#include "config.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
 #include "memory.hpp"
 #include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "ui_kit.hpp"
+#include "weapon_config.hpp"
 #include "weapon_data.hpp"
 #include "weapon_mods.hpp"
 #include "weapon_storage.hpp"
+#include "weapon_ui.hpp"
 
 namespace wheel {
 
@@ -61,11 +63,14 @@ bool          g_wasWastedOrBusted = false;
 using FnGetDisplayVitalStats = int16_t(__thiscall*)(void*, void*);
 FnGetDisplayVitalStats g_origGetDisplayVitalStats = nullptr;
 
-// Suppresses vanilla GTA SA's TAB Character Vital Stats box so it NEVER flashes before Weapon Wheel opens!
-// Our clean UI Kit character stats card renders bottom-left whenever Weapon Wheel is held on TAB.
+// Suppresses vanilla GTA SA's TAB Character Vital Stats box on foot so it never overlaps Weapon Wheel.
+// Inside vehicles, keep vanilla TAB stats available normally.
 int16_t __fastcall HookedGetDisplayVitalStats(void* pad, void*, void* ped) {
     if (wcfg::Get().enableWeaponWheel) {
-        return 0;
+        const auto* p = reinterpret_cast<const sa::CPed*>(ped);
+        if (!sa::IsPedValid(p) || !p->IsInVehicle()) {
+            return 0;
+        }
     }
     return g_origGetDisplayVitalStats ? g_origGetDisplayVitalStats(pad, ped) : 0;
 }
@@ -86,10 +91,10 @@ void ProcessGroundWeaponPickups(sa::CPed* ped) {
 
     for (int i = 0; i < sa::MAX_PICKUPS; ++i) {
         auto& pk = pickups[i];
-        // Collect street spawns & dead-ped drops (3=ON_STREET, 4=ONCE, 5=ONCE_TIMEOUT, 15=ON_STREET_SLOW).
+        // Collect street spawns & dead-ped drops (3=ON_STREET, 4=ONCE, 5=ONCE_TIMEOUT, 6=ONCE_TIMEOUT_SLOW, 15=ON_STREET_SLOW).
         // Skip type 2 (IN_SHOP) and type 8 (ONCE_FOR_MISSION) so mission HAS_PICKUP_BEEN_COLLECTED scripts stay 100% vanilla!
         uint8_t ptype = pk.m_nPickupType;
-        if (ptype != 3 && ptype != 4 && ptype != 5 && ptype != 15) continue;
+        if (ptype != 3 && ptype != 4 && ptype != 5 && ptype != 6 && ptype != 15) continue;
         if (!pk.m_pObject || (pk.m_nFlags & 1) != 0) continue;
         if (pk.m_nModelIndex <= 0) continue;
 
@@ -97,7 +102,9 @@ void ProcessGroundWeaponPickups(sa::CPed* ped) {
         float dx = pos.x - ppos.x;
         float dy = pos.y - ppos.y;
         float dz = std::fabs(pos.z - ppos.z);
-        if (dz > 1.65f || (dx * dx + dy * dy) > (1.45f * 1.45f)) continue;
+        // Strictly enclose vanilla CPickup::Update box (|dx|<1.3, |dy|<1.3 -> diag 1.84m, |dz|<2.0)
+        // so our arsenal collects pickups from any approach angle BEFORE vanilla flashes a replace prompt!
+        if (dz > 2.05f || (dx * dx + dy * dy) > (1.90f * 1.90f)) continue;
 
         // Match pickup model ID against our weapon catalog
         const wdata::WeaponDef* def = nullptr;
@@ -158,8 +165,8 @@ void ProcessGroundWeaponPickups(sa::CPed* ped) {
 
         char rbuf[128], ebuf[128];
         if (addedAmmo > 0) {
-            std::snprintf(rbuf, sizeof(rbuf), "~g~Подобрано:~w~ %s (+%d патр.)", def->nameRus, addedAmmo);
-            std::snprintf(ebuf, sizeof(ebuf), "~g~Picked up:~w~ %s (+%d ammo)", def->nameEng, addedAmmo);
+            std::snprintf(rbuf, sizeof(rbuf), "~g~Подобрано:~w~ %s +%d патр.", def->nameRus, addedAmmo);
+            std::snprintf(ebuf, sizeof(ebuf), "~g~Picked up:~w~ %s +%d ammo", def->nameEng, addedAmmo);
         } else {
             std::snprintf(rbuf, sizeof(rbuf), "~g~Подобрано в арсенал:~w~ %s", def->nameRus);
             std::snprintf(ebuf, sizeof(ebuf), "~g~Added to arsenal:~w~ %s", def->nameEng);
@@ -299,15 +306,15 @@ std::string BuildAttachmentSummary(uint32_t weaponId) {
         if (!out.empty()) out += " ";
         out += ui::Loc(rus, eng);
     };
-    if (L->muzzle == 1)      add("Глуш.",  "Supp.");
-    else if (L->muzzle == 2) add("Комп.",  "Comp.");
-    if (L->mag == 1)         add("Ув.Маг", "Ext");
-    else if (L->mag == 2)    add("Бараб.", "Drum");
-    if (L->scope == 1)       add("Колл.",  "Dot");
-    else if (L->scope == 2)  add("Опт.",   "Scope");
-    if (L->grip == 1)        add("Рук.",   "Grip");
-    if (L->barrel == 1)      add("Ств+",   "Hvy");
-    if (L->laser != 0)       add("ЛЦУ",    "Las");
+    if (L->muzzle == 1)      add("Глуш.",   "Supp.");
+    else if (L->muzzle == 2) add("Комп.",   "Comp.");
+    if (L->mag == 1)         add("Магазин", "Ext.");
+    else if (L->mag == 2)    add("Барабан", "Drum");
+    if (L->scope == 1)       add("Прицел",  "Reflex");
+    else if (L->scope == 2)  add("Оптика",  "Scope");
+    if (L->grip == 1)        add("Рукоять", "Grip");
+    if (L->barrel == 1)      add("Ствол",   "Barrel");
+    if (L->laser != 0)       add("ЛЦУ",     "Laser");
     return out;
 }
 
@@ -329,8 +336,7 @@ void PreScriptsTick() {
     if (!wcfg::Get().enableWeaponWheel) return;
 
     // Priority 1: Native GTA SA story phone calls ALWAYS win over Weapon Wheel TAB!
-    auto* bus = modbus::GetBus();
-    bool storyPhone = sa::IsStoryPhoneRinging() || (bus && bus->storyPhonePriority);
+    bool storyPhone = sa::IsStoryPhoneRinging() || modbus::IsStoryPhoneBlocking();
     if (storyPhone) {
         g_mode              = WheelMode::Closed;
         g_quickPendingEquip = false;
@@ -341,7 +347,7 @@ void PreScriptsTick() {
     bool canOpen = (sa::GetGameState() == 9) &&
                    !sa::IsPauseMenuActive() &&
                    !sa::IsCutsceneRunning() &&
-                   !sa::IsExternalOverlayActive() &&
+                   !integrations::sacoop::IsOverlayActive() &&
                    !ammu::IsShopActive() &&
                    !modbus::IsAnyModalMenuOpen("weapons") &&
                    (sa::GetNumMenusInUse() == 0) &&
@@ -357,8 +363,8 @@ void PreScriptsTick() {
     }
 
     auto* ms = sa::GetNewMouseState();
-    const bool wheelUp   = (ms->wheelUp != 0);
-    const bool wheelDown = (ms->wheelDown != 0);
+    const bool wheelUp   = ms && (ms->wheelUp != 0);
+    const bool wheelDown = ms && (ms->wheelDown != 0);
     const bool tabHeld   = ui::Keys().IsDown(wcfg::Get().wheelKey);
     const uint32_t now   = sa::GetTimeMs();
 
@@ -382,8 +388,8 @@ void PreScriptsTick() {
             sa::PlayFrontendSound(sa::SFX_SCROLL);
         }
 
-        float dx = ms->X;
-        float dy = -ms->Y;
+        float dx = ms ? ms->X : 0.0f;
+        float dy = ms ? -ms->Y : 0.0f;
         if (std::fabs(dx) > 0.25f || std::fabs(dy) > 0.25f) {
             g_cursorVecX += dx * 1.35f;
             g_cursorVecY += dy * 1.35f;
@@ -443,8 +449,8 @@ void PreScriptsTick() {
         return;
     }
 
-    // 2. Quick Mouse Wheel Scroll -> opens compact wheel & steps cleanly through ALL owned weapons!
-    if (wheelUp || wheelDown) {
+    // 2. Quick Mouse Wheel Scroll -> opens compact wheel & steps through owned weapons (yields to sniper/rocket zoom!)
+    if ((wheelUp || wheelDown) && !sa::camera::IsSniperOrRocketCam()) {
         if (g_mode == WheelMode::Closed) {
             PopulateWheelFromArsenal(ped);
         }
@@ -454,8 +460,10 @@ void PreScriptsTick() {
         g_quickCloseAtMs    = now + 1200;
         g_quickPendingEquip = true;
 
-        ms->wheelUp   = 0;
-        ms->wheelDown = 0;
+        if (ms) {
+            ms->wheelUp   = 0;
+            ms->wheelDown = 0;
+        }
         uint8_t* pad  = sa::GetPad0();
         *reinterpret_cast<int16_t*>(pad + 0x0A) = 0;
         *reinterpret_cast<int16_t*>(pad + 0x0E) = 0;
@@ -463,10 +471,11 @@ void PreScriptsTick() {
     }
 
     if (g_mode == WheelMode::QuickScroll) {
-        if (g_quickPendingEquip && (now >= g_quickEquipAtMs || ms->lmb || ms->rmb)) {
+        const bool mouseClick = ms && (ms->lmb || ms->rmb);
+        if (g_quickPendingEquip && (now >= g_quickEquipAtMs || mouseClick)) {
             CommitWheelSelection(false);
             g_quickPendingEquip = false;
-            if (ms->lmb || ms->rmb) {
+            if (mouseClick) {
                 g_mode = WheelMode::Closed;
                 return;
             }
@@ -503,9 +512,14 @@ void PostScriptsTick() {
     }
 
     uint32_t now = sa::GetTimeMs();
-    if (now - g_lastSyncMs >= 500) {
-        g_lastSyncMs = now;
-        wstore::Store().SyncFromPlayerInventory(ped);
+    if (g_lastSyncMs == 0 || (now - g_lastSyncMs >= 150)) {
+        g_lastSyncMs = (now != 0) ? now : 1;
+        if (wstore::Store().SyncFromPlayerInventory(ped)) {
+            wstore::Store().SaveToDisk();
+        }
+    }
+    if (g_mode != WheelMode::Closed) {
+        EnsureOwnedIconsLoaded();
     }
 }
 
@@ -528,17 +542,20 @@ void Render2D() {
         props.hasItems = !sr.owned.empty();
         if (props.hasItems) {
             for (const auto* d : sr.owned) {
-                if (d->id == liveWeaponId) { props.isEquipped = true; break; }
+                if (d->id == liveWeaponId) { props.isActive = true; break; }
             }
             int idx = std::clamp(sr.selectedIdx, 0, static_cast<int>(sr.owned.size()) - 1);
             const wdata::WeaponDef* def = sr.owned[idx];
-            props.iconTex  = sa::rw::GetWeaponIconTexture(def->modelId);
-            props.subIndex = idx;
+            props.iconTex       = sa::rw::GetWeaponIconTexture(def->modelId);
+            props.fallbackLabel = ui::Loc(def->nameRus, def->nameEng);
+            props.subIndex      = idx;
             props.subCount = static_cast<int>(sr.owned.size());
             if (def->category != wdata::WeaponCategory::Melee) {
+                int ammo = wstore::Store().GetWeaponAmmo(ped, def);
                 char abuf[20];
-                std::snprintf(abuf, sizeof(abuf), "%d", wstore::Store().GetWeaponAmmo(ped, def));
-                props.ammoGame = abuf;
+                std::snprintf(abuf, sizeof(abuf), "%d", ammo);
+                props.subLabel      = abuf;
+                props.subLabelColor = (ammo > 0) ? ui::ColorNormal() : ui::ColorDanger();
             }
         }
         wheelUi.SetSector(i, props);
@@ -551,19 +568,22 @@ void Render2D() {
 
     if (hovDef) {
         std::string ammoStr;
+        sa::CRGBA subCol = ui::ColorNormal();
         if (hovDef->category != wdata::WeaponCategory::Melee) {
+            int ammo = wstore::Store().GetWeaponAmmo(ped, hovDef);
             char abuf[20];
-            std::snprintf(abuf, sizeof(abuf), "%d", wstore::Store().GetWeaponAmmo(ped, hovDef));
+            std::snprintf(abuf, sizeof(abuf), "%d", ammo);
             ammoStr = abuf;
+            if (ammo <= 0) subCol = ui::ColorDanger();
         }
-        wheelUi.SetCenter(ui::Loc(hovDef->nameRus, hovDef->nameEng), ammoStr);
+        wheelUi.SetCenter(ui::Loc(hovDef->nameRus, hovDef->nameEng), ammoStr, subCol);
     } else {
         wheelUi.SetCenter("", "");
     }
 
     wheelUi.Render();
 
-    // Bottom-Left CJ Character StatsCard (replaces vanilla TAB stats box cleanly while holding TAB!)
+    // Bottom-Left Character StatsCard (replaces vanilla TAB stats box cleanly while holding TAB)
     if (g_mode == WheelMode::HoldTab && sa::IsPedValid(ped)) {
         auto statPct = [](uint16_t sid) -> int {
             return std::clamp(static_cast<int>(std::round(sa::stats::Get(sid) * 0.1f)), 0, 100);
@@ -578,7 +598,7 @@ void Render2D() {
         int sexy    = statPct(sa::stats::STAT_SEX_APPEAL);
 
         ui::StatsCard cjCard;
-        cjCard.SetTitle(ui::Loc("ПЕРСОНАЖ", "CJ STATS"))
+        cjCard.SetTitle(ui::Loc("ПЕРСОНАЖ", "CHARACTER"))
               .SetAnchorBottomLeft(154.0f, 16.0f, 18.0f)
               .AddBar(ui::Loc("Здоровье",     "Health"),     hp,      hp,      maxHp, "")
               .AddBar(ui::Loc("Броня",        "Armor"),      arm,     arm,     100,   "%")
@@ -590,23 +610,12 @@ void Render2D() {
         cjCard.Render();
     }
 
-    // Populate dumb ui::StatsCard component (bottom-right) for hovered firearm!
+    // Populate dumb ui::StatsCard component (bottom-right) for hovered firearm via DRY wui presenter
     if (hovDef && hovDef->category != wdata::WeaponCategory::Melee) {
         wdata::WeaponLoadout curL{};
         if (const auto* f = wstore::Store().Find(hovDef->id)) curL = *f;
         auto st = wmods::ComputeStats(hovDef->id, curL);
-
-        ui::StatsCard card;
-        std::string mUnit = ui::Loc("м", "m");
-        card.SetTitle(ui::Loc("СТАТЫ", "STATS"), ui::Loc(hovDef->nameRus, hovDef->nameEng))
-            .SetAnchor(true, 148.0f, 16.0f, 18.0f)
-            .SetNote(BuildAttachmentSummary(hovDef->id))
-            .AddBar(ui::Loc("Урон",      "Damage"),   st.damage,   st.damage,   120)
-            .AddBar(ui::Loc("Темп",      "FireRate"), st.fireRate, st.fireRate, 120)
-            .AddBar(ui::Loc("Точность",  "Accuracy"), st.accuracy, st.accuracy, 120)
-            .AddBar(ui::Loc("Дальность", "Range"),    st.range,    st.range,    140, mUnit)
-            .AddBar(ui::Loc("Обойма",    "Clip"),     st.clipSize, st.clipSize, std::max(30, st.clipSize));
-        card.Render();
+        wui::RenderWeaponStatsCard(hovDef, st, st, BuildAttachmentSummary(hovDef->id), 160.0f, 16.0f, 18.0f);
     }
 }
 
@@ -614,10 +623,15 @@ bool IsWheelOpen() {
     return g_mode != WheelMode::Closed;
 }
 
+bool IsHoldWheelOpen() {
+    return g_mode == WheelMode::HoldTab;
+}
+
 void Reset() {
     g_mode              = WheelMode::Closed;
     g_quickPendingEquip = false;
     g_tabDownSinceMs    = 0;
+    g_lastSyncMs        = 0;
     g_wasWastedOrBusted = false;
 }
 

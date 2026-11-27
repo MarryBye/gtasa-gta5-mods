@@ -54,7 +54,7 @@ Follow a strict **React-inspired layered component architecture**:
   - Scroll lists: `Mouse Wheel`, `↑`/`↓`, `W`/`S`
   - Tabs / grids: `←`/`→`, `A`/`D`
   - Accept / Select: `LMB`, `F`, `Enter`
-  - Back / Close: `RMB`, `Backspace`, `Esc` (never popping the Pause Menu on close)
+  - Back / Close: `RMB`, `Backspace` (`Esc` stays untouched as native GTA SA Pause Menu)
   - 3D preview zoom: `Z` / `X`
   - 3D camera orbit around object/CJ: `Q` / `E` (reset: `C`)
   - Cross-DLL transition debounce via `LockMenuInputBriefly` & `TriggerPostCloseShield`.
@@ -89,6 +89,7 @@ Keep feature code strictly inside its owning module. Never mix unrelated gamepla
 | **4** | `ModDev_Inventory/` | `GTA5Inventory.asi` | **Player Pocket Inventory:** Takeaway restaurants (Burger Shot, Cluckin' Bell, Well Stacked Pizza, diners) letting players buy snacks & meals **into their pocket** (P's & Q's, EgoChaser, Meteorite, Sprunk, signature meals, healthy salad) with carry limits & refill-all; **spare body armor** (4 classes: 25/50/75/100%, weight-based carry capacity); expandable for medkits and future pocket consumables. Standalone `F7` menu (automatically disabled and embedded into `GTA5Phone` when `GTA5Phone.asi` is installed). |
 | **5** | `ModDev_Phone/` | `GTA5Phone.asi` | **GTA 5-Inspired 90s Phone Hub (`F6`):** Central interaction hub connecting **all mods** via `mod_bus.hpp` & `modbus::RegisterPhoneAddon()`. Native handset animation (`0x0729`), auto-holster under gunfire, full CJ movement/combat lock while open, 4 LCD themes, 4 synthesized ringtones, silent mode & settings. Integrates: **Contacts** (Mechanic, Old Friend wanted-level removal up to 3 stars every 10 min with shared SA-COOP cooldown, Insurance, EMS), **Food & Armor / Inventory**, **CJ Wardrobe** (part-by-part dressing + 8 auto-equip outfits for Mission/Freeplay/Wanted/Manual + restyled 6 clothing shop chains with 3D preview), **Online Dealership**, **Arsenal status**, and **SA-COOP Player List** (`F2`). |
 | **6** | `ModDev_EarlyUnlock/` | `GTA5EarlyUnlock.asi` | **Early-Game Access Unlocker:** Opens all dealerships, mod shops/workshops (TransFender, Loco Low Co., Wheel Arch Angels), all 11 Ammu-Nation branches, all 6 clothing store chains, barber shops, tattoo parlors, gyms, and diners/restaurants from the very beginning of the game — with mission-safety guard (idle during active story missions) and duplicate-free `CRadar::ms_RadarTrace` map icon injection. |
+| **7** | `ModDev_Progression/` | `GTA5Progression.asi` | **GTA Online-Style Rank & XP Progression:** Dynamic top-center `ui::RankBarHUD` with current/next rank circles, animated XP surge fill, rising green `+X ОП/XP` popups, and Rank-Up unlock notifications; hostile-only combat XP (`ComputeWillKillPed` hook: enemy gangs, Mafia, Police/SWAT/FBI/Army, mission targets + headshot bonus; zero XP for civilians/allies); scaling mission XP, gang territory captures, wanted escapes, stunts, collectibles; non-grindy Rank 1–25 unlock curve tightly integrated across Workshops, Dealerships, Ammu-Nation, Restaurants, Clothes Shops, and `GTA5Phone` (`Rank & Unlocks` app). |
 
 ---
 
@@ -98,14 +99,17 @@ Although each module currently builds as a standalone `.asi`, the architecture *
 
 1. **Strict Module Namespaces:** Every module wraps all internal symbols, globals, and functions inside its own unique C++ namespace (e.g., `uikit_restyle::`, `garage::`, `weapons::`, `inventory::`, `phone::`, `early_unlock::`) and anonymous namespaces for file-local state. Never leak generic global symbols across translation units.
 2. **Clean Lifecycle Entrypoints:** Keep module initialization, frame tick, HUD render, and shutdown cleanly separated from `DllMain` so a future unified `DllMain` can simply invoke each module's `Init()` / `Shutdown()` in sequence.
-3. **Shared Code Only in `ModDev_Common/`:** Never copy-paste SDK structs, hooks, UI widgets, audio synthesis, logging, or Russian encoding between `ModDev_*` folders. Shared utilities belong exclusively in `ModDev_Common/`:
-   - `sa_sdk.hpp` — Verified GTA SA 1.0 US structures, native calls, SCM script wrapper, SA-COOP detection
-   - `ui_kit.hpp` — 3-tier dumb-component UI Kit & unified `ListInputController`
-   - `mod_bus.hpp` — Load-order-independent pure C-ABI inter-mod bus & phone addon registry
-   - `bass_audio.hpp` — Dynamic `bass.dll` loader & in-memory PCM synthesis
-   - `text_rus.hpp` — UTF-8 → MSKL/SanLtd Russian encoder
-   - `memory.hpp` — Safe x86 hooking (`HookCall`, `HookJump`, `PatchBytes`)
-   - `log.hpp` — Thread-safe per-plugin file logger
+3. **Shared Code & Reusable Integration Modules Only in `ModDev_Common/` (Strict DRY & Zero Legacy):**
+   - **Standalone Importable Integration Modules (`ModDev_Common/integrations/`):** Whenever integrating with or supporting ANY third-party mod or optional library (e.g., **SA-COOP**, **Widescreen Fix**, **Proper Shaders / RW State Guard**, **MSKL Russificator**, **BASS Audio**, **Limit Adjusters / ModelExtras / SilentPatch**), implement it as a **dedicated, self-contained importable header** inside `ModDev_Common/integrations/` so ANY module in the suite can `#include` and reuse it without ever rewriting detection, memory lookups, or compatibility guards.
+   - **Zero Code Duplication & Zero Legacy Clutter:** Never copy-paste SDK structs, INI helpers, save-slot hooks, path resolvers, radar helpers, UI widgets, or compatibility guards across `ModDev_*` folders — extract shared utilities into `ModDev_Common/` immediately, and delete deprecated/legacy shims rather than keeping dead wrappers alive.
+   - Shared core layout in `ModDev_Common/`:
+     - `sa_sdk.hpp` — Verified GTA SA 1.0 US structures, native calls, SCM script wrapper, radar & garage helpers
+     - `ui_kit.hpp` — 3-tier dumb-component UI Kit (`ThemeTokens` → `ui::prim::*` → micro-components → Tier 2 containers + `relative`/`absolute` layout) & unified `ListInputController`
+     - `mod_bus.hpp` — Load-order-independent pure C-ABI inter-mod bus, input priority & phone addon registry
+     - `common_utils.hpp` — Shared module path, INI, save-slot tracker & formatting utilities
+     - `memory.hpp` — Opcode-verified safe x86 hooking (`HookCall`, `HookJump`, `PatchBytes`)
+     - `log.hpp` — Mutex-protected thread-safe per-plugin file logger
+     - `integrations/` — Standalone reusable mod/library integration modules (`sacoop.hpp`, `widescreen_fix.hpp`, `proper_shaders.hpp`, `mskl_rus.hpp`, `bass_audio.hpp`, `limit_adjusters.hpp`)
 4. **Cross-Module Integration Strictly via `mod_bus.hpp`:** Modules communicate **only** through `modbus::SharedBus`, `RegisterPhoneAddon()`, `RegisterPanelClaim()`, and `IsAnyModalMenuOpen()` — never through tight source coupling or fragile file polling. That same C-ABI bus will keep working identically inside a single merged DLL.
 5. **Hook Address Discipline:** Never install conflicting raw patches on the same GTA SA address across modules; always chain original function pointers returned by `mem::HookCall` / `mem::HookJump`, and guard shared hooks so they remain composable when merged.
 6. **Non-Colliding Config & Persistence:** Keep INI sections, keys, and external save folders cleanly namespaced per module so merging into a single config/save layout requires zero breaking changes.

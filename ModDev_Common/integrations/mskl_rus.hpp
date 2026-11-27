@@ -3,11 +3,17 @@
 #include <string>
 #include <string_view>
 
-namespace text {
+// ============================================================================
+// Standalone Integration Module: MSKL / SanLtd Russificator Text Encoder
+//
+// Converts UTF-8 Russian strings into the MSKL / SanLtd GTA SA font byte table:
+//  - Preserves GTA SA color/formatting tokens (~r~, ~g~, ~w~, ~y~, ~n~).
+//  - Sanitizes '|' (0x7C) -> '-' because MSKL remaps 0x7C to a custom glyph!
+//  - Safely converts common UTF-8 punctuation (em/en dash, guillemets, ellipsis,
+//    numero sign) into clean 8-bit ASCII glyphs instead of blank spaces/garbage.
+// ============================================================================
+namespace integrations::mskl {
 
-// Encodes UTF-8 Russian text into the exact SanLtd / SL font byte table
-// verified against modloader\Russificator\text\american.gxt.
-// GTA SA color/formatting tokens like ~r~, ~g~, ~w~, ~y~, ~n~ pass through untouched.
 inline std::string ToGameRussian(std::string_view utf8) {
     std::string out;
     out.reserve(utf8.size());
@@ -16,12 +22,13 @@ inline std::string ToGameRussian(std::string_view utf8) {
     while (i < utf8.size()) {
         uint8_t c0 = static_cast<uint8_t>(utf8[i]);
         if (c0 < 0x80) {
-            out.push_back(static_cast<char>(c0));
+            // MSKL Russificator remaps '|' (0x7C) to a custom non-pipe glyph!
+            out.push_back((c0 == '|') ? '-' : static_cast<char>(c0));
             ++i;
             continue;
         }
 
-        // Decode 2-byte UTF-8 Cyrillic (U+0400..U+04FF)
+        // Decode 2-byte UTF-8 (U+0080..U+07FF, including Cyrillic U+0400..U+04FF)
         if ((c0 & 0xE0) == 0xC0 && i + 1 < utf8.size()) {
             uint8_t c1 = static_cast<uint8_t>(utf8[i + 1]);
             uint32_t cp = ((c0 & 0x1Fu) << 6) | (c1 & 0x3Fu);
@@ -29,6 +36,11 @@ inline std::string ToGameRussian(std::string_view utf8) {
 
             char mapped = '?';
             switch (cp) {
+                // Common Latin-1 punctuation
+                case 0x00A0: mapped = ' '; break; // NBSP
+                case 0x00AB: mapped = '"'; break; // «
+                case 0x00BB: mapped = '"'; break; // »
+
                 // Uppercase А..Я + Ё
                 case 0x0410: mapped = 'A';    break; // А
                 case 0x0411: mapped = '\x80'; break; // Б
@@ -105,9 +117,40 @@ inline std::string ToGameRussian(std::string_view utf8) {
             continue;
         }
 
-        // Skip other multi-byte UTF-8 sequences gracefully
-        if ((c0 & 0xF0) == 0xE0) i += 3;
-        else if ((c0 & 0xF8) == 0xF0) i += 4;
+        // Decode 3-byte UTF-8 punctuation cleanly (avoid garbled glyphs or dropped dashes)
+        if ((c0 & 0xF0) == 0xE0 && i + 2 < utf8.size()) {
+            uint8_t c1 = static_cast<uint8_t>(utf8[i + 1]);
+            uint8_t c2 = static_cast<uint8_t>(utf8[i + 2]);
+            uint32_t cp = ((c0 & 0x0Fu) << 12) | ((c1 & 0x3Fu) << 6) | (c2 & 0x3Fu);
+            i += 3;
+            switch (cp) {
+                case 0x2013: // –
+                case 0x2014: // —
+                case 0x2212: // −
+                    out.push_back('-');
+                    break;
+                case 0x2018:
+                case 0x2019:
+                    out.push_back('\'');
+                    break;
+                case 0x201C:
+                case 0x201D:
+                    out.push_back('"');
+                    break;
+                case 0x2026: // …
+                    out.append("...");
+                    break;
+                case 0x2116: // №
+                    out.push_back('#');
+                    break;
+                default:
+                    out.push_back(' ');
+                    break;
+            }
+            continue;
+        }
+
+        if ((c0 & 0xF8) == 0xF0) i += 4;
         else ++i;
         out.push_back(' ');
     }
@@ -115,4 +158,43 @@ inline std::string ToGameRussian(std::string_view utf8) {
     return out;
 }
 
+// Ensures English strings never leak '|' (MSKL glyph trap) or raw multi-byte UTF-8 into 8-bit CFont
+inline std::string ToGameAscii(std::string_view utf8) {
+    std::string out;
+    out.reserve(utf8.size());
+    size_t i = 0;
+    while (i < utf8.size()) {
+        uint8_t c0 = static_cast<uint8_t>(utf8[i]);
+        if (c0 < 0x80) {
+            out.push_back((c0 == '|') ? '-' : static_cast<char>(c0));
+            ++i;
+            continue;
+        }
+        if ((c0 & 0xF0) == 0xE0 && i + 2 < utf8.size()) {
+            uint8_t c1 = static_cast<uint8_t>(utf8[i + 1]);
+            uint8_t c2 = static_cast<uint8_t>(utf8[i + 2]);
+            uint32_t cp = ((c0 & 0x0Fu) << 12) | ((c1 & 0x3Fu) << 6) | (c2 & 0x3Fu);
+            i += 3;
+            if (cp == 0x2013 || cp == 0x2014 || cp == 0x2212) out.push_back('-');
+            else if (cp == 0x2026) out.append("...");
+            else out.push_back(' ');
+            continue;
+        }
+        if ((c0 & 0xE0) == 0xC0) i += 2;
+        else if ((c0 & 0xF8) == 0xF0) i += 4;
+        else ++i;
+        out.push_back(' ');
+    }
+    return out;
+}
+
+} // namespace integrations::mskl
+
+namespace text {
+inline std::string ToGameRussian(std::string_view utf8) {
+    return integrations::mskl::ToGameRussian(utf8);
+}
+inline std::string ToGameAscii(std::string_view utf8) {
+    return integrations::mskl::ToGameAscii(utf8);
+}
 } // namespace text

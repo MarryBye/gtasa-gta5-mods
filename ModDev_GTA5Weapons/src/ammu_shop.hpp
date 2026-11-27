@@ -15,6 +15,7 @@ void PostScriptsTick();
 void Render2D();
 
 bool IsShopActive();
+bool ShouldClaimAmmuPanel();
 
 void Reset();
 

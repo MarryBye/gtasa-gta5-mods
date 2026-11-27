@@ -5,12 +5,18 @@
 #include <string>
 #include <vector>
 #include <windows.h>
-#include "log.hpp"
+#include "../log.hpp"
 
 // ============================================================================
-// Shared BASS.dll Dynamic Audio Engine (Reused by Vehicle & Weapon ASI Mods)
+// Standalone Integration Module: BASS.dll Dynamic Audio Engine
+//
+// Zero static link dependency: loads bass.dll dynamically via LoadLibraryA /
+// GetProcAddress and degrades gracefully (silent no-op) if bass.dll is absent.
+// NOTE on LoadStream(): BASS_StreamCreateFile(TRUE, ...) does NOT copy the
+// fallbackWav buffer; callers must keep the WAV vector alive while the stream
+// exists (and call FreeStream before destroying the buffer).
 // ============================================================================
-namespace bass {
+namespace integrations::bass_audio {
 
 using HSTREAM  = uint32_t;
 using HSAMPLE  = uint32_t;
@@ -27,6 +33,7 @@ using FnBASS_ErrorGetCode        = int(WINAPI*)();
 using FnBASS_StreamCreateFile    = HSTREAM(WINAPI*)(BOOL, const void*, uint64_t, uint64_t, uint32_t);
 using FnBASS_SampleLoad          = HSAMPLE(WINAPI*)(BOOL, const void*, uint64_t, uint32_t, uint32_t, uint32_t);
 using FnBASS_SampleGetChannel    = HCHANNEL(WINAPI*)(HSAMPLE, uint32_t);
+using FnBASS_SampleFree          = BOOL(WINAPI*)(HSAMPLE);
 using FnBASS_ChannelPlay         = BOOL(WINAPI*)(uint32_t, BOOL);
 using FnBASS_ChannelStop         = BOOL(WINAPI*)(uint32_t);
 using FnBASS_ChannelSetAttribute = BOOL(WINAPI*)(uint32_t, uint32_t, float);
@@ -43,6 +50,7 @@ struct Core {
     FnBASS_StreamCreateFile    StreamCreateFile = nullptr;
     FnBASS_SampleLoad          SampleLoad = nullptr;
     FnBASS_SampleGetChannel    SampleGetChannel = nullptr;
+    FnBASS_SampleFree          SampleFree = nullptr;
     FnBASS_ChannelPlay         ChannelPlay = nullptr;
     FnBASS_ChannelStop         ChannelStop = nullptr;
     FnBASS_ChannelSetAttribute ChannelSetAttribute = nullptr;
@@ -76,6 +84,7 @@ inline bool EnsureLoaded() {
     c.StreamCreateFile    = reinterpret_cast<FnBASS_StreamCreateFile>(getFn("BASS_StreamCreateFile"));
     c.SampleLoad          = reinterpret_cast<FnBASS_SampleLoad>(getFn("BASS_SampleLoad"));
     c.SampleGetChannel    = reinterpret_cast<FnBASS_SampleGetChannel>(getFn("BASS_SampleGetChannel"));
+    c.SampleFree          = reinterpret_cast<FnBASS_SampleFree>(getFn("BASS_SampleFree"));
     c.ChannelPlay         = reinterpret_cast<FnBASS_ChannelPlay>(getFn("BASS_ChannelPlay"));
     c.ChannelStop         = reinterpret_cast<FnBASS_ChannelStop>(getFn("BASS_ChannelStop"));
     c.ChannelSetAttribute = reinterpret_cast<FnBASS_ChannelSetAttribute>(getFn("BASS_ChannelSetAttribute"));
@@ -91,7 +100,7 @@ inline bool EnsureLoaded() {
     BOOL ok = c.Init(-1, 44100, 0, nullptr, nullptr);
     if (!ok) {
         int err = c.ErrorGetCode ? c.ErrorGetCode() : -1;
-        if (err != 14) { // 14 = BASS_ERROR_ALREADY (shared with CLEO/other ASI mods)
+        if (err != 14) { // 14 = BASS_ERROR_ALREADY (shared with other plugins)
             modlog::Info("[BASS] BASS_Init failed (err=%d).", err);
             return false;
         }
@@ -170,13 +179,21 @@ inline void StopStream(HSTREAM stream) {
     }
 }
 
-inline void FreeStream(HSTREAM stream) {
+inline void FreeStream(HSTREAM& stream) {
     auto& c = Engine();
-    if (!c.ready || !stream || !c.StreamFree) return;
+    if (!c.ready || !stream) { stream = 0; return; }
     if (c.ChannelIsActive(stream) == ACTIVE_PLAYING) {
         c.ChannelStop(stream);
     }
-    c.StreamFree(stream);
+    if (c.StreamFree) c.StreamFree(stream);
+    stream = 0;
+}
+
+inline void FreeSample(HSAMPLE& sample) {
+    auto& c = Engine();
+    if (!c.ready || !sample) { sample = 0; return; }
+    if (c.SampleFree) c.SampleFree(sample);
+    sample = 0;
 }
 
 inline void PlayLoopStream(HSTREAM stream, float volume, float freqHz) {
@@ -189,4 +206,16 @@ inline void PlayLoopStream(HSTREAM stream, float volume, float freqHz) {
     }
 }
 
-} // namespace bass
+// Reusable tiny DSP helpers for procedural WAV synthesis across Garage, Weapons, Inventory & Phone
+inline float NextNoise(uint32_t& state) {
+    state = state * 1664525u + 1013904223u;
+    return static_cast<float>(static_cast<int32_t>(state >> 8)) / 8388608.0f;
+}
+
+inline int16_t FloatToPcm16(float sample) {
+    return static_cast<int16_t>(std::clamp(sample, -1.0f, 1.0f) * 32767.0f);
+}
+
+} // namespace integrations::bass_audio
+
+namespace bass = integrations::bass_audio;

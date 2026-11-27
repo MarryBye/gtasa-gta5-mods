@@ -1,6 +1,6 @@
-# GTA San Andreas — Modular GTA 5 Style Expansion Suite (6 ASI Plugins)
+# GTA San Andreas — Modular GTA 5 Style Expansion Suite (7 ASI Plugins)
 
-A modular suite of **6 independent C++20 ASI plugins** for **GTA San Andreas 1.0 US (Hoodlum)** that brings core **GTA 5** and **ETS 2** gameplay mechanics into classic GTA SA while staying authentic to the vanilla aesthetic — with **zero third-party mod dependencies** beyond **Ultimate ASI Loader**.
+A modular suite of **7 C++20 ASI plugins** for **GTA San Andreas 1.0 US (Hoodlum)** that brings core **GTA 5 / GTA Online** and **ETS 2** gameplay mechanics into classic GTA SA while staying authentic to the vanilla aesthetic — with **zero third-party mod dependencies** beyond **Ultimate ASI Loader**.
 
 Install **only the modules you want** — every plugin automatically discovers and integrates with the others at runtime via the shared C-ABI service bus (`mod_bus.hpp`), with zero load-order dependencies.
 
@@ -29,7 +29,8 @@ All plugins are designed to work cleanly alongside:
 
 | Module | Folder in `modloader/` | Description |
 |---|---|---|
-| **A. [GTA5UIKit](ModDev_UIKit/README.md)** | `GTA5UIKit/` | Shared 3-tier React-style dumb-component UI Kit (`ThemeTokens` → `ui::prim::*` → `ListMenu`, `StatsCard`, `PhoneFrame`, `HelpToast`, `ColorGrid`, `TextInputModal`, `RadialWheel`) + inter-mod addon bus (`mod_bus.hpp`) + **complete visual restyling of vanilla GTA SA menus & notifications**: barber shops, tattoo parlors, gyms, betting shops, color grids, and **all top-left notifications, prompts & story phone calls** (`CHud::DrawHelpText`) in one unified style without altering vanilla gameplay logic. |
+| **A. [GTA5UIKit](ModDev_UIKit/README.md)** | `GTA5UIKit/` | Shared React-style dumb-component UI Kit (`ThemeTokens` → `ui::prim::*` → `ui::widget::*` → `ListMenu`, `Grid`, `ColorGrid`, `StatsCard`, `PhoneFrame`, titled `HelpToast`, `TextInputModal`, `RadialWheel`, `RankBarHUD`) + inter-mod service bus (`mod_bus.hpp`) & reusable third-party integration modules (`ModDev_Common/integrations/`) + **complete visual restyling of vanilla GTA SA menus & notifications**: barber shops, tattoo parlors, gyms, betting shops, color grids, and **all top-left notifications, prompts & story phone calls** (`CHud::DrawHelpText`) in one unified style without altering vanilla gameplay logic. |
+| **B. [GTA5Progression](ModDev_Progression/README.md)** | `GTA5Progression/` | **GTA Online-style Rank & XP Progression (Rank 1–25 unlocks):** Dynamic top-center XP bar (`ui::RankBarHUD`) with current/next rank circles, animated green XP surge, rising `+X XP` popups, and Rank-Up notifications; hostile-only combat XP (enemy gangs, Mafia, Police/SWAT/FBI/Army, mission targets + headshot bonus; civilians & allies excluded), scaling mission XP, gang territories, wanted escapes, stunts & collectibles; tightly integrated rank unlocks across Workshops, Dealerships, Ammu-Nation, Restaurants, Clothing Chains, plus a **Rank & Unlocks** app inside `GTA5Phone`. |
 | **B. [GTA5AmmuNation](ModDev_GTA5Weapons/README.md)** | `GTA5AmmuNation/` | GTA 5-style weapon customization in Ammu-Nation (silencer, compensator, extended/drum magazines, optics with smooth RMB zoom, tactical grip, heavy barrel, 3D laser sight, optional 3D weapon attachments), custom synthesized audio (`bass.dll`), **multi-weapon storage per category**, and an **8-sector Weapon Wheel** (`Mouse Wheel` / `TAB`, **no slow-motion** for 100% SA-COOP safety). When `GTA5Inventory` is installed, you can also buy **spare body armor** directly inside Ammu-Nation. |
 | **C. [GTA5GarageAndTuning](ModDev_GTA5Garage/README.md)** | `GTA5GarageAndTuning/` | Deep performance & visual tuning across all 5 workshops, **10 personal vehicles**, road-network **Mechanic delivery** (`F6` standalone or via Phone), an **ETS 2-style component wear & servicing system** (engine, transmission, brakes, tires, suspension, chassis degradation with red loss bars on the stats card, expensive workshop servicing, heavy wear from crashes & explosions), and **official dealerships in all 3 cities** with classic red entry markers (Coutt & Schutz LS, Wang Cars SF, Auto Bahn LV) + online car purchasing via Phone. |
 | **D. [GTA5Inventory](ModDev_Inventory/README.md)** | `GTA5Inventory/` | **Takeaway restaurants** (Burger Shot, Cluckin' Bell, Well Stacked Pizza, diners): buy snacks & meals **into your pocket** up to carry limits (P's & Q's, EgoChaser, Meteorite, Sprunk, signature meals, healthy salad) + **spare body armor** (4 classes). Standalone `F7` menu (automatically hidden and embedded inside `GTA5Phone` when installed). |
@@ -52,6 +53,7 @@ Extract the desired module folders directly into `Grand Theft Auto San Andreas\m
 Grand Theft Auto San Andreas/
 └── modloader/
     ├── GTA5UIKit/
+    ├── GTA5Progression/
     ├── GTA5AmmuNation/
     ├── GTA5GarageAndTuning/
     ├── GTA5Inventory/

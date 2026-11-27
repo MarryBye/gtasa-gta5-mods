@@ -27,6 +27,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 
 $AllMods = @(
     @{ Folder = "ModDev_UIKit";       Name = "GTA5UIKit" },
+    @{ Folder = "ModDev_Progression"; Name = "GTA5Progression" },
     @{ Folder = "ModDev_GTA5Weapons"; Name = "GTA5AmmuNation" },
     @{ Folder = "ModDev_GTA5Garage";  Name = "GTA5GarageAndTuning" },
     @{ Folder = "ModDev_Inventory";   Name = "GTA5Inventory" },
@@ -35,10 +36,11 @@ $AllMods = @(
 )
 
 if ($Only.Count -gt 0) {
-    $Mods = @($AllMods | Where-Object { ($Only -contains $_.Name) -or ($Only -contains $_.Folder) })
+    $ExpandedOnly = @($Only | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+    $Mods = @($AllMods | Where-Object { ($ExpandedOnly -contains $_.Name) -or ($ExpandedOnly -contains $_.Folder) })
     if ($Mods.Count -eq 0) {
         $valid = ($AllMods | ForEach-Object { $_.Name }) -join ", "
-        throw "No matching mods for -Only ($($Only -join ', ')). Valid names: $valid"
+        throw "No matching mods for -Only ($($ExpandedOnly -join ', ')). Valid names: $valid"
     }
 } else {
     $Mods = $AllMods

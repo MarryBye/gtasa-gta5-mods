@@ -1,30 +1,26 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <windows.h>
-#include <shlobj.h>
-#include "config.hpp"
+#include "common_utils.hpp"
+#include "garage_config.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
-#include "mod_bus.hpp"
 #include "sa_sdk.hpp"
 #include "vehicle_data.hpp"
 
 namespace storage {
 
-inline const char* GetCoopOverride() {
-    if (auto* b = modbus::GetBus(); b && b->coopProfileName[0]) return b->coopProfileName;
-    return nullptr;
-}
-
-// slotIndex: 1..8 for GTASAsf1..8.b (SP or SA-COOP Host), or 0 for SA-COOP Client per-player profile!
 inline std::string GetSlotFilePath(int slotIndex, bool forLoading = false) {
+    const char* ov = integrations::sacoop::GetProfileOverride();
     if (forLoading) {
-        return sa::ResolveExistingLoadPath("GTA5GarageSaves", mod::Config().gameDir, "garage", slotIndex, GetCoopOverride());
+        return integrations::sacoop::ResolveExistingLoadPath("GTA5GarageSaves", mod::Config().gameDir, "garage", slotIndex, ov);
     }
-    return sa::BuildSaveProfilePath("GTA5GarageSaves", mod::Config().gameDir, "garage", slotIndex, GetCoopOverride());
+    return integrations::sacoop::BuildSaveProfilePath("GTA5GarageSaves", mod::Config().gameDir, "garage", slotIndex, ov);
 }
 
 inline std::string HexEncode(const std::string& raw) {
@@ -55,10 +51,87 @@ inline std::string HexDecode(const char* hex) {
     return out;
 }
 
+inline void WriteVehicleDataBlock(FILE* f, const mod::VisualAppearance& vis,
+                                  const mod::PerformanceTuning& tun, const mod::VehicleWear& wear)
+{
+    std::fprintf(f, "Color1=%u\n", vis.primaryColor);
+    std::fprintf(f, "Color2=%u\n", vis.secondaryColor);
+    std::fprintf(f, "Paintjob=%d\n", static_cast<int>(vis.paintjob));
+
+    std::string upgStr;
+    for (int u = 0; u < 15; ++u) {
+        if (u > 0) upgStr += ",";
+        upgStr += std::to_string(vis.upgrades[u]);
+    }
+    std::fprintf(f, "Upgrades=%s\n", upgStr.c_str());
+
+    std::fprintf(f, "Engine=%u\n", tun.engineLevel);
+    std::fprintf(f, "Transmission=%u\n", tun.transmissionLevel);
+    std::fprintf(f, "Suspension=%u\n", tun.suspensionLevel);
+    std::fprintf(f, "Brakes=%u\n", tun.brakesLevel);
+    std::fprintf(f, "TiresGrip=%u\n", tun.tiresGripLevel);
+    std::fprintf(f, "Armor=%u\n", tun.armorLevel);
+    std::fprintf(f, "Bulletproof=%d\n", tun.bulletproofTires ? 1 : 0);
+    std::fprintf(f, "Turbo=%d\n", tun.turbo ? 1 : 0);
+    std::fprintf(f, "Horn=%u\n", tun.hornType);
+    std::fprintf(f, "Plate=%s\n", tun.plateText);
+    std::fprintf(f, "WearEngine=%.2f\n", wear.engine);
+    std::fprintf(f, "WearTrans=%.2f\n", wear.transmission);
+    std::fprintf(f, "WearBrakes=%.2f\n", wear.brakes);
+    std::fprintf(f, "WearTires=%.2f\n", wear.tires);
+    std::fprintf(f, "WearSusp=%.2f\n", wear.suspension);
+    std::fprintf(f, "WearChassis=%.2f\n\n", wear.chassis);
+}
+
+inline void ReadVehicleDataBlock(const char* p, const char* sec, mod::VisualAppearance& vis,
+                                 mod::PerformanceTuning& tun, mod::VehicleWear& wear)
+{
+    vis.primaryColor   = static_cast<uint8_t>(common::IniReadInt(p, sec, "Color1", 0));
+    vis.secondaryColor = static_cast<uint8_t>(common::IniReadInt(p, sec, "Color2", 0));
+    vis.paintjob       = static_cast<int8_t>(common::IniReadInt(p, sec, "Paintjob", -1));
+
+    std::string upg = common::IniReadString(p, sec, "Upgrades", "");
+    if (!upg.empty()) {
+        char buf[256] = {};
+        std::strncpy(buf, upg.c_str(), sizeof(buf) - 1);
+        char* cur = buf;
+        for (int u = 0; u < 15 && cur && *cur; ++u) {
+            char* comma = std::strchr(cur, ',');
+            if (comma) *comma = '\0';
+            vis.upgrades[u] = static_cast<int16_t>(std::atoi(cur));
+            cur = comma ? (comma + 1) : nullptr;
+        }
+    }
+
+    tun.engineLevel       = static_cast<uint8_t>(common::IniReadInt(p, sec, "Engine", 0));
+    tun.transmissionLevel = static_cast<uint8_t>(common::IniReadInt(p, sec, "Transmission", 0));
+    tun.suspensionLevel   = static_cast<uint8_t>(common::IniReadInt(p, sec, "Suspension", 0));
+    tun.brakesLevel       = static_cast<uint8_t>(common::IniReadInt(p, sec, "Brakes", 0));
+    tun.tiresGripLevel    = static_cast<uint8_t>(common::IniReadInt(p, sec, "TiresGrip", 0));
+    tun.armorLevel        = static_cast<uint8_t>(common::IniReadInt(p, sec, "Armor", 0));
+    tun.bulletproofTires  = common::IniReadBool(p, sec, "Bulletproof", false);
+    tun.turbo             = common::IniReadBool(p, sec, "Turbo", false);
+    tun.hornType          = static_cast<uint8_t>(common::IniReadInt(p, sec, "Horn", 0));
+
+    std::string plate = common::IniReadString(p, sec, "Plate", "");
+    size_t len = std::min<size_t>(plate.size(), 8);
+    std::memcpy(tun.plateText, plate.c_str(), len);
+    tun.plateText[len] = '\0';
+
+    wear.engine       = common::IniReadFloat(p, sec, "WearEngine",  0.0f);
+    wear.transmission = common::IniReadFloat(p, sec, "WearTrans",   0.0f);
+    wear.brakes       = common::IniReadFloat(p, sec, "WearBrakes",  0.0f);
+    wear.tires        = common::IniReadFloat(p, sec, "WearTires",   0.0f);
+    wear.suspension   = common::IniReadFloat(p, sec, "WearSusp",    0.0f);
+    wear.chassis      = common::IniReadFloat(p, sec, "WearChassis", 0.0f);
+    wear.ClampAll();
+}
+
 inline bool SaveGarageToSlot(int slotIndex,
                              const std::array<mod::OwnedVehicle, mod::MAX_OWNED_VEHICLES>& slots,
                              const std::array<mod::SafehouseCarRecord, mod::MAX_SAFEHOUSE_CARS>* safehouseCars = nullptr) {
     std::string path = GetSlotFilePath(slotIndex, false);
+    if (path.empty()) return true; // Unsaved Singleplayer/Host New Game: keep in RAM until saved to a slot
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
         modlog::Info("[Storage] Failed to open %s for writing", path.c_str());
@@ -77,35 +150,7 @@ inline bool SaveGarageToSlot(int slotIndex,
         std::fprintf(f, "Destroyed=%d\n", v.destroyed ? 1 : 0);
         std::fprintf(f, "ModelId=%d\n", v.modelId);
         std::fprintf(f, "NameHex=%s\n", HexEncode(v.displayNameGame).c_str());
-        std::fprintf(f, "Color1=%u\n", v.visuals.primaryColor);
-        std::fprintf(f, "Color2=%u\n", v.visuals.secondaryColor);
-        std::fprintf(f, "Paintjob=%d\n", static_cast<int>(v.visuals.paintjob));
-
-        std::string upgStr;
-        for (int u = 0; u < 15; ++u) {
-            if (u > 0) upgStr += ",";
-            upgStr += std::to_string(v.visuals.upgrades[u]);
-        }
-        std::fprintf(f, "Upgrades=%s\n", upgStr.c_str());
-
-        std::fprintf(f, "Engine=%u\n", v.tuning.engineLevel);
-        std::fprintf(f, "Transmission=%u\n", v.tuning.transmissionLevel);
-        std::fprintf(f, "Suspension=%u\n", v.tuning.suspensionLevel);
-        std::fprintf(f, "Brakes=%u\n", v.tuning.brakesLevel);
-        std::fprintf(f, "TiresGrip=%u\n", v.tuning.tiresGripLevel);
-        std::fprintf(f, "Armor=%u\n", v.tuning.armorLevel);
-        std::fprintf(f, "Bulletproof=%d\n", v.tuning.bulletproofTires ? 1 : 0);
-        std::fprintf(f, "Turbo=%d\n", v.tuning.turbo ? 1 : 0);
-        std::fprintf(f, "Xenon=%d\n", v.tuning.xenonLights ? 1 : 0);
-        std::fprintf(f, "Neon=%u\n", static_cast<unsigned>(v.tuning.neonColor));
-        std::fprintf(f, "Horn=%u\n", v.tuning.hornType);
-        std::fprintf(f, "Plate=%s\n", v.tuning.plateText);
-        std::fprintf(f, "WearEngine=%.2f\n", v.wear.engine);
-        std::fprintf(f, "WearTrans=%.2f\n", v.wear.transmission);
-        std::fprintf(f, "WearBrakes=%.2f\n", v.wear.brakes);
-        std::fprintf(f, "WearTires=%.2f\n", v.wear.tires);
-        std::fprintf(f, "WearSusp=%.2f\n", v.wear.suspension);
-        std::fprintf(f, "WearChassis=%.2f\n\n", v.wear.chassis);
+        WriteVehicleDataBlock(f, v.visuals, v.tuning, v.wear);
     }
 
     if (safehouseCars) {
@@ -117,31 +162,7 @@ inline bool SaveGarageToSlot(int slotIndex,
             std::fprintf(f, "GarageId=%d\n", r.hideoutGarageId);
             std::fprintf(f, "PersonalSlot=%d\n", r.personalSlotIdx);
             std::fprintf(f, "ModelId=%d\n", r.modelId);
-            std::fprintf(f, "Color1=%u\n", r.visuals.primaryColor);
-            std::fprintf(f, "Color2=%u\n", r.visuals.secondaryColor);
-            std::fprintf(f, "Paintjob=%d\n", static_cast<int>(r.visuals.paintjob));
-            std::string upgStr;
-            for (int u = 0; u < 15; ++u) {
-                if (u > 0) upgStr += ",";
-                upgStr += std::to_string(r.visuals.upgrades[u]);
-            }
-            std::fprintf(f, "Upgrades=%s\n", upgStr.c_str());
-            std::fprintf(f, "Engine=%u\n", r.tuning.engineLevel);
-            std::fprintf(f, "Transmission=%u\n", r.tuning.transmissionLevel);
-            std::fprintf(f, "Suspension=%u\n", r.tuning.suspensionLevel);
-            std::fprintf(f, "Brakes=%u\n", r.tuning.brakesLevel);
-            std::fprintf(f, "TiresGrip=%u\n", r.tuning.tiresGripLevel);
-            std::fprintf(f, "Armor=%u\n", r.tuning.armorLevel);
-            std::fprintf(f, "Bulletproof=%d\n", r.tuning.bulletproofTires ? 1 : 0);
-            std::fprintf(f, "Turbo=%d\n", r.tuning.turbo ? 1 : 0);
-            std::fprintf(f, "Horn=%u\n", r.tuning.hornType);
-            std::fprintf(f, "Plate=%s\n", r.tuning.plateText);
-            std::fprintf(f, "WearEngine=%.2f\n", r.wear.engine);
-            std::fprintf(f, "WearTrans=%.2f\n", r.wear.transmission);
-            std::fprintf(f, "WearBrakes=%.2f\n", r.wear.brakes);
-            std::fprintf(f, "WearTires=%.2f\n", r.wear.tires);
-            std::fprintf(f, "WearSusp=%.2f\n", r.wear.suspension);
-            std::fprintf(f, "WearChassis=%.2f\n\n", r.wear.chassis);
+            WriteVehicleDataBlock(f, r.visuals, r.tuning, r.wear);
         }
         std::fprintf(f, "[SafehouseMeta]\nCount=%d\n", outIdx);
     }
@@ -160,9 +181,8 @@ inline bool LoadGarageFromSlot(int slotIndex,
     }
 
     std::string path = GetSlotFilePath(slotIndex, true);
-    DWORD attr = GetFileAttributesA(path.c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES) {
-        modlog::Info("[Storage] No saved garage file for slot %d (%s) -> starting fresh", slotIndex, path.c_str());
+    if (path.empty() || GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        modlog::Info("[Storage] No saved garage file for slot %d -> starting fresh", slotIndex);
         return false;
     }
 
@@ -170,126 +190,31 @@ inline bool LoadGarageFromSlot(int slotIndex,
     for (int i = 0; i < mod::MAX_OWNED_VEHICLES; ++i) {
         char sec[32];
         std::snprintf(sec, sizeof(sec), "Slot%d", i);
-        if (GetPrivateProfileIntA(sec, "Occupied", 0, p) == 0) continue;
+        if (!common::IniReadBool(p, sec, "Occupied", false)) continue;
 
         auto& v = slots[i];
-        v.occupied  = true;
-        v.destroyed = GetPrivateProfileIntA(sec, "Destroyed", 0, p) != 0;
-        v.modelId   = GetPrivateProfileIntA(sec, "ModelId", 0, p);
-
-        char buf[256] = {};
-        GetPrivateProfileStringA(sec, "NameHex", "", buf, sizeof(buf), p);
-        v.displayNameGame = HexDecode(buf);
-
-        v.visuals.primaryColor   = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Color1", 0, p));
-        v.visuals.secondaryColor = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Color2", 0, p));
-        v.visuals.paintjob       = static_cast<int8_t>(GetPrivateProfileIntA(sec, "Paintjob", -1, p));
-
-        GetPrivateProfileStringA(sec, "Upgrades", "", buf, sizeof(buf), p);
-        {
-            char* cur = buf;
-            for (int u = 0; u < 15 && cur && *cur; ++u) {
-                char* comma = std::strchr(cur, ',');
-                if (comma) *comma = '\0';
-                v.visuals.upgrades[u] = static_cast<int16_t>(std::atoi(cur));
-                cur = comma ? (comma + 1) : nullptr;
-            }
-        }
-
-        v.tuning.engineLevel       = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Engine", 0, p));
-        v.tuning.transmissionLevel = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Transmission", 0, p));
-        v.tuning.suspensionLevel   = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Suspension", 0, p));
-        v.tuning.brakesLevel       = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Brakes", 0, p));
-        v.tuning.tiresGripLevel    = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "TiresGrip", 0, p));
-        v.tuning.armorLevel        = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Armor", 0, p));
-        v.tuning.bulletproofTires  = GetPrivateProfileIntA(sec, "Bulletproof", 0, p) != 0;
-        v.tuning.turbo             = GetPrivateProfileIntA(sec, "Turbo", 0, p) != 0;
-        v.tuning.xenonLights       = GetPrivateProfileIntA(sec, "Xenon", 0, p) != 0;
-        v.tuning.neonColor         = static_cast<mod::NeonColor>(GetPrivateProfileIntA(sec, "Neon", 0, p));
-        v.tuning.hornType          = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Horn", 0, p));
-
-        GetPrivateProfileStringA(sec, "Plate", "", buf, sizeof(buf), p);
-        {
-            size_t len = std::strlen(buf);
-            if (len > 8) len = 8;
-            std::memcpy(v.tuning.plateText, buf, len);
-            v.tuning.plateText[len] = '\0';
-        }
-
-        auto readFloat = [&](const char* key) -> float {
-            char fb[32] = {};
-            GetPrivateProfileStringA(sec, key, "0.0", fb, sizeof(fb), p);
-            return static_cast<float>(std::atof(fb));
-        };
-        v.wear.engine       = readFloat("WearEngine");
-        v.wear.transmission = readFloat("WearTrans");
-        v.wear.brakes       = readFloat("WearBrakes");
-        v.wear.tires        = readFloat("WearTires");
-        v.wear.suspension   = readFloat("WearSusp");
-        v.wear.chassis      = readFloat("WearChassis");
-        v.wear.ClampAll();
+        v.occupied        = true;
+        v.destroyed       = common::IniReadBool(p, sec, "Destroyed", false);
+        v.modelId         = common::IniReadInt(p, sec, "ModelId", 0);
+        v.displayNameGame = HexDecode(common::IniReadString(p, sec, "NameHex", "").c_str());
+        ReadVehicleDataBlock(p, sec, v.visuals, v.tuning, v.wear);
     }
 
     if (safehouseCars) {
-        int shCount = std::clamp(static_cast<int>(GetPrivateProfileIntA("SafehouseMeta", "Count", 0, p)),
-                                 0, mod::MAX_SAFEHOUSE_CARS);
+        int shCount = std::clamp(common::IniReadInt(p, "SafehouseMeta", "Count", 0), 0, mod::MAX_SAFEHOUSE_CARS);
         for (int i = 0; i < shCount; ++i) {
             char sec[32];
             std::snprintf(sec, sizeof(sec), "Safehouse%d", i);
-            int mid = GetPrivateProfileIntA(sec, "ModelId", 0, p);
-            int gid = GetPrivateProfileIntA(sec, "GarageId", -1, p);
+            int mid = common::IniReadInt(p, sec, "ModelId", 0);
+            int gid = common::IniReadInt(p, sec, "GarageId", -1);
             if (mid < 400 || gid < 0) continue;
 
             auto& r = (*safehouseCars)[i];
             r.occupied        = true;
             r.hideoutGarageId = gid;
-            r.personalSlotIdx = GetPrivateProfileIntA(sec, "PersonalSlot", -1, p);
+            r.personalSlotIdx = common::IniReadInt(p, sec, "PersonalSlot", -1);
             r.modelId         = mid;
-            r.visuals.primaryColor   = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Color1", 0, p));
-            r.visuals.secondaryColor = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Color2", 0, p));
-            r.visuals.paintjob       = static_cast<int8_t>(GetPrivateProfileIntA(sec, "Paintjob", -1, p));
-
-            char buf[256] = {};
-            GetPrivateProfileStringA(sec, "Upgrades", "", buf, sizeof(buf), p);
-            {
-                char* cur = buf;
-                for (int u = 0; u < 15 && cur && *cur; ++u) {
-                    char* comma = std::strchr(cur, ',');
-                    if (comma) *comma = '\0';
-                    r.visuals.upgrades[u] = static_cast<int16_t>(std::atoi(cur));
-                    cur = comma ? (comma + 1) : nullptr;
-                }
-            }
-            r.tuning.engineLevel       = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Engine", 0, p));
-            r.tuning.transmissionLevel = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Transmission", 0, p));
-            r.tuning.suspensionLevel   = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Suspension", 0, p));
-            r.tuning.brakesLevel       = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Brakes", 0, p));
-            r.tuning.tiresGripLevel    = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "TiresGrip", 0, p));
-            r.tuning.armorLevel        = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Armor", 0, p));
-            r.tuning.bulletproofTires  = GetPrivateProfileIntA(sec, "Bulletproof", 0, p) != 0;
-            r.tuning.turbo             = GetPrivateProfileIntA(sec, "Turbo", 0, p) != 0;
-            r.tuning.hornType          = static_cast<uint8_t>(GetPrivateProfileIntA(sec, "Horn", 0, p));
-
-            GetPrivateProfileStringA(sec, "Plate", "", buf, sizeof(buf), p);
-            {
-                size_t len = std::strlen(buf);
-                if (len > 8) len = 8;
-                std::memcpy(r.tuning.plateText, buf, len);
-                r.tuning.plateText[len] = '\0';
-            }
-
-            auto readFloat = [&](const char* key) -> float {
-                char fb[32] = {};
-                GetPrivateProfileStringA(sec, key, "0.0", fb, sizeof(fb), p);
-                return static_cast<float>(std::atof(fb));
-            };
-            r.wear.engine       = readFloat("WearEngine");
-            r.wear.transmission = readFloat("WearTrans");
-            r.wear.brakes       = readFloat("WearBrakes");
-            r.wear.tires        = readFloat("WearTires");
-            r.wear.suspension   = readFloat("WearSusp");
-            r.wear.chassis      = readFloat("WearChassis");
-            r.wear.ClampAll();
+            ReadVehicleDataBlock(p, sec, r.visuals, r.tuning, r.wear);
         }
     }
 

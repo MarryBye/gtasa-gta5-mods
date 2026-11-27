@@ -7,12 +7,17 @@
 #include <vector>
 #include <windows.h>
 #include "audio.hpp"
-#include "config.hpp"
+#include "common_utils.hpp"
 #include "garage.hpp"
+#include "garage_config.hpp"
+#include "garage_ui.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
 #include "memory.hpp"
+#include "mod_bus.hpp"
+#include "progression_rules.hpp"
 #include "tuning_physics.hpp"
-#include "ui_menu.hpp"
+#include "ui_kit.hpp"
 #include "veh_mods.hpp"
 
 namespace workshop {
@@ -101,6 +106,7 @@ struct SubOption {
     int         price     = 0;
     bool        installed = false;
     int         value     = 0; // Level, Color ID, Upgrade Model ID, or special action code
+    int         reqRank   = 1; // Required GTA5Progression rank to purchase/install
 };
 
 constexpr const char* kPlatePresets[7] = {
@@ -132,9 +138,6 @@ uint32_t      g_standaloneEnteredMs = 0;
 uint32_t      g_standaloneCooldownUntilMs = 0;
 bool          g_waitLeaveBox      = false;
 int           g_doorBlockedShopIdx = -1;
-bool          g_doorOpened[5]     = {false, false, false, false, false};
-bool          g_workshopFrozen    = false;
-uint32_t      g_workshopSettleUntilMs = 0;
 
 // Smart Camera Orbit + Zoom + Part Auto-Focus
 float         g_camOrbitAngle     = 2.46f;
@@ -173,23 +176,6 @@ bool          g_previewModified   = false;
 std::vector<MainEntry> g_mainEntries;
 std::vector<SubOption> g_subOptions;
 
-inline uint8_t* GetPad0() {
-    return reinterpret_cast<uint8_t*>(0x00B73458);
-}
-
-inline void ClearPadMenuInputs() {
-    uint8_t* pad = GetPad0();
-    *reinterpret_cast<int16_t*>(pad + 0x02) = 0; // LeftStickY
-    *reinterpret_cast<int16_t*>(pad + 0x10) = 0; // DPadUp
-    *reinterpret_cast<int16_t*>(pad + 0x12) = 0; // DPadDown
-    *reinterpret_cast<int16_t*>(pad + 0x14) = 0; // DPadLeft
-    *reinterpret_cast<int16_t*>(pad + 0x16) = 0; // DPadRight
-    *reinterpret_cast<int16_t*>(pad + 0x1C) = 0; // ButtonSquare
-    *reinterpret_cast<int16_t*>(pad + 0x1E) = 0; // ButtonTriangle
-    *reinterpret_cast<int16_t*>(pad + 0x20) = 0; // ButtonCross
-    *reinterpret_cast<int16_t*>(pad + 0x22) = 0; // ButtonCircle
-}
-
 sa::tMenuPanel* GetVanillaCarmodMainPanel() {
     sa::tMenuPanel* p = sa::GetMenuPanel(0);
     if (!p) return nullptr;
@@ -206,11 +192,8 @@ bool IsAnyVanillaCarmodPanelOpen() {
     return std::strncmp(p->m_acTitle, "UPGRADE", 7) == 0;
 }
 
-std::string FormatPrice(int price) {
-    if (price <= 0) return ui::Loc("Беспл.", "Free");
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "$%d", price);
-    return std::string(buf);
+std::string FormatWorkshopPrice(int price) {
+    return common::FormatPrice(price, ui::UseRussianFlag());
 }
 
 mod::PerformanceTuning GetCurrentVehTuning(sa::CVehicle* v) {
@@ -273,21 +256,20 @@ void RebuildMainEntries(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
                 badge = ui::Loc("Ремонт / ТО", "Repair / Service");
             }
         } else {
-            badge = FormatPrice(mod::Config().priceRepair);
+            badge = FormatWorkshopPrice(mod::Config().priceRepair);
         }
         g_mainEntries.push_back({CategoryId::MaintenanceHub, -1,
             ui::Loc("ТО и Обслуживание", "Repair & Service"), badge});
     }
 
-    // In Standalone Mode B: expose ALL visual tuning (Wheels, Paintjobs, Colors, Spoilers, Bumpers, Skirts, Exhaust, Roof, Hood, Hydraulics, Nitro, Stereo!)
+    // In Standalone Mode B: expose visual tuning
     if (!vanillaPanel) {
-        // Paintjobs (Vinyls) if vehicle model has any
         int32_t h = sa::GetVehicleHandle(veh);
         int32_t numPj = 0;
         if (h > 0) sa::ScriptCmd(0x06EC).Int(h).Out(numPj).Run();
         if (numPj > 0) {
             g_mainEntries.push_back({CategoryId::Paintjob, -1,
-                ui::Loc("Винилы (Покраска)", "Paintjobs"),
+                ui::Loc("Винилы", "Paintjobs"),
                 std::to_string(numPj) + " " + ui::Loc("шт.", "avail")});
         }
 
@@ -299,13 +281,11 @@ void RebuildMainEntries(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
             std::to_string(veh->SecondaryColor())});
 
         if (isFourWheel) {
-            // Wheels (ALL 17 rims for EVERY 4-wheel car!)
             int16_t curW = vehmods::FindInstalledUpgradeInCat(veh, vehmods::ModCat::Wheels);
             g_mainEntries.push_back({CategoryId::Wheels, -1,
-                ui::Loc("Диски (Колёса)", "Wheels"),
-                curW >= 1000 ? ui::Loc("Уст.", "Custom") : ui::Loc("Сток", "Stock")});
+                ui::Loc("Диски", "Wheels"),
+                curW >= 1000 ? ui::Loc("Уст.", "Custom") : ui::Loc("Стандарт", "Standard")});
 
-            // Body parts (auto-detected from carmods.dat + 3D dummy nodes!)
             auto addBodyCat = [&](CategoryId cid, vehmods::ModCat mc, const char* rLbl, const char* eLbl) {
                 auto parts = vehmods::GetPartsForVehicle(veh, mc);
                 if (!parts.empty()) {
@@ -323,11 +303,10 @@ void RebuildMainEntries(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
             addBodyCat(CategoryId::Hood,        vehmods::ModCat::Hood,        "Капот",           "Hood");
             addBodyCat(CategoryId::AuxLights,   vehmods::ModCat::Lights,      "Доп. фары",       "Fog Lights");
 
-            // Hydraulics, Nitro, Stereo on EVERY 4-wheel car!
             bool hasHyd = vehmods::VehicleHasUpgradeId(veh, 1087);
             g_mainEntries.push_back({CategoryId::Hydraulics, -1,
                 ui::Loc("Гидравлика", "Hydraulics"),
-                hasHyd ? ui::Loc("Уст.", "Owned") : FormatPrice(1500)});
+                hasHyd ? ui::Loc("Уст.", "Owned") : FormatWorkshopPrice(1500)});
 
             int16_t curN = vehmods::FindInstalledUpgradeInCat(veh, vehmods::ModCat::Nitro);
             g_mainEntries.push_back({CategoryId::Nitro, -1,
@@ -337,18 +316,17 @@ void RebuildMainEntries(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
             bool hasStereo = vehmods::VehicleHasUpgradeId(veh, 1086);
             g_mainEntries.push_back({CategoryId::Stereo, -1,
                 ui::Loc("Аудиосистема", "Car Stereo"),
-                hasStereo ? ui::Loc("Уст.", "Owned") : FormatPrice(500)});
+                hasStereo ? ui::Loc("Уст.", "Owned") : FormatWorkshopPrice(500)});
         }
     }
 
     auto lvlBadge = [](int lv, int maxLv) -> std::string {
-        if (lv <= 0) return ui::Loc("Сток", "Stock");
+        if (lv <= 0) return ui::Loc("Стандарт", "Standard");
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%d/%d", lv, maxLv);
         return std::string(buf);
     };
 
-    // GTA 5 Performance & Utility Tuning (ALL vehicles, appropriately filtered!)
     g_mainEntries.push_back({CategoryId::Engine, -1,
         ui::Loc("Двигатель", "Engine"), lvlBadge(cur.engineLevel, 4)});
 
@@ -376,28 +354,28 @@ void RebuildMainEntries(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
         cur.turbo ? ui::Loc("Уст.", "On") : ui::Loc("Нет", "None")});
 
     g_mainEntries.push_back({CategoryId::Armor, -1,
-        ui::Loc("Кузов (Броня)", "Armor"),
-        cur.armorLevel > 0 ? (std::to_string(cur.armorLevel * 20) + "%") : ui::Loc("0%", "0%")});
+        ui::Loc("Броня", "Armor"),
+        cur.armorLevel > 0 ? (std::to_string(cur.armorLevel * 20) + "%") : "0%"});
 
     g_mainEntries.push_back({CategoryId::Plate, -1,
         ui::Loc("Номерной знак", "License Plate"),
-        cur.plateText[0] ? std::string(cur.plateText) : ui::Loc("Сток", "Stock")});
+        cur.plateText[0] ? std::string(cur.plateText) : ui::Loc("Стандарт", "Standard")});
 
     g_mainEntries.push_back({CategoryId::Horn, -1,
         ui::Loc("Клаксон", "Horn"),
-        cur.hornType > 0 ? (ui::Loc("Тип ", "Type ") + std::to_string(cur.hornType)) : ui::Loc("Сток", "Stock")});
+        cur.hornType > 0 ? (ui::Loc("Тип ", "Type ") + std::to_string(cur.hornType)) : ui::Loc("Стандарт", "Standard")});
 
-    // Personal Vehicle Registration
+    const int maxVeh = std::min(mod::Config().maxVehicles, mod::MAX_OWNED_VEHICLES);
     int ownedSlot = garage::FindSlotForLiveVehicle(veh);
     if (ownedSlot >= 0) {
         char buf[32];
-        std::snprintf(buf, sizeof(buf), "#%d/10", ownedSlot + 1);
+        std::snprintf(buf, sizeof(buf), "#%d/%d", ownedSlot + 1, maxVeh);
         g_mainEntries.push_back({CategoryId::Registration, -1,
             ui::Loc("Личный транспорт", "Personal Vehicle"), std::string(buf)});
     } else {
         g_mainEntries.push_back({CategoryId::Registration, -1,
             ui::Loc("Зарегистрировать авто", "Register Vehicle"),
-            FormatPrice(mod::Config().priceRegister)});
+            FormatWorkshopPrice(mod::Config().priceRegister)});
     }
 
     if (g_mainCursor >= static_cast<int>(g_mainEntries.size())) {
@@ -409,10 +387,10 @@ std::string GetSubmenuTitle(CategoryId cat) {
     switch (cat) {
         case CategoryId::MaintenanceHub: return ui::Loc("ТО И ОБСЛУЖИВАНИЕ", "REPAIR & SERVICE");
         case CategoryId::Maintenance:    return ui::Loc("ОБСЛУЖИВАНИЕ УЗЛОВ", "MECHANICAL SERVICE");
-        case CategoryId::Paintjob:       return ui::Loc("ВИНИЛЫ (ПОКРАСКА)", "PAINTJOBS");
+        case CategoryId::Paintjob:       return ui::Loc("ВИНИЛЫ", "PAINTJOBS");
         case CategoryId::PaintPrimary:   return ui::Loc("ОСНОВНОЙ ЦВЕТ", "PRIMARY COLOR");
         case CategoryId::PaintSecondary: return ui::Loc("ДОП. ЦВЕТ", "SECONDARY COLOR");
-        case CategoryId::Wheels:         return ui::Loc("ДИСКИ (КОЛЁСА)", "WHEELS");
+        case CategoryId::Wheels:         return ui::Loc("ДИСКИ", "WHEELS");
         case CategoryId::Spoilers:       return ui::Loc("СПОЙЛЕРЫ", "SPOILERS");
         case CategoryId::FrontBumper:    return ui::Loc("ПЕРЕДНИЙ БАМПЕР", "FRONT BUMPER");
         case CategoryId::RearBumper:     return ui::Loc("ЗАДНИЙ БАМПЕР", "REAR BUMPER");
@@ -430,11 +408,11 @@ std::string GetSubmenuTitle(CategoryId cat) {
         case CategoryId::Brakes:         return ui::Loc("ТОРМОЗА", "BRAKES");
         case CategoryId::Tires:          return ui::Loc("ШИНЫ", "TIRES");
         case CategoryId::Turbo:          return ui::Loc("ТУРБОНАДДУВ", "TURBO");
-        case CategoryId::Armor:          return ui::Loc("КУЗОВ И БРОНЯ", "ARMOR");
+        case CategoryId::Armor:          return ui::Loc("БРОНЯ", "ARMOR");
         case CategoryId::Plate:          return ui::Loc("НОМЕРНОЙ ЗНАК", "LICENSE PLATE");
         case CategoryId::Horn:           return ui::Loc("КЛАКСОН", "HORN");
-        case CategoryId::Registration:   return ui::Loc("РЕГИСТРАЦИЯ АВТО", "REGISTRATION");
-        default:                         return ui::Loc("ТЮНИНГ", "UPGRADES");
+        case CategoryId::Registration:   return ui::Loc("РЕГИСТРАЦИЯ", "REGISTRATION");
+        default:                         return ui::Loc("МАСТЕРСКАЯ", "UPGRADES");
     }
 }
 
@@ -447,15 +425,19 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
     vehmods::ModCat vmc{};
     if (IsVisualModCategory(cat, vmc)) {
         int16_t installedId = vehmods::FindInstalledUpgradeInCat(veh, vmc);
-        // Stock / Remove option
-        g_subOptions.push_back({ui::Loc("Сток (Убрать)", "Stock (Remove)"), 0, (installedId < 1000), -1});
+        g_subOptions.push_back({ui::Loc("Убрать", "Remove"), 0, (installedId < 1000), -1, 1});
         auto parts = vehmods::GetPartsForVehicle(veh, vmc);
         for (int16_t mid : parts) {
+            int reqR = 1;
+            if (vmc == vehmods::ModCat::Nitro)            reqR = prog_rules::NitroUpgradeRank(mid);
+            else if (vmc == vehmods::ModCat::Hydraulics)  reqR = prog_rules::HydraulicsRank();
+            else if (vmc != vehmods::ModCat::Wheels && vmc != vehmods::ModCat::Stereo) reqR = prog_rules::BodyKitRank();
             g_subOptions.push_back({
                 vehmods::GetPartDisplayName(mid),
                 vehmods::GetPartPrice(mid),
                 (installedId == mid),
-                mid
+                mid,
+                reqR
             });
         }
         g_subCursor = 0;
@@ -467,20 +449,17 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
 
     switch (cat) {
         case CategoryId::MaintenanceHub: {
-            // 1. Body/Panels/Lights/Tires/HP repair: available whenever ANY visual or health damage exists;
-            //    shows "Intact" (free/unavailable) when the car is completely undamaged!
             bool needsRepair = sa::IsVehicleVisuallyDamaged(veh);
             g_subOptions.push_back({
-                ui::Loc("Починить авто (Кузов и Детали)", "Repair Vehicle (Body & Parts)"),
+                ui::Loc("Починить кузов", "Repair Body"),
                 needsRepair ? cfg.priceRepair : 0, !needsRepair, 1
             });
-            // 2. ETS 2-style Mechanical Wear & Overhaul submenu
             if (cfg.enableWearSystem) {
                 auto w = tuning::GetLiveWear(veh);
                 int avgW = static_cast<int>(std::round(w.Average()));
                 char wlbl[96];
-                std::snprintf(wlbl, sizeof(wlbl), "%s (%d%%)",
-                              ui::Loc("Обслуживание авто (Износ)", "Mechanical Service (Wear)").c_str(), avgW);
+                std::snprintf(wlbl, sizeof(wlbl), "%s %d%%",
+                              ui::Loc("Обслуживание узлов", "Mechanical Service").c_str(), avgW);
                 g_subOptions.push_back({wlbl, 0, false, 2});
             }
             g_subCursor = 0;
@@ -499,17 +478,17 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
 
             auto makePartLabel = [](const char* rus, const char* eng, float wp) {
                 char buf[96];
-                std::snprintf(buf, sizeof(buf), "%s (%d%%)", ui::Loc(rus, eng).c_str(), static_cast<int>(std::round(wp)));
+                std::snprintf(buf, sizeof(buf), "%s %d%%", ui::Loc(rus, eng).c_str(), static_cast<int>(std::round(wp)));
                 return std::string(buf);
             };
 
-            g_subOptions.push_back({makePartLabel("Полное ТО (Всё)", "Full Overhaul (All)", w.Average()), cAll, cAll == 0, 100});
-            g_subOptions.push_back({makePartLabel("Двигатель",       "Engine",       w.engine),       cEng, cEng == 0, 0});
-            g_subOptions.push_back({makePartLabel("Трансмиссия",     "Transmission", w.transmission), cTr,  cTr  == 0, 1});
-            g_subOptions.push_back({makePartLabel("Тормоза",         "Brakes",       w.brakes),       cBrk, cBrk == 0, 2});
-            g_subOptions.push_back({makePartLabel("Шины",            "Tires",        w.tires),        cTir, cTir == 0, 3});
-            g_subOptions.push_back({makePartLabel("Подвеска",        "Suspension",   w.suspension),   cSus, cSus == 0, 4});
-            g_subOptions.push_back({makePartLabel("Кузов и Шасси",   "Chassis/Body", w.chassis),      cCha, cCha == 0, 5});
+            g_subOptions.push_back({makePartLabel("Полное обслуживание", "Full Overhaul", w.Average()), cAll, cAll == 0, 100});
+            g_subOptions.push_back({makePartLabel("Двигатель",           "Engine",        w.engine),       cEng, cEng == 0, 0});
+            g_subOptions.push_back({makePartLabel("Трансмиссия",         "Transmission",  w.transmission), cTr,  cTr  == 0, 1});
+            g_subOptions.push_back({makePartLabel("Тормоза",             "Brakes",        w.brakes),       cBrk, cBrk == 0, 2});
+            g_subOptions.push_back({makePartLabel("Шины",                "Tires",         w.tires),        cTir, cTir == 0, 3});
+            g_subOptions.push_back({makePartLabel("Подвеска",            "Suspension",    w.suspension),   cSus, cSus == 0, 4});
+            g_subOptions.push_back({makePartLabel("Кузов и шасси",       "Chassis",       w.chassis),      cCha, cCha == 0, 5});
             g_subCursor = 0;
             return;
         }
@@ -521,11 +500,11 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
                 sa::ScriptCmd(0x0988).Int(h).Out(curPj).Run();
             }
             if (curPj > 2) curPj = -1;
-            g_subOptions.push_back({ui::Loc("Без винила", "No Paintjob"), 0, curPj < 0, 3});
+            g_subOptions.push_back({ui::Loc("Без винила", "No Paintjob"), 0, curPj < 0, 3, 1});
             for (int i = 0; i < numPj && i < 3; ++i) {
                 char nm[48];
                 std::snprintf(nm, sizeof(nm), "%s #%d", ui::Loc("Винил", "Paintjob").c_str(), i + 1);
-                g_subOptions.push_back({nm, 500, curPj == i, i});
+                g_subOptions.push_back({nm, 500, curPj == i, i, prog_rules::PaintjobRank()});
             }
             break;
         }
@@ -535,17 +514,17 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
             for (int c = 0; c <= 126; ++c) {
                 char nm[32];
                 std::snprintf(nm, sizeof(nm), "%s #%d", ui::Loc("Цвет", "Color").c_str(), c);
-                g_subOptions.push_back({nm, cfg.pricePaint, (curCol == c), c});
+                g_subOptions.push_back({nm, cfg.pricePaint, (curCol == c), c, 1});
             }
             g_subCursor = std::clamp<int>(curCol, 0, 126);
             return;
         }
         case CategoryId::Engine:
-            g_subOptions.push_back({ui::Loc("Стоковый двигатель", "Stock Engine"), 0, cur.engineLevel == 0, 0});
-            g_subOptions.push_back({ui::Loc("Улучшение EMS Ур. 1", "EMS Upgrade Lv. 1"), cfg.priceEngine[0], cur.engineLevel == 1, 1});
-            g_subOptions.push_back({ui::Loc("Улучшение EMS Ур. 2", "EMS Upgrade Lv. 2"), cfg.priceEngine[1], cur.engineLevel == 2, 2});
-            g_subOptions.push_back({ui::Loc("Улучшение EMS Ур. 3", "EMS Upgrade Lv. 3"), cfg.priceEngine[2], cur.engineLevel == 3, 3});
-            g_subOptions.push_back({ui::Loc("Улучшение EMS Ур. 4", "EMS Upgrade Lv. 4"), cfg.priceEngine[3], cur.engineLevel == 4, 4});
+            g_subOptions.push_back({ui::Loc("Стандартный двигатель", "Standard Engine"), 0, cur.engineLevel == 0, 0, prog_rules::EngineUpgradeRank(0)});
+            g_subOptions.push_back({ui::Loc("Двигатель Ур. 1", "Engine Lv. 1"), cfg.priceEngine[0], cur.engineLevel == 1, 1, prog_rules::EngineUpgradeRank(1)});
+            g_subOptions.push_back({ui::Loc("Двигатель Ур. 2", "Engine Lv. 2"), cfg.priceEngine[1], cur.engineLevel == 2, 2, prog_rules::EngineUpgradeRank(2)});
+            g_subOptions.push_back({ui::Loc("Двигатель Ур. 3", "Engine Lv. 3"), cfg.priceEngine[2], cur.engineLevel == 3, 3, prog_rules::EngineUpgradeRank(3)});
+            g_subOptions.push_back({ui::Loc("Двигатель Ур. 4", "Engine Lv. 4"), cfg.priceEngine[3], cur.engineLevel == 4, 4, prog_rules::EngineUpgradeRank(4)});
             break;
 
         case CategoryId::Transmission: {
@@ -554,87 +533,87 @@ void RebuildSubOptions(CategoryId cat, sa::CVehicle* veh) {
                 tmp.transmissionLevel = tLv;
                 int g = tuning::ComputeStats(veh, tmp, mod::VehicleWear{}).numGears;
                 char buf[96];
-                std::snprintf(buf, sizeof(buf), "%s (%d %s)",
+                std::snprintf(buf, sizeof(buf), "%s %d %s",
                               ui::Loc(rus, eng).c_str(), g, ui::Loc("пер.", "sp").c_str());
                 return std::string(buf);
             };
-            g_subOptions.push_back({gearLabel("Стоковая коробка",       "Stock Transmission",  0), 0,                cur.transmissionLevel == 0, 0});
-            g_subOptions.push_back({gearLabel("Уличная трансмиссия",    "Street Transmission", 1), cfg.priceTrans[0], cur.transmissionLevel == 1, 1});
-            g_subOptions.push_back({gearLabel("Спортивная трансмиссия", "Sport Transmission",  2), cfg.priceTrans[1], cur.transmissionLevel == 2, 2});
-            g_subOptions.push_back({gearLabel("Гоночная трансмиссия",   "Race Transmission",   3), cfg.priceTrans[2], cur.transmissionLevel == 3, 3});
+            g_subOptions.push_back({gearLabel("Стандартная трансмиссия", "Standard Transmission", 0), 0,                cur.transmissionLevel == 0, 0, prog_rules::TransmissionUpgradeRank(0)});
+            g_subOptions.push_back({gearLabel("Уличная трансмиссия",     "Street Transmission",   1), cfg.priceTrans[0], cur.transmissionLevel == 1, 1, prog_rules::TransmissionUpgradeRank(1)});
+            g_subOptions.push_back({gearLabel("Спортивная трансмиссия",  "Sport Transmission",    2), cfg.priceTrans[1], cur.transmissionLevel == 2, 2, prog_rules::TransmissionUpgradeRank(2)});
+            g_subOptions.push_back({gearLabel("Гоночная трансмиссия",    "Race Transmission",     3), cfg.priceTrans[2], cur.transmissionLevel == 3, 3, prog_rules::TransmissionUpgradeRank(3)});
             break;
         }
 
         case CategoryId::Suspension:
-            g_subOptions.push_back({ui::Loc("Стоковая подвеска", "Stock Suspension"), 0, cur.suspensionLevel == 0, 0});
-            g_subOptions.push_back({ui::Loc("Заниженная подвеска", "Lowered Suspension"), cfg.priceSusp[0], cur.suspensionLevel == 1, 1});
-            g_subOptions.push_back({ui::Loc("Уличная подвеска", "Street Suspension"), cfg.priceSusp[1], cur.suspensionLevel == 2, 2});
-            g_subOptions.push_back({ui::Loc("Спортивная подвеска", "Sport Suspension"), cfg.priceSusp[2], cur.suspensionLevel == 3, 3});
-            g_subOptions.push_back({ui::Loc("Гоночная подвеска", "Competition Suspension"), cfg.priceSusp[3], cur.suspensionLevel == 4, 4});
+            g_subOptions.push_back({ui::Loc("Стандартная подвеска", "Standard Suspension"), 0, cur.suspensionLevel == 0, 0, prog_rules::SuspensionUpgradeRank(0)});
+            g_subOptions.push_back({ui::Loc("Заниженная подвеска", "Lowered Suspension"), cfg.priceSusp[0], cur.suspensionLevel == 1, 1, prog_rules::SuspensionUpgradeRank(1)});
+            g_subOptions.push_back({ui::Loc("Уличная подвеска", "Street Suspension"), cfg.priceSusp[1], cur.suspensionLevel == 2, 2, prog_rules::SuspensionUpgradeRank(2)});
+            g_subOptions.push_back({ui::Loc("Спортивная подвеска", "Sport Suspension"), cfg.priceSusp[2], cur.suspensionLevel == 3, 3, prog_rules::SuspensionUpgradeRank(3)});
+            g_subOptions.push_back({ui::Loc("Гоночная подвеска", "Competition Suspension"), cfg.priceSusp[3], cur.suspensionLevel == 4, 4, prog_rules::SuspensionUpgradeRank(4)});
             break;
 
         case CategoryId::Brakes:
-            g_subOptions.push_back({ui::Loc("Стоковые тормоза", "Stock Brakes"), 0, cur.brakesLevel == 0, 0});
-            g_subOptions.push_back({ui::Loc("Уличные тормоза", "Street Brakes"), cfg.priceBrakes[0], cur.brakesLevel == 1, 1});
-            g_subOptions.push_back({ui::Loc("Спортивные тормоза", "Sport Brakes"), cfg.priceBrakes[1], cur.brakesLevel == 2, 2});
-            g_subOptions.push_back({ui::Loc("Гоночные тормоза", "Race Brakes"), cfg.priceBrakes[2], cur.brakesLevel == 3, 3});
+            g_subOptions.push_back({ui::Loc("Стандартные тормоза", "Standard Brakes"), 0, cur.brakesLevel == 0, 0, prog_rules::BrakesUpgradeRank(0)});
+            g_subOptions.push_back({ui::Loc("Уличные тормоза", "Street Brakes"), cfg.priceBrakes[0], cur.brakesLevel == 1, 1, prog_rules::BrakesUpgradeRank(1)});
+            g_subOptions.push_back({ui::Loc("Спортивные тормоза", "Sport Brakes"), cfg.priceBrakes[1], cur.brakesLevel == 2, 2, prog_rules::BrakesUpgradeRank(2)});
+            g_subOptions.push_back({ui::Loc("Гоночные тормоза", "Race Brakes"), cfg.priceBrakes[2], cur.brakesLevel == 3, 3, prog_rules::BrakesUpgradeRank(3)});
             break;
 
         case CategoryId::Tires:
-            g_subOptions.push_back({ui::Loc("Сток (Сцепление)", "Stock Grip"), 0, cur.tiresGripLevel == 0, 0});
-            g_subOptions.push_back({ui::Loc("Уличные шины (+Сцепл.)", "Street Tires (+Grip)"), cfg.priceTiresGrip[0], cur.tiresGripLevel == 1, 1});
-            g_subOptions.push_back({ui::Loc("Спортивные шины (++Сцепл.)", "Sport Tires (++Grip)"), cfg.priceTiresGrip[1], cur.tiresGripLevel == 2, 2});
-            g_subOptions.push_back({ui::Loc("Гоночные слики (Макс.)", "Race Slicks (Max Grip)"), cfg.priceTiresGrip[2], cur.tiresGripLevel == 3, 3});
+            g_subOptions.push_back({ui::Loc("Стандартные шины", "Standard Tires"), 0, cur.tiresGripLevel == 0, 0, prog_rules::TiresGripUpgradeRank(0)});
+            g_subOptions.push_back({ui::Loc("Уличные шины", "Street Tires"), cfg.priceTiresGrip[0], cur.tiresGripLevel == 1, 1, prog_rules::TiresGripUpgradeRank(1)});
+            g_subOptions.push_back({ui::Loc("Спортивные шины", "Sport Tires"), cfg.priceTiresGrip[1], cur.tiresGripLevel == 2, 2, prog_rules::TiresGripUpgradeRank(2)});
+            g_subOptions.push_back({ui::Loc("Гоночные шины", "Race Slicks"), cfg.priceTiresGrip[2], cur.tiresGripLevel == 3, 3, prog_rules::TiresGripUpgradeRank(3)});
             g_subOptions.push_back({ui::Loc("Пуленепробиваемые шины", "Bulletproof Tires"),
-                cur.bulletproofTires ? 0 : cfg.priceBulletproof, cur.bulletproofTires, 100});
+                cur.bulletproofTires ? 0 : cfg.priceBulletproof, cur.bulletproofTires, 100, prog_rules::BulletproofTiresRank()});
             break;
 
         case CategoryId::Turbo:
-            g_subOptions.push_back({ui::Loc("Без турбонаддува", "None"), 0, !cur.turbo, 0});
-            g_subOptions.push_back({ui::Loc("Турбо-тюнинг", "Turbo Tuning"), cfg.priceTurbo, cur.turbo, 1});
+            g_subOptions.push_back({ui::Loc("Без турбонаддува", "None"), 0, !cur.turbo, 0, 1});
+            g_subOptions.push_back({ui::Loc("Турбонаддув", "Turbocharger"), cfg.priceTurbo, cur.turbo, 1, prog_rules::TurboUpgradeRank()});
             break;
 
         case CategoryId::Armor:
-            g_subOptions.push_back({ui::Loc("Без брони (0%)", "No Armor (0%)"), 0, cur.armorLevel == 0, 0});
-            g_subOptions.push_back({ui::Loc("Усиление кузова 20%", "Armor Upgrade 20%"), cfg.priceArmor[0], cur.armorLevel == 1, 1});
-            g_subOptions.push_back({ui::Loc("Усиление кузова 40%", "Armor Upgrade 40%"), cfg.priceArmor[1], cur.armorLevel == 2, 2});
-            g_subOptions.push_back({ui::Loc("Усиление кузова 60%", "Armor Upgrade 60%"), cfg.priceArmor[2], cur.armorLevel == 3, 3});
-            g_subOptions.push_back({ui::Loc("Усиление кузова 80%", "Armor Upgrade 80%"), cfg.priceArmor[3], cur.armorLevel == 4, 4});
-            g_subOptions.push_back({ui::Loc("Усиление кузова 100%", "Armor Upgrade 100%"), cfg.priceArmor[4], cur.armorLevel == 5, 5});
+            g_subOptions.push_back({ui::Loc("Без брони", "No Armor"), 0, cur.armorLevel == 0, 0, prog_rules::VehicleArmorUpgradeRank(0)});
+            g_subOptions.push_back({ui::Loc("Броня 20%", "Armor 20%"), cfg.priceArmor[0], cur.armorLevel == 1, 1, prog_rules::VehicleArmorUpgradeRank(1)});
+            g_subOptions.push_back({ui::Loc("Броня 40%", "Armor 40%"), cfg.priceArmor[1], cur.armorLevel == 2, 2, prog_rules::VehicleArmorUpgradeRank(2)});
+            g_subOptions.push_back({ui::Loc("Броня 60%", "Armor 60%"), cfg.priceArmor[2], cur.armorLevel == 3, 3, prog_rules::VehicleArmorUpgradeRank(3)});
+            g_subOptions.push_back({ui::Loc("Броня 80%", "Armor 80%"), cfg.priceArmor[3], cur.armorLevel == 4, 4, prog_rules::VehicleArmorUpgradeRank(4)});
+            g_subOptions.push_back({ui::Loc("Броня 100%", "Armor 100%"), cfg.priceArmor[4], cur.armorLevel == 5, 5, prog_rules::VehicleArmorUpgradeRank(5)});
             break;
 
         case CategoryId::Plate:
-            // Interactive custom text entry RIGHT AT THE TOP!
-            g_subOptions.push_back({ui::Loc(">> Ввести свой номер...", ">> Enter Custom Plate..."), cfg.pricePlate, false, -100});
+            g_subOptions.push_back({ui::Loc("Ввести свой номер", "Enter Custom Plate"), cfg.pricePlate, false, -100, prog_rules::CustomPlateRank()});
             for (int i = 0; i < 7; ++i) {
                 bool eq = (std::strcmp(cur.plateText, kPlatePresets[i]) == 0);
-                g_subOptions.push_back({std::string(kPlatePresets[i]), cfg.pricePlate, eq, i});
+                g_subOptions.push_back({std::string(kPlatePresets[i]), cfg.pricePlate, eq, i, prog_rules::CustomPlateRank()});
             }
             break;
 
         case CategoryId::Horn:
-            g_subOptions.push_back({ui::Loc("Стандартный клаксон", "Stock Horn"), 0, cur.hornType == 0, 0});
-            g_subOptions.push_back({ui::Loc("Воздушный (Грузовой)", "Truck Airhorn"), cfg.priceHorn, cur.hornType == 1, 1});
-            g_subOptions.push_back({ui::Loc("Спортивный сигнал", "Sport Dual-Tone"), cfg.priceHorn, cur.hornType == 2, 2});
-            g_subOptions.push_back({ui::Loc("Классический ретро", "Classic Horn"), cfg.priceHorn, cur.hornType == 3, 3});
-            g_subOptions.push_back({ui::Loc("Музыкальный сигнал", "Musical Horn"), cfg.priceHorn, cur.hornType == 4, 4});
+            g_subOptions.push_back({ui::Loc("Стандартный клаксон", "Standard Horn"), 0, cur.hornType == 0, 0, 1});
+            g_subOptions.push_back({ui::Loc("Грузовой сигнал", "Truck Airhorn"), cfg.priceHorn, cur.hornType == 1, 1, prog_rules::CustomHornRank()});
+            g_subOptions.push_back({ui::Loc("Спортивный сигнал", "Sport Dual-Tone"), cfg.priceHorn, cur.hornType == 2, 2, prog_rules::CustomHornRank()});
+            g_subOptions.push_back({ui::Loc("Классический сигнал", "Classic Horn"), cfg.priceHorn, cur.hornType == 3, 3, prog_rules::CustomHornRank()});
+            g_subOptions.push_back({ui::Loc("Музыкальный сигнал", "Musical Horn"), cfg.priceHorn, cur.hornType == 4, 4, prog_rules::CustomHornRank()});
             break;
 
         case CategoryId::Registration: {
+            const int maxVeh = std::min(cfg.maxVehicles, mod::MAX_OWNED_VEHICLES);
             int ownedSlot = garage::FindSlotForLiveVehicle(veh);
             if (ownedSlot < 0) {
                 int freeSlot = garage::FindFreeSlot();
                 if (freeSlot >= 0) {
                     char buf[64];
-                    std::snprintf(buf, sizeof(buf), "%s (#%d/10)",
-                        ui::Loc("Зарегистрировать в слот", "Register in Slot").c_str(), freeSlot + 1);
+                    std::snprintf(buf, sizeof(buf), "%s #%d/%d",
+                        ui::Loc("Зарегистрировать, место", "Register in Slot").c_str(), freeSlot + 1, maxVeh);
                     g_subOptions.push_back({buf, cfg.priceRegister, false, 1});
                 } else {
-                    g_subOptions.push_back({ui::Loc("Гараж полон (10/10)", "Garage Full (10/10)"), 0, false, 0});
+                    g_subOptions.push_back({ui::Loc("Гараж полон", "Garage Full"), 0, false, 0});
                 }
             } else {
-                g_subOptions.push_back({ui::Loc("Обновить конфиг в гараже", "Save Latest Tuning"), 0, true, 2});
-                g_subOptions.push_back({ui::Loc("Снять с учёта (Удалить)", "Unregister Vehicle"), 0, false, 3});
+                g_subOptions.push_back({ui::Loc("Сохранить изменения", "Save Latest Changes"), 0, true, 2});
+                g_subOptions.push_back({ui::Loc("Снять с учёта", "Unregister Vehicle"), 0, false, 3});
             }
             break;
         }
@@ -922,6 +901,12 @@ void PurchaseSubOption(sa::CVehicle* veh) {
     g_standaloneEnteredMs = 0;
     const auto& opt = g_subOptions[g_subCursor];
 
+    if (!opt.installed && !modbus::IsRankUnlocked(opt.reqRank)) {
+        sa::PlayFrontendSound(sa::SFX_ERROR);
+        ui::ShowRankLockedHelp(opt.reqRank);
+        return;
+    }
+
     // Special interactive plate typing entry
     if (g_activeSubCat == CategoryId::Plate && opt.value == -100) {
         g_plateInputBuf = g_savedTuningBeforeSub.plateText;
@@ -935,8 +920,8 @@ void PurchaseSubOption(sa::CVehicle* veh) {
         if (opt.value == 1) {
             if (opt.installed || !sa::IsVehicleVisuallyDamaged(veh)) {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
-                ui::ShowHelp("Машина полностью целая — ремонт не требуется.",
-                             "Vehicle is already intact — no repair needed.");
+                ui::ShowHelp("Транспорт не повреждён, ремонт не требуется.",
+                             "Vehicle is intact, no repair needed.");
                 return;
             }
             int cost = opt.price;
@@ -971,11 +956,11 @@ void PurchaseSubOption(sa::CVehicle* veh) {
         return;
     }
 
-    // Special ETS 2 Maintenance & Part Overhaul purchase!
+    // Special ETS 2 Maintenance & Part Overhaul purchase
     if (g_activeSubCat == CategoryId::Maintenance) {
         if (opt.installed || opt.price <= 0) {
             sa::PlayFrontendSound(sa::SFX_ERROR);
-            ui::ShowHelp("Узел уже в идеальном состоянии (0% износа).", "Part is already in mint condition (0% wear).");
+            ui::ShowHelp("Узел в отличном состоянии.", "Part is already in mint condition.");
             return;
         }
         if (sa::GetPlayerMoney() < opt.price) {
@@ -1028,14 +1013,19 @@ void PurchaseSubOption(sa::CVehicle* veh) {
             if (slot >= 0) {
                 sa::AddPlayerMoney(-opt.price);
                 sa::PlayFrontendSound(sa::SFX_BUY);
+                auto* bus = modbus::GetBus();
+                int keyVk = (bus && bus->phoneInstalled) ? modbus::GetPhoneKey() : mod::Config().callMenuKey;
+                std::string keyLbl = common::GetVirtualKeyLabel(keyVk);
                 char msgRus[160], msgEng[160];
-                std::snprintf(msgRus, sizeof(msgRus), "~g~Транспорт зарегистрирован!~w~ Слот #%d. Вызов по ~y~F6~w~.", slot + 1);
-                std::snprintf(msgEng, sizeof(msgEng), "~g~Vehicle registered!~w~ Slot #%d. Call via ~y~F6~w~.", slot + 1);
+                std::snprintf(msgRus, sizeof(msgRus), "~g~Транспорт зарегистрирован.~w~ Место #%d. Вызов по ~y~%s~w~.",
+                              slot + 1, keyLbl.c_str());
+                std::snprintf(msgEng, sizeof(msgEng), "~g~Vehicle registered.~w~ Slot #%d. Call via ~y~%s~w~.",
+                              slot + 1, keyLbl.c_str());
                 ui::ShowHelp(msgRus, msgEng);
                 g_inSubmenu = false;
             } else {
                 sa::PlayFrontendSound(sa::SFX_ERROR);
-                ui::ShowHelp("~r~Гараж заполнен (макс. 10 авто)!", "~r~Garage is full (max 10 vehicles)!");
+                ui::ShowHelp("~r~Личный гараж заполнен.", "~r~Personal garage is full.");
             }
             return;
         }
@@ -1045,7 +1035,7 @@ void PurchaseSubOption(sa::CVehicle* veh) {
                 garage::SnapshotVehicleToSlot(veh, slot);
                 garage::SaveNow();
                 sa::PlayFrontendSound(sa::SFX_BUY);
-                ui::ShowHelp("~g~Конфигурация личного авто сохранена!", "~g~Personal vehicle config saved!");
+                ui::ShowHelp("~g~Изменения сохранены в гараже.", "~g~Vehicle changes saved to garage.");
             }
             g_inSubmenu = false;
             return;
@@ -1168,12 +1158,15 @@ void PurchaseSubOption(sa::CVehicle* veh) {
     RebuildSubOptions(g_activeSubCat, veh);
 }
 
-// Handle direct keyboard typing for Custom License Plate (A-Z, 0-9, Space, '-', Backspace, Enter, Esc)
+// Handle direct keyboard typing for Custom License Plate (A-Z, 0-9, Space, '-', Backspace, Enter, RMB cancel)
 void ProcessPlateTypingInput(sa::CVehicle* veh) {
+    if (!integrations::sacoop::IsGameWindowFocused() || integrations::sacoop::IsOverlayActive()) return;
     const auto& k = ui::Keys();
 
-    if (k.JustPressed(VK_ESCAPE)) {
+    if (k.JustPressed(VK_RBUTTON)) {
         g_typingPlate = false;
+        ui::LockMenuInputBriefly(160);
+        ui::TriggerPostCloseShield(160);
         sa::PlayFrontendSound(sa::SFX_BACK);
         return;
     }
@@ -1250,15 +1243,12 @@ void EnterStandaloneWorkshop(int shopIdx, sa::CVehicle* veh) {
     g_typingPlate         = false;
     g_mainCursor          = 0;
 
-    sa::ScriptCmd(0x03E6).Run();                    // CLEAR_HELP (kill vanilla "cannot modify" text immediately!)
+    sa::ScriptCmd(0x03E6).Run();                    // CLEAR_HELP
     sa::ScriptCmd(0x0361).Str8(shop.name).Run();    // CLOSE_GARAGE
-    g_doorOpened[shopIdx] = false;
     sa::ScriptCmd(0x01B4).Int(0).Int(0).Run();      // SET_PLAYER_CONTROL false
     sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run(); // SET_CAR_FORWARD_SPEED 0
 
     // Match Rockstar's exact carmod1.scm placement: REQUEST_COLLISION -> LOAD_SCENE -> SET_CAR_COORDINATES(shop.intZ) -> NEVER FREEZE!
-    // Keeping FREEZE_CAR_POSITION = 0 lets GTA SA's natural suspension springs hold the car cleanly on its 4 wheels
-    // at exact street ride height (fixes wheels clipping through fenders with Carpack / Izzy's Lively Vehicle Physics!).
     sa::ScriptCmd(0x04E4).Float(shop.intX).Float(shop.intY).Run(); // REQUEST_COLLISION
     sa::ScriptCmd(0x04BB).Int(shop.interiorId).Run();              // SET_AREA_VISIBLE
     sa::ScriptCmd(0x0860).Int(pedH).Int(shop.interiorId).Run();    // SET_CHAR_AREA_VISIBLE
@@ -1266,14 +1256,11 @@ void EnterStandaloneWorkshop(int shopIdx, sa::CVehicle* veh) {
     sa::ScriptCmd(0x03CB).Float(shop.intX).Float(shop.intY).Float(shop.intZ).Run(); // LOAD_SCENE
 
     veh->MoveSpeed() = {0.0f, 0.0f, 0.0f};
-    sa::ScriptCmd(0x0519).Int(h).Int(0).Run(); // NEVER freeze car position inside mod shop (0 hits in Rockstar carmod1.scm!)
+    sa::ScriptCmd(0x0519).Int(h).Int(0).Run();
     sa::ScriptCmd(0x00AB).Int(h).Float(shop.intX).Float(shop.intY).Float(shop.intZ).Run();
     sa::ScriptCmd(0x0175).Int(h).Float(shop.intHeading).Run();
     sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run();
     sa::ScriptCmd(0x016A).Int(260).Int(1).Run();    // Smooth fade-in
-
-    g_workshopFrozen        = false;
-    g_workshopSettleUntilMs = 0;
 
     // Assign realistic 25%-75% wear to any newly-picked street vehicle entering the workshop!
     tuning::EnsureStreetVehicleWear(veh);
@@ -1324,10 +1311,9 @@ void ExitStandaloneWorkshop() {
             sa::ScriptCmd(0x0175).Int(h).Float(shop.exitHeading).Run();
             sa::ScriptCmd(0x04BA).Int(h).Float(0.0f).Run();
             sa::ScriptCmd(0x0519).Int(h).Int(0).Run(); // FREEZE_CAR_POSITION false
-            sa::ScriptCmd(0x020A).Int(h).Int(1).Run(); // LOCK_CAR_DOORS unlocked!
-            sa::ScriptCmd(0x0361).Str8(shop.name).Run(); // Keep garage door closed until player drives away!
-            g_doorBlockedShopIdx  = shopIdx;
-            g_doorOpened[shopIdx] = false;
+            sa::ScriptCmd(0x020A).Int(h).Int(1).Run(); // LOCK_CAR_DOORS unlocked
+            sa::ScriptCmd(0x0361).Str8(shop.name).Run(); // Keep garage door closed until player drives away
+            g_doorBlockedShopIdx = shopIdx;
         } else if (h > 0) {
             sa::ScriptCmd(0x0519).Int(h).Int(0).Run();
             sa::ScriptCmd(0x020A).Int(h).Int(1).Run();
@@ -1355,23 +1341,18 @@ void ExitStandaloneWorkshop() {
 
 void ProcessMenuInput(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
     if (g_typingPlate) {
-        sa::ClearPadListInputs(); // Keep Esc from opening Pause Menu while canceling plate text entry!
+        sa::ClearPadModalInputs(false); // Keep Esc from opening Pause Menu while canceling plate text entry
         ProcessPlateTypingInput(veh);
         return;
     }
 
-    // Unified ListInputController: Wheel/Arrows/WASD = Scroll, F/Enter/LMB = Select, Backspace/Esc/RMB = Back/Exit!
+    // Unified ListInputController: Wheel/Arrows/WASD = Scroll, F/Enter/LMB = Select, Backspace/Esc/RMB = Back/Exit
     auto in = ui::ListInput().Poll(true);
 
     if (g_inSubmenu) {
         int n = static_cast<int>(g_subOptions.size());
         if (n > 0) {
-            if (in.up) {
-                g_subCursor = (g_subCursor - 1 + n) % n;
-                sa::PlayFrontendSound(sa::SFX_SCROLL);
-                ApplySubPreview(veh);
-            } else if (in.down) {
-                g_subCursor = (g_subCursor + 1) % n;
+            if (ui::ListInput().ApplyToCursor(g_subCursor, n, in)) {
                 sa::PlayFrontendSound(sa::SFX_SCROLL);
                 ApplySubPreview(veh);
             } else if (in.accept) {
@@ -1398,11 +1379,7 @@ void ProcessMenuInput(sa::tMenuPanel* vanillaPanel, sa::CVehicle* veh) {
     int n = static_cast<int>(g_mainEntries.size());
     if (n <= 0) return;
 
-    if (in.up) {
-        g_mainCursor = (g_mainCursor - 1 + n) % n;
-        sa::PlayFrontendSound(sa::SFX_SCROLL);
-    } else if (in.down) {
-        g_mainCursor = (g_mainCursor + 1) % n;
+    if (ui::ListInput().ApplyToCursor(g_mainCursor, n, in)) {
         sa::PlayFrontendSound(sa::SFX_SCROLL);
     } else if (in.accept) {
         const auto& e = g_mainEntries[g_mainCursor];
@@ -1427,10 +1404,9 @@ void __cdecl HookedMenuSystemProcess(int8_t panelId) {
     if (g_origMenuProcess) g_origMenuProcess(panelId);
 }
 
-// Hooks BOTH CGarage::Update calls to CGarage::CanThisGarageModifyCar (0x0044C62E & 0x0044C6CB)!
-// Lets GTA SA's own CGarage::Update open mod shop doors ONCE & butter-smoothly for ANY land vehicle
-// (zero stuttering/re-closing!) and keeps a just-exited shop door closed until >22m away!
-bool __fastcall HookedCanGarageModifyCar(uint8_t* garage, void*, sa::CVehicle* veh) {
+// Hooks BOTH CGarage::Update calls to CGarage::CanThisGarageModifyCar (0x0044C62E & 0x0044C6CB)
+// chaining each site's original function pointer independently (SilentPatch safe!).
+bool HandleCanGarageModifyCar(FnCanGarageMod origFn, uint8_t* garage, sa::CVehicle* veh) {
     if (!garage || !sa::IsVehicleValid(veh)) return false;
     float gx = (*reinterpret_cast<const float*>(garage + 0x28) + *reinterpret_cast<const float*>(garage + 0x2C)) * 0.5f;
     float gy = (*reinterpret_cast<const float*>(garage + 0x30) + *reinterpret_cast<const float*>(garage + 0x34)) * 0.5f;
@@ -1440,12 +1416,20 @@ bool __fastcall HookedCanGarageModifyCar(uint8_t* garage, void*, sa::CVehicle* v
         if (dx * dx + dy * dy < 400.0f) {
             if (i == g_doorBlockedShopIdx) return false;
             if (sa::IsOnMission()) {
-                return g_origCanModOpen ? g_origCanModOpen(garage, veh) : false;
+                return origFn ? origFn(garage, veh) : false;
             }
             return veh->IsLandVehicle();
         }
     }
-    return g_origCanModOpen ? g_origCanModOpen(garage, veh) : false;
+    return origFn ? origFn(garage, veh) : false;
+}
+
+bool __fastcall HookedCanGarageModifyCarClose(uint8_t* garage, void*, sa::CVehicle* veh) {
+    return HandleCanGarageModifyCar(g_origCanModClose, garage, veh);
+}
+
+bool __fastcall HookedCanGarageModifyCarOpen(uint8_t* garage, void*, sa::CVehicle* veh) {
+    return HandleCanGarageModifyCar(g_origCanModOpen, garage, veh);
 }
 
 } // namespace
@@ -1455,9 +1439,9 @@ void InstallHooks() {
     g_origMenuProcess = reinterpret_cast<FnMenuProcess>(orig);
 
     g_origCanModClose = reinterpret_cast<FnCanGarageMod>(
-        mem::HookCall(0x0044C62E, reinterpret_cast<uintptr_t>(&HookedCanGarageModifyCar)));
+        mem::HookCall(0x0044C62E, reinterpret_cast<uintptr_t>(&HookedCanGarageModifyCarClose)));
     g_origCanModOpen = reinterpret_cast<FnCanGarageMod>(
-        mem::HookCall(0x0044C6CB, reinterpret_cast<uintptr_t>(&HookedCanGarageModifyCar)));
+        mem::HookCall(0x0044C6CB, reinterpret_cast<uintptr_t>(&HookedCanGarageModifyCarOpen)));
 
     modlog::Info("[Workshop] Hooked CMenuSystem::Process (0x0058FCDA) + CGarage::CanModifyCar (0x0044C62E, 0x0044C6CB).");
 }
@@ -1502,20 +1486,20 @@ void PreScriptsTick() {
         if (g_forwardVanillaAccept) {
             topPanel->m_nSelectedRow = static_cast<int8_t>(g_forwardVanillaRow);
             topPanel->m_nAcceptedRow = static_cast<int8_t>(g_forwardVanillaRow);
-            uint8_t* pad = GetPad0();
+            uint8_t* pad = sa::GetPad0();
             *reinterpret_cast<int16_t*>(pad + 0x20) = 255;
             *reinterpret_cast<int16_t*>(pad + 0x50) = 0;
             g_forwardVanillaAccept = false;
             g_vanillaHookMode = false;
         } else if (g_forwardVanillaExit) {
-            uint8_t* pad = GetPad0();
-            ClearPadMenuInputs();
+            uint8_t* pad = sa::GetPad0();
+            sa::ClearPadMenuInputs();
             *reinterpret_cast<int16_t*>(pad + 0x1E) = 255;
             *reinterpret_cast<int16_t*>(pad + 0x4E) = 0;
         } else {
             topPanel->m_nSelectedRow = 0;
             topPanel->m_nAcceptedRow = static_cast<int8_t>(-99);
-            ClearPadMenuInputs();
+            sa::ClearPadMenuInputs();
         }
         return;
     }
@@ -1530,7 +1514,7 @@ void PreScriptsTick() {
         }
         RebuildMainEntries(nullptr, g_workshopVeh);
         ProcessMenuInput(nullptr, g_workshopVeh);
-        ClearPadMenuInputs();
+        sa::ClearPadMenuInputs();
         return;
     }
 }
@@ -1651,7 +1635,8 @@ void PostScriptsTick() {
         return;
     }
 
-    if (g_waitLeaveBox || sa::GetTimeMs() < g_standaloneCooldownUntilMs || sa::IsOnMission()) {
+    if (g_waitLeaveBox || sa::GetTimeMs() < g_standaloneCooldownUntilMs || sa::IsOnMission() ||
+        modbus::IsAnyModalMenuOpen("garage")) {
         return;
     }
 
@@ -1693,83 +1678,79 @@ void Render2D() {
             note = wb;
         }
         const auto* prisPtr = (mod::Config().enableWearSystem && curWear.HasAnyWear()) ? &pristineStats : nullptr;
-        ui::DrawVehicleStatsPanel(vName, curStats, prevStats, false, note, prisPtr);
+        garage_ui::RenderVehicleStatsCard(vName, curStats, prevStats, false, note, prisPtr);
     }
 
     if (!g_vanillaHookMode && !g_standaloneMode) return;
 
-    ui::MenuDrawSpec spec;
-    spec.x640 = 24.0f;
-    spec.y448 = 72.0f;
-    spec.w640 = 192.0f;
-    spec.maxVisibleRows = 11;
+    ui::ListMenu menu;
+    menu.SetPosition(24.0f, 72.0f, 192.0f).SetMaxVisible(11);
 
     if (!g_inSubmenu) {
-        spec.titleGame = (g_standaloneMode && g_standaloneShopIdx >= 0)
-            ? ui::Loc(kModShops[g_standaloneShopIdx].labelRus, kModShops[g_standaloneShopIdx].labelEng)
-            : ui::Loc("АВТОМАСТЕРСКАЯ", "MOD SHOP");
-        spec.colLeftGame  = ui::Loc("КАТЕГОРИЯ", "CATEGORY");
-        spec.colRightGame = ui::Loc("СТАТУС", "STATUS");
-        spec.footerGame   = g_standaloneMode
-            ? ui::StandardFooter("Выбр.", "Sel", "Выход", "Exit", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom")
-            : ui::StandardFooter("Выбрать", "Select", "Выход", "Exit");
-        spec.selectedIndex = g_mainCursor;
+        menu.SetTitle((g_standaloneMode && g_standaloneShopIdx >= 0)
+                          ? ui::Loc(kModShops[g_standaloneShopIdx].labelRus, kModShops[g_standaloneShopIdx].labelEng)
+                          : ui::Loc("АВТОМАСТЕРСКАЯ", "MOD SHOP"))
+            .SetColumns(ui::Loc("КАТЕГОРИЯ", "CATEGORY"), ui::Loc("СТАТУС", "STATUS"))
+            .SetFooter(g_standaloneMode
+                           ? ui::StandardFooter("Выбрать", "Select", "Выход", "Exit",
+                                                "Q/E Кам., Z/X Прибл.", "Q/E Cam, Z/X Zoom")
+                           : ui::StandardFooter("Выбрать", "Select", "Выход", "Exit"))
+            .SetSelected(g_mainCursor);
 
         for (const auto& e : g_mainEntries) {
-            ui::MenuRow row;
-            row.leftGame  = e.labelGame;
-            row.rightGame = e.rightGame;
+            sa::CRGBA rCol = ui::ColorMuted();
             if (e.cat == CategoryId::MaintenanceHub && sa::IsVehicleValid(g_workshopVeh)) {
-                row.rightColor = mod::Config().enableWearSystem
-                    ? ui::GetWearColor(tuning::GetLiveWear(g_workshopVeh).Average())
-                    : sa::CRGBA{135, 225, 135, 255};
+                rCol = mod::Config().enableWearSystem
+                    ? garage_ui::GetWearColor(tuning::GetLiveWear(g_workshopVeh).Average())
+                    : ui::ColorSuccess();
             } else if (e.cat == CategoryId::Registration) {
-                row.rightColor = {135, 225, 135, 255};
-            } else {
-                row.rightColor = {200, 200, 200, 255};
+                rCol = ui::ColorSuccess();
             }
-            spec.rows.push_back(std::move(row));
+            menu.AddItem(e.labelGame, e.rightGame, rCol);
         }
     } else {
-        spec.titleGame    = GetSubmenuTitle(g_activeSubCat);
-        spec.colLeftGame  = ui::Loc("УЛУЧШЕНИЕ", "UPGRADE");
-        spec.colRightGame = ui::Loc("ЦЕНА", "PRICE");
-        spec.footerGame   = g_standaloneMode
-            ? ui::StandardFooter("Купить", "Buy", "Назад", "Back", "Q/E Кам., Z/X Зум", "Q/E Cam, Z/X Zoom")
-            : ui::StandardFooter("Купить", "Buy", "Назад", "Back");
-        spec.selectedIndex = g_subCursor;
+        menu.SetTitle(GetSubmenuTitle(g_activeSubCat))
+            .SetColumns(ui::Loc("УЛУЧШЕНИЕ", "UPGRADE"), ui::Loc("ЦЕНА", "PRICE"))
+            .SetFooter(g_standaloneMode
+                           ? ui::StandardFooter("Купить", "Buy", "Назад", "Back",
+                                                "Q/E Кам., Z/X Прибл.", "Q/E Cam, Z/X Zoom")
+                           : ui::StandardFooter("Купить", "Buy", "Назад", "Back"))
+            .SetSelected(g_subCursor);
 
         for (const auto& opt : g_subOptions) {
-            ui::MenuRow row;
-            row.leftGame = opt.labelGame;
+            std::string rightTxt;
+            sa::CRGBA   rightCol = ui::ColorNormal();
+            bool        rowEnabled = true;
             if (g_activeSubCat == CategoryId::MaintenanceHub && opt.value == 2) {
-                row.rightGame  = ui::Loc("Открыть >", "Open >");
-                row.rightColor = sa::IsVehicleValid(g_workshopVeh)
-                    ? ui::GetWearColor(tuning::GetLiveWear(g_workshopVeh).Average())
-                    : sa::CRGBA{200, 200, 200, 255};
+                rightTxt = ui::Loc("Открыть >", "Open >");
+                rightCol = sa::IsVehicleValid(g_workshopVeh)
+                    ? garage_ui::GetWearColor(tuning::GetLiveWear(g_workshopVeh).Average())
+                    : ui::ColorMuted();
             } else if (g_activeSubCat == CategoryId::MaintenanceHub && opt.value == 1 && opt.installed) {
-                row.rightGame  = ui::Loc("Целая", "Intact");
-                row.rightColor = {115, 235, 130, 255};
+                rightTxt = ui::Loc("Целая", "Intact");
+                rightCol = ui::ColorSuccess();
             } else if (g_activeSubCat == CategoryId::Maintenance && opt.installed) {
-                row.rightGame  = ui::Loc("Износ 0%", "0% Wear");
-                row.rightColor = {115, 235, 130, 255};
+                rightTxt = ui::Loc("Износ 0%", "0% Wear");
+                rightCol = ui::ColorSuccess();
             } else if (opt.installed) {
-                row.rightGame  = ui::Loc("Уст.", "Owned");
-                row.rightColor = {115, 235, 130, 255};
+                rightTxt = ui::Loc("Уст.", "Owned");
+                rightCol = ui::ColorSuccess();
+            } else if (!modbus::IsRankUnlocked(opt.reqRank)) {
+                rightTxt   = ui::FormatRankLock(opt.reqRank);
+                rightCol   = ui::ColorDisabled();
+                rowEnabled = false;
             } else {
-                row.rightGame  = FormatPrice(opt.price);
-                row.rightColor = (sa::GetPlayerMoney() >= opt.price)
-                    ? sa::CRGBA{220, 220, 220, 255}
-                    : sa::CRGBA{235, 100, 100, 255};
+                rightTxt = FormatWorkshopPrice(opt.price);
+                rightCol = (sa::GetPlayerMoney() >= opt.price) ? ui::ColorNormal() : ui::ColorDanger();
             }
-            spec.rows.push_back(std::move(row));
+            menu.AddItem(opt.labelGame, rightTxt, rightCol, rowEnabled);
         }
     }
 
-    ui::DrawVanillaMenu(spec);
+    menu.Render();
 
     if (g_typingPlate) {
-        ui::DrawPlateInputBox(g_plateInputBuf, mod::Config().pricePlate);
+        garage_ui::RenderPlateInputModal(g_plateInputBuf, mod::Config().pricePlate);
     }
 }
 
@@ -1779,6 +1760,10 @@ bool IsWorkshopActive() {
 
 bool IsCustomWorkshopMenuDrawing() {
     return g_vanillaHookMode || g_standaloneMode;
+}
+
+bool ShouldClaimWorkshopPanel() {
+    return g_vanillaHookMode || g_standaloneMode || IsAnyVanillaCarmodPanelOpen();
 }
 
 sa::CVehicle* GetWorkshopVehicle() {
@@ -1795,7 +1780,6 @@ void Reset() {
     g_insideShopIdx      = -1;
     g_waitLeaveBox       = false;
     g_doorBlockedShopIdx = -1;
-    for (int i = 0; i < 5; ++i) g_doorOpened[i] = false;
 }
 
 } // namespace workshop

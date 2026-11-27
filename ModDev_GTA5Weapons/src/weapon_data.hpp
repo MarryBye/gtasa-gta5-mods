@@ -90,26 +90,38 @@ constexpr WeaponDef kWeapons[] = {
      "Кулаки", "Unarmed", 0, 0, 0, 0, 0, 1.0f, 0, kNoMount},
     {1, 331, 0, false, true, WeaponCategory::Melee, AudioClass::None,
      "Кастет", "Brass Knuckles", 120, 1, 0, 0, 1, 1.0f, 0, kNoMount},
+    {2, 333, 1, false, false, WeaponCategory::Melee, AudioClass::None,
+     "Клюшка", "Golf Club", 0, 1, 0, 0, 1, 1.0f, 0, kNoMount},
+    {3, 334, 1, false, false, WeaponCategory::Melee, AudioClass::None,
+     "Дубинка", "Nightstick", 0, 1, 0, 0, 1, 1.0f, 0, kNoMount},
     {4, 335, 1, false, true, WeaponCategory::Melee, AudioClass::None,
      "Нож", "Knife", 180, 1, 0, 0, 1, 1.0f, 0, kNoMount},
     {5, 336, 1, false, true, WeaponCategory::Melee, AudioClass::None,
      "Бита", "Baseball Bat", 150, 1, 0, 0, 1, 1.0f, 0, kNoMount},
+    {6, 337, 1, false, false, WeaponCategory::Melee, AudioClass::None,
+     "Лопата", "Shovel", 0, 1, 0, 0, 1, 1.0f, 0, kNoMount},
+    {7, 338, 1, false, false, WeaponCategory::Melee, AudioClass::None,
+     "Кий", "Pool Cue", 0, 1, 0, 0, 1, 1.0f, 0, kNoMount},
     {8, 339, 1, false, true, WeaponCategory::Melee, AudioClass::None,
      "Катана", "Katana", 650, 1, 0, 0, 1, 1.0f, 0, kNoMount},
     {9, 341, 1, false, true, WeaponCategory::Melee, AudioClass::None,
      "Бензопила", "Chainsaw", 900, 1, 0, 0, 1, 1.0f, 0, kNoMount},
+    {14, 325, 10, false, false, WeaponCategory::Melee, AudioClass::None,
+     "Цветы", "Flowers", 0, 1, 0, 0, 1, 1.0f, 0, kNoMount},
+    {15, 326, 10, false, false, WeaponCategory::Melee, AudioClass::None,
+     "Трость", "Cane", 0, 1, 0, 0, 1, 1.0f, 0, kNoMount},
 
     // --- PISTOLS (Slot 2, Shared Ammo) ---
     // colt45.dff Frame[1] exact axis: (+0.985, +0.065, +0.158) (+9.1 deg pitch!), muzzle=(0.240,0.039,0.108)
     {22, 346, 2, true, true, WeaponCategory::Pistols, AudioClass::Pistol,
-     "9mm", "9mm Pistol", 350, 51, 34, 60, 600, 1.0f,
+     "9 мм", "9mm Pistol", 350, 51, 34, 60, 600, 1.0f,
      SUP_SUPPRESSOR | SUP_COMPENSATOR | SUP_EXT_MAG | SUP_REFLEX | SUP_HEAVY_BRL | SUP_LASER,
      {0.023f, 0.025f, 0.073f,  0.240f, 0.039f, 0.108f,  0.013f, 0.15f,
       0.10f, 0.017f,  0.15f, -0.020f,  0.026f, 0.016f, -0.025f, -0.060f,  0.17f, 0.016f}},
 
     // silenced.dff Frame[1] exact axis: (+0.985, +0.065, +0.158) (+9.1 deg pitch!), muzzle=(0.360,0.046,0.133)
     {23, 347, 2, true, true, WeaponCategory::Pistols, AudioClass::Pistol,
-     "9mm с глуш.", "Silenced 9mm", 650, 51, 34, 70, 600, 1.0f,
+     "9 мм с глуш.", "Silenced 9mm", 650, 51, 34, 70, 600, 1.0f,
      SUP_EXT_MAG | SUP_REFLEX | SUP_HEAVY_BRL | SUP_LASER,
      {0.025f, 0.024f, 0.079f,  0.360f, 0.046f, 0.133f,  0.014f, 0.13f,
       0.11f, 0.013f,  0.17f, -0.020f,  0.026f, 0.016f, -0.025f, -0.060f,  0.18f, 0.017f}},
@@ -122,17 +134,17 @@ constexpr WeaponDef kWeapons[] = {
       0.14f, 0.030f,  0.20f, -0.025f,  0.052f, 0.018f, -0.045f, -0.072f,  0.24f, 0.019f}},
 
     // --- SHOTGUNS (Slot 3, Shared Ammo) ---
-    // chromegun.dff Frame[1] axis: (0.981, -0.120, +0.150)
+    // chromegun.dff Frame[1] axis: (0.981, -0.120, +0.150) — 1-shot pump in GTA SA (no detachable mag upgrade)
     {25, 349, 3, true, true, WeaponCategory::Shotguns, AudioClass::Shotgun,
      "Дробовик", "Pump Shotgun", 950, 24, 16, 120, 320, 1.15f,
-     SUP_SUPPRESSOR | SUP_COMPENSATOR | SUP_EXT_MAG | SUP_REFLEX | SUP_GRIP | SUP_HEAVY_BRL | SUP_LASER,
+     SUP_SUPPRESSOR | SUP_COMPENSATOR | SUP_REFLEX | SUP_GRIP | SUP_HEAVY_BRL | SUP_LASER,
      {0.10f, 0.036f, 0.112f,  0.80f, -0.048f, 0.219f,  0.017f, 0.19f,
       0.24f, 0.028f,  0.46f, -0.035f, 0.48f, 0.14f, -0.025f, -0.055f,  0.58f, 0.022f}},
 
-    // sawnoff.dff: X=[-0.21..0.56], midY=0.00, muzz=(0.56,0.0,0.15)
+    // sawnoff.dff: X=[-0.21..0.56], midY=0.00, muzz=(0.56,0.0,0.15) — double-barrel break-action (no mag)
     {26, 350, 3, true, true, WeaponCategory::Shotguns, AudioClass::Shotgun,
      "Обрез", "Sawnoff", 1250, 20, 12, 130, 320, 1.15f,
-     SUP_EXT_MAG | SUP_HEAVY_BRL | SUP_LASER,
+     SUP_HEAVY_BRL | SUP_LASER,
      {0.08f, 0.00f, 0.12f,  0.56f, 0.00f, 0.15f,  0.020f, 0.16f,
       0.18f, 0.025f,  0.30f, -0.03f,  0.32f, 0.10f, -0.025f, -0.055f,  0.38f, 0.025f}},
 
@@ -182,17 +194,17 @@ constexpr WeaponDef kWeapons[] = {
       0.20f, 0.052f,  0.44f, -0.038f, 0.25f, 0.038f, 0.03f, -0.115f,  0.52f, 0.024f}},
 
     // --- SNIPERS (Slot 6, Shared Ammo) ---
-    // cuntgun.dff Frame[1] exact axis: (0.981, -0.120, +0.150)
+    // cuntgun.dff Frame[1] exact axis: (0.981, -0.120, +0.150) — single-shot rifle (clip=1, no magazine)
     {33, 357, 6, true, true, WeaponCategory::Snipers, AudioClass::Sniper,
      "Охот. винтовка", "Country Rifle", 2200, 30, 20, 180, 300, 1.30f,
-     SUP_SUPPRESSOR | SUP_COMPENSATOR | SUP_EXT_MAG | SUP_REFLEX | SUP_SCOPE | SUP_HEAVY_BRL | SUP_LASER,
+     SUP_SUPPRESSOR | SUP_COMPENSATOR | SUP_REFLEX | SUP_SCOPE | SUP_HEAVY_BRL | SUP_LASER,
      {0.10f, 0.035f, 0.098f,  0.74f, -0.043f, 0.195f,  0.015f, 0.20f,
       0.24f, 0.028f,  0.44f, -0.032f, 0.26f, 0.030f, 0.06f, -0.025f,  0.52f, 0.020f}},
 
-    // sniper.dff Frame[1] exact axis: (0.992, -0.080, +0.098), gunflash @ (0.996,-0.062,0.189) -> muzzle @ (0.745,-0.042,0.164)
+    // sniper.dff Frame[1] exact axis: (0.992, -0.080, +0.098) — single-shot sniper (clip=1, no magazine)
     {34, 358, 6, true, true, WeaponCategory::Snipers, AudioClass::Sniper,
      "Снайперка", "Sniper Rifle", 6500, 20, 15, 350, 300, 1.45f,
-     SUP_SUPPRESSOR | SUP_COMPENSATOR | SUP_EXT_MAG | SUP_HEAVY_BRL | SUP_LASER,
+     SUP_SUPPRESSOR | SUP_COMPENSATOR | SUP_HEAVY_BRL | SUP_LASER,
      {0.10f, 0.010f, 0.100f,  0.745f, -0.042f, 0.164f,  0.015f, 0.22f,
       0.24f, 0.044f,  0.46f, -0.032f, 0.27f, 0.030f, 0.075f, -0.015f,  0.54f, 0.020f}},
 
@@ -212,7 +224,7 @@ constexpr WeaponDef kWeapons[] = {
     {18, 344, 8, false, true, WeaponCategory::Thrown, AudioClass::None,
      "Молотов", "Molotov", 200, 3, 3, 200, 50, 1.0f, 0, kNoMount},
     {39, 363, 8, false, true, WeaponCategory::Thrown, AudioClass::None,
-     "Взрывпакет (C4)", "Satchel", 1800, 3, 3, 600, 30, 1.0f, 0, kNoMount},
+     "Взрывпакет", "Satchel", 1800, 3, 3, 600, 30, 1.0f, 0, kNoMount},
 };
 
 constexpr size_t kWeaponCount = sizeof(kWeapons) / sizeof(kWeapons[0]);
@@ -247,12 +259,54 @@ struct WeaponLoadout {
     }
 };
 
+// Masks out any unsupported attachment slot (safely cleans legacy saves if a weapon's supported mods change!)
+inline WeaponLoadout SanitizeLoadout(uint32_t weaponId, const WeaponLoadout& raw) {
+    WeaponLoadout L = raw;
+    const WeaponDef* def = FindDef(weaponId);
+    const uint32_t mask  = def ? def->supportMask : 0u;
+
+    uint8_t validMuzzle = 1u | ((mask & SUP_SUPPRESSOR) ? 2u : 0u) | ((mask & SUP_COMPENSATOR) ? 4u : 0u);
+    uint8_t validMag    = 1u | ((mask & SUP_EXT_MAG)    ? 2u : 0u) | ((mask & SUP_DRUM_MAG)    ? 4u : 0u);
+    uint8_t validScope  = 1u | ((mask & SUP_REFLEX)     ? 2u : 0u) | ((mask & SUP_SCOPE)       ? 4u : 0u);
+    uint8_t validGrip   = 1u | ((mask & SUP_GRIP)       ? 2u : 0u);
+    uint8_t validBarrel = 1u | ((mask & SUP_HEAVY_BRL)  ? 2u : 0u);
+    uint8_t validLaser  = 1u | ((mask & SUP_LASER)      ? 6u : 0u); // bits 1 (Red) & 2 (Green)
+
+    if (L.muzzle > 2 || ((1u << L.muzzle) & validMuzzle) == 0) L.muzzle = 0;
+    if (L.mag    > 2 || ((1u << L.mag)    & validMag)    == 0) L.mag    = 0;
+    if (L.scope  > 2 || ((1u << L.scope)  & validScope)  == 0) L.scope  = 0;
+    if (L.grip   > 1 || ((1u << L.grip)   & validGrip)   == 0) L.grip   = 0;
+    if (L.barrel > 1 || ((1u << L.barrel) & validBarrel) == 0) L.barrel = 0;
+    if (L.laser  > 2 || ((1u << L.laser)  & validLaser)  == 0) L.laser  = 0;
+
+    L.ownedMuzzleMask = static_cast<uint8_t>((L.ownedMuzzleMask & validMuzzle) | 1u | (1u << L.muzzle));
+    L.ownedMagMask    = static_cast<uint8_t>((L.ownedMagMask    & validMag)    | 1u | (1u << L.mag));
+    L.ownedScopeMask  = static_cast<uint8_t>((L.ownedScopeMask  & validScope)  | 1u | (1u << L.scope));
+    L.ownedGripMask   = static_cast<uint8_t>((L.ownedGripMask   & validGrip)   | 1u | (1u << L.grip));
+    L.ownedBarrelMask = static_cast<uint8_t>((L.ownedBarrelMask & validBarrel) | 1u | (1u << L.barrel));
+    L.ownedLaserMask  = static_cast<uint8_t>((L.ownedLaserMask  & validLaser)  | 1u | (1u << L.laser));
+    return L;
+}
+
 struct WeaponStats {
+    // Base weapon stats (with attachments, without CJ weapon skill bonus)
     int damage   = 0;
     int fireRate = 0;
     int accuracy = 0;
     int range    = 0;
     int clipSize = 0;
+
+    // CJ weapon skill bonuses (vanilla Poor->Gangster->Hitman tiers + continuous mastery)
+    int damageSkillBonus   = 0;
+    int damageSkillPct     = 0;
+    int fireRateSkillBonus = 0;
+    int fireRateSkillPct   = 0;
+    int accuracySkillBonus = 0;
+    int accuracySkillPct   = 0;
+    int rangeSkillBonus    = 0;
+    int rangeSkillPct      = 0;
+    int clipSkillBonus     = 0;
+    int clipSkillPct       = 0;
 };
 
 inline int ScalePrice(int basePrice, float mult) {

@@ -1,15 +1,16 @@
 #include "wardrobe.hpp"
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 #include <unordered_set>
 #include <windows.h>
 #include "clothes_shop.hpp"
+#include "common_utils.hpp"
+#include "integrations/sacoop.hpp"
 #include "log.hpp"
-#include "mod_bus.hpp"
 #include "phone_config.hpp"
 #include "sa_sdk.hpp"
 #include "ui_kit.hpp"
@@ -18,20 +19,18 @@ namespace wardrobe {
 
 namespace {
 
-bool                        g_catalogLoaded = false;
-std::vector<ClothItemDef>   g_catalog;
-std::vector<ShopCatalog>    g_shops;
-std::vector<ClothItemDef>   g_hairCatalog;
-std::vector<ShopCatalog>    g_barberShops;
+bool                         g_catalogLoaded = false;
+std::vector<ClothItemDef>    g_catalog;
+std::vector<ShopCatalog>     g_shops;
 std::unordered_set<uint32_t> g_ownedHashes;
 std::array<OutfitPreset, MAX_OUTFIT_PRESETS> g_presets{};
 
-int  g_saveSlot             = 0;
-bool g_pendingRebuild       = false;
-bool g_wasOnMission         = false;
-bool g_wasWanted            = false;
-bool g_autoStateInited      = false;
-int  g_lastAutoPresetIdx    = -1;
+int  g_saveSlot          = 0;
+bool g_pendingRebuild    = false;
+bool g_wasOnMission      = false;
+bool g_wasWanted         = false;
+bool g_autoStateInited   = false;
+int  g_lastAutoPresetIdx = -1;
 
 int BodyPartToSlotIdx(uint32_t bp) {
     for (int i = 0; i < CLOTH_SLOT_COUNT; ++i) {
@@ -51,13 +50,10 @@ bool IsDefaultStarterCloth(const std::string& tex) {
 
 void SafeRebuildPlayer(sa::CPed* ped, bool forceNow) {
     if (!sa::IsPedValid(ped) || ped->GetHealth() <= 0.0f) return;
-    // SA-COOP F4 Custom Skin safety: CClothes::RebuildPlayer ONLY supports CJ's player model (ID 0)!
-    if (ped->GetModelIndex() != 0) {
+    if (integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) {
         g_pendingRebuild = false;
         return;
     }
-    // Verified at 0x005A82C0: CClothes::RebuildPlayer preserves seated vehicle anim associations cleanly!
-    // Only defer during cutscenes so CJ can change clothes IMMEDIATELY even while driving/sitting in a car!
     if (!forceNow && sa::IsCutsceneRunning()) {
         g_pendingRebuild = true;
         return;
@@ -67,27 +63,25 @@ void SafeRebuildPlayer(sa::CPed* ped, bool forceNow) {
 }
 
 std::string GetSaveFilePath(int slot, bool forLoading = false) {
-    const char* ov = nullptr;
-    if (auto* b = modbus::GetBus(); b && b->coopProfileName[0]) ov = b->coopProfileName;
+    const char* ov = integrations::sacoop::GetProfileOverride();
     if (forLoading) {
-        return sa::ResolveExistingLoadPath("GTA5PhoneSaves", pcfg::Get().modDir, "wardrobe", slot, ov);
+        return integrations::sacoop::ResolveExistingLoadPath("GTA5PhoneSaves", pcfg::Get().modDir, "wardrobe", slot, ov);
     }
-    return sa::BuildSaveProfilePath("GTA5PhoneSaves", pcfg::Get().modDir, "wardrobe", slot, ov);
+    return integrations::sacoop::BuildSaveProfilePath("GTA5PhoneSaves", pcfg::Get().modDir, "wardrobe", slot, ov);
 }
 
 void ApplyPresetInternal(sa::CPed* ped, const OutfitPreset& pr, bool showNotify) {
     if (!sa::IsPedValid(ped) || !pr.used) return;
-    if (ped->GetModelIndex() != 0) {
+    if (integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) {
         if (showNotify) {
-            ui::ShowHelp("~y~Гардероб CJ недоступен при нестандартном скине (F4 в SA-COOP).",
-                         "~y~CJ Wardrobe requires the default CJ skin (not a custom F4 skin).");
+            ui::ShowHelp("~y~Гардероб доступен только для стандартного облика.",
+                         "~y~Wardrobe requires the default character model.");
         }
         return;
     }
     auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
     if (!desc) return;
 
-    // Clear Special slot first unless preset explicitly sets one
     if (pr.tex[7].empty()) {
         sa::clothes::SetTextureAndModel(desc, nullptr, nullptr, 17);
     }
@@ -106,7 +100,34 @@ void ApplyPresetInternal(sa::CPed* ped, const OutfitPreset& pr, bool showNotify)
     } else {
         SafeRebuildPlayer(ped, true);
         if (showNotify) {
-            ui::ShowHelp("~g~Набор одежды надет!", "~g~Outfit equipped!");
+            ui::ShowHelp("~g~Набор одежды надет.", "~g~Outfit equipped.");
+        }
+    }
+}
+
+bool ParseCatalogEntry(const std::string& tex, std::istringstream& iss, ClothItemDef& outDef) {
+    std::string tag, modName, s1, s2;
+    int typeVal = -1, v1 = 0, v2 = 0, price = 0;
+    if (!(iss >> tag >> modName >> typeVal >> s1 >> v1 >> s2 >> v2 >> price)) return false;
+    if (BodyPartToSlotIdx(static_cast<uint32_t>(typeVal)) < 0) return false;
+    outDef.texName   = tex;
+    outDef.gxtTag    = tag;
+    outDef.modelName = modName;
+    outDef.bodyPart  = static_cast<uint32_t>(typeVal);
+    outDef.texHash   = sa::GetUppercaseKey(tex.c_str());
+    outDef.modHash   = sa::GetUppercaseKey(modName.c_str());
+    if (_stricmp(s1.c_str(), "respect") == 0) outDef.respect = v1;
+    if (_stricmp(s2.c_str(), "sexy")    == 0) outDef.sexy    = v2;
+    outDef.price     = price;
+    return true;
+}
+
+void AppendShopItemByHash(const std::vector<ClothItemDef>& catalog, ShopCatalog& shop, const std::string& itemTex) {
+    uint32_t h = sa::GetUppercaseKey(itemTex.c_str());
+    for (size_t i = 0; i < catalog.size(); ++i) {
+        if (catalog[i].texHash == h) {
+            shop.itemIndices.push_back(static_cast<int>(i));
+            return;
         }
     }
 }
@@ -118,8 +139,6 @@ void EnsureCatalogLoaded() {
     g_catalogLoaded = true;
     g_catalog.clear();
     g_shops.clear();
-    g_hairCatalog.clear();
-    g_barberShops.clear();
 
     const std::string path = pcfg::Get().gameDir + "\\data\\shopping.dat";
     std::ifstream f(path);
@@ -137,20 +156,12 @@ void EnsureCatalogLoaded() {
         {"Csdesgn", "VICTIM",       "VICTIM"},
         {"Csexl",   "DIDIER SACHS", "DIDIER SACHS"},
     };
-    static constexpr ShopMeta kBarberMetas[] = {
-        {"barbers", "ПАРИКМАХЕРСКАЯ (LS)", "BARBER SHOP (LS)"},
-        {"barber2", "ПАРИКМАХЕРСКАЯ (SF)", "BARBER SHOP (SF)"},
-        {"barber3", "ПАРИКМАХЕРСКАЯ (LV)", "BARBER SHOP (LV)"},
-    };
 
     bool inClothesPrices = false;
-    bool inHairPrices    = false;
     int  activeShopIdx   = -1;
-    int  activeBarberIdx = -1;
 
     std::string line;
     while (std::getline(f, line)) {
-        // Strip inline comments
         size_t hashPos = line.find('#');
         if (hashPos != std::string::npos) line.resize(hashPos);
         std::istringstream iss(line);
@@ -161,37 +172,16 @@ void EnsureCatalogLoaded() {
             std::string secName;
             if (iss >> secName) {
                 inClothesPrices = false;
-                inHairPrices    = false;
                 activeShopIdx   = -1;
-                activeBarberIdx = -1;
 
                 if (_stricmp(secName.c_str(), "Clothes") == 0) {
                     inClothesPrices = true;
-                } else if (_stricmp(secName.c_str(), "Haircuts") == 0) {
-                    inHairPrices = true;
                 } else {
                     for (const auto& sm : kShopMetas) {
                         if (_stricmp(secName.c_str(), sm.key) == 0) {
-                            ShopCatalog sc;
-                            sc.shopKey = sm.key;
-                            sc.nameRus = sm.rus;
-                            sc.nameEng = sm.eng;
                             activeShopIdx = static_cast<int>(g_shops.size());
-                            g_shops.push_back(std::move(sc));
+                            g_shops.push_back({sm.key, sm.rus, sm.eng, {}});
                             break;
-                        }
-                    }
-                    if (activeShopIdx < 0) {
-                        for (const auto& bm : kBarberMetas) {
-                            if (_stricmp(secName.c_str(), bm.key) == 0) {
-                                ShopCatalog sc;
-                                sc.shopKey = bm.key;
-                                sc.nameRus = bm.rus;
-                                sc.nameEng = bm.eng;
-                                activeBarberIdx = static_cast<int>(g_barberShops.size());
-                                g_barberShops.push_back(std::move(sc));
-                                break;
-                            }
                         }
                     }
                 }
@@ -201,77 +191,20 @@ void EnsureCatalogLoaded() {
 
         if (_stricmp(tok.c_str(), "end") == 0) {
             inClothesPrices = false;
-            inHairPrices    = false;
             activeShopIdx   = -1;
-            activeBarberIdx = -1;
             continue;
         }
 
         if (inClothesPrices) {
-            std::string tex = tok;
-            std::string tag, modName, s1, s2;
-            int typeVal = -1, v1 = 0, v2 = 0, price = 0;
-            if (iss >> tag >> modName >> typeVal >> s1 >> v1 >> s2 >> v2 >> price) {
-                if (BodyPartToSlotIdx(static_cast<uint32_t>(typeVal)) >= 0) {
-                    ClothItemDef def;
-                    def.texName   = tex;
-                    def.gxtTag    = tag;
-                    def.modelName = modName;
-                    def.bodyPart  = static_cast<uint32_t>(typeVal);
-                    def.texHash   = sa::GetUppercaseKey(tex.c_str());
-                    def.modHash   = sa::GetUppercaseKey(modName.c_str());
-                    if (_stricmp(s1.c_str(), "respect") == 0) def.respect = v1;
-                    if (_stricmp(s2.c_str(), "sexy")    == 0) def.sexy    = v2;
-                    def.price     = price;
-                    g_catalog.push_back(std::move(def));
-                }
-            }
-        } else if (inHairPrices) {
-            std::string tex = tok;
-            std::string tag, modName, s1, s2;
-            int typeVal = -1, v1 = 0, v2 = 0, price = 0;
-            if (iss >> tag >> modName >> typeVal >> s1 >> v1 >> s2 >> v2 >> price) {
-                if (typeVal == 1) {
-                    ClothItemDef def;
-                    def.texName   = tex;
-                    def.gxtTag    = tag;
-                    def.modelName = modName;
-                    def.bodyPart  = 1;
-                    def.texHash   = sa::GetUppercaseKey(tex.c_str());
-                    def.modHash   = sa::GetUppercaseKey(modName.c_str());
-                    if (_stricmp(s1.c_str(), "respect") == 0) def.respect = v1;
-                    if (_stricmp(s2.c_str(), "sexy")    == 0) def.sexy    = v2;
-                    def.price     = price;
-                    g_hairCatalog.push_back(std::move(def));
-                }
-            }
+            ClothItemDef def;
+            if (ParseCatalogEntry(tok, iss, def)) g_catalog.push_back(std::move(def));
         } else if (activeShopIdx >= 0 && _stricmp(tok.c_str(), "item") == 0) {
             std::string itemTex;
-            if (iss >> itemTex) {
-                uint32_t h = sa::GetUppercaseKey(itemTex.c_str());
-                for (size_t i = 0; i < g_catalog.size(); ++i) {
-                    if (g_catalog[i].texHash == h) {
-                        g_shops[activeShopIdx].itemIndices.push_back(static_cast<int>(i));
-                        break;
-                    }
-                }
-            }
-        } else if (activeBarberIdx >= 0 && _stricmp(tok.c_str(), "item") == 0) {
-            std::string itemTex;
-            if (iss >> itemTex) {
-                uint32_t h = sa::GetUppercaseKey(itemTex.c_str());
-                for (size_t i = 0; i < g_hairCatalog.size(); ++i) {
-                    if (g_hairCatalog[i].texHash == h) {
-                        g_barberShops[activeBarberIdx].itemIndices.push_back(static_cast<int>(i));
-                        break;
-                    }
-                }
-            }
+            if (iss >> itemTex) AppendShopItemByHash(g_catalog, g_shops[activeShopIdx], itemTex);
         }
     }
 
-    modlog::Info("[Wardrobe] Parsed %zu clothing items (%zu stores) & %zu haircuts (%zu barbers) from shopping.dat.",
-                 g_catalog.size(), g_shops.size(), g_hairCatalog.size(), g_barberShops.size());
+    modlog::Info("[Wardrobe] Parsed %zu clothing items (%zu stores).", g_catalog.size(), g_shops.size());
 }
 
 const std::vector<ClothItemDef>& Catalog() {
@@ -288,39 +221,6 @@ const ShopCatalog* FindShopCatalog(const char* loadedShopName) {
     return nullptr;
 }
 
-const std::vector<ClothItemDef>& HairCatalog() {
-    EnsureCatalogLoaded();
-    return g_hairCatalog;
-}
-
-const ShopCatalog* FindBarberCatalog(const char* loadedShopName) {
-    EnsureCatalogLoaded();
-    if (!loadedShopName || !loadedShopName[0]) return nullptr;
-    for (const auto& s : g_barberShops) {
-        if (_stricmp(s.shopKey.c_str(), loadedShopName) == 0) return &s;
-    }
-    return nullptr;
-}
-
-bool IsHaircutWorn(const sa::CPed* ped, int hairIdx) {
-    EnsureCatalogLoaded();
-    if (hairIdx < 0 || hairIdx >= static_cast<int>(g_hairCatalog.size())) return false;
-    auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
-    if (!desc) return false;
-    return desc->m_anTextureKeys[1] == g_hairCatalog[hairIdx].texHash;
-}
-
-void ApplyHaircutItem(sa::CPed* ped, int hairIdx) {
-    EnsureCatalogLoaded();
-    if (!sa::IsPedValid(ped) || hairIdx < 0 || hairIdx >= static_cast<int>(g_hairCatalog.size())) return;
-    if (ped->GetModelIndex() != 0) return;
-    auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
-    if (!desc) return;
-    const auto& it = g_hairCatalog[hairIdx];
-    sa::clothes::SetTextureAndModel(desc, it.texName.c_str(), it.modelName.c_str(), 1);
-    SafeRebuildPlayer(ped, true);
-}
-
 std::string GetClothDisplayNameGame(const ClothItemDef& item) {
     if (!item.gxtTag.empty()) {
         const char* loc = sa::TextGet(item.gxtTag.c_str());
@@ -331,8 +231,8 @@ std::string GetClothDisplayNameGame(const ClothItemDef& item) {
 
 const char* SlotNameRus(int slotIdx) {
     static constexpr const char* kNames[CLOTH_SLOT_COUNT] = {
-        "Верх (Торс)", "Штаны и Шорты", "Обувь", "Цепи",
-        "Часы", "Очки и Маски", "Головные уборы", "Особые костюмы"
+        "Верхняя одежда", "Штаны и шорты", "Обувь", "Цепи",
+        "Часы", "Очки и маски", "Головные уборы", "Особые костюмы"
     };
     return (slotIdx >= 0 && slotIdx < CLOTH_SLOT_COUNT) ? kNames[slotIdx] : "Одежда";
 }
@@ -348,7 +248,7 @@ const char* SlotNameEng(int slotIdx) {
 const char* TriggerNameRus(AutoTrigger t) {
     switch (t) {
         case AutoTrigger::OnMission:  return "При миссии";
-        case AutoTrigger::FreeRoam:   return "Простая игра";
+        case AutoTrigger::FreeRoam:   return "Свободная игра";
         case AutoTrigger::WhenWanted: return "При розыске";
         default:                      return "Вручную";
     }
@@ -393,7 +293,7 @@ bool IsClothWorn(const sa::CPed* ped, int itemIdx) {
 
 void SyncWornClothesToOwned(const sa::CPed* ped) {
     EnsureCatalogLoaded();
-    if (!sa::IsPedValid(ped) || ped->GetModelIndex() != 0) return;
+    if (!sa::IsPedValid(ped) || integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) return;
     auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
     if (!desc) return;
     for (int s = 0; s < CLOTH_SLOT_COUNT; ++s) {
@@ -406,10 +306,10 @@ void SyncWornClothesToOwned(const sa::CPed* ped) {
 void ApplyClothItem(sa::CPed* ped, int itemIdx, bool previewOnly) {
     EnsureCatalogLoaded();
     if (!sa::IsPedValid(ped) || itemIdx < 0 || itemIdx >= static_cast<int>(g_catalog.size())) return;
-    if (ped->GetModelIndex() != 0) {
+    if (integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) {
         if (!previewOnly) {
-            ui::ShowHelp("~y~Гардероб CJ доступен только для стандартного скина CJ.",
-                         "~y~CJ Wardrobe only works on the default CJ player model.");
+            ui::ShowHelp("~y~Гардероб доступен только для стандартного облика.",
+                         "~y~Wardrobe requires the default character model.");
         }
         return;
     }
@@ -418,7 +318,7 @@ void ApplyClothItem(sa::CPed* ped, int itemIdx, bool previewOnly) {
 
     const auto& it = g_catalog[itemIdx];
     if (it.bodyPart != 17) {
-        sa::clothes::SetTextureAndModel(desc, nullptr, nullptr, 17); // Clear special uniform
+        sa::clothes::SetTextureAndModel(desc, nullptr, nullptr, 17);
     }
     sa::clothes::SetTextureAndModel(desc, it.texName.c_str(), it.modelName.c_str(), it.bodyPart);
     SafeRebuildPlayer(ped, previewOnly);
@@ -426,7 +326,7 @@ void ApplyClothItem(sa::CPed* ped, int itemIdx, bool previewOnly) {
 
 void ClearClothSlot(sa::CPed* ped, int slotIdx, bool previewOnly) {
     if (!sa::IsPedValid(ped) || slotIdx < 0 || slotIdx >= CLOTH_SLOT_COUNT) return;
-    if (ped->GetModelIndex() != 0) return;
+    if (integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) return;
     auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
     if (!desc) return;
     uint32_t bp = kSlotBodyParts[slotIdx];
@@ -439,6 +339,7 @@ void ClearClothSlot(sa::CPed* ped, int slotIdx, bool previewOnly) {
 
 ClothSnapshot CaptureSnapshot(const sa::CPed* ped) {
     ClothSnapshot snap;
+    if (!sa::IsPedValid(ped) || integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) return snap;
     auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
     if (!desc) return snap;
     for (int i = 0; i < 10; ++i) snap.modelKeys[i] = desc->m_anModelKeys[i];
@@ -449,6 +350,7 @@ ClothSnapshot CaptureSnapshot(const sa::CPed* ped) {
 
 void RestoreSnapshot(sa::CPed* ped, const ClothSnapshot& snap) {
     if (!snap.valid || !sa::IsPedValid(ped)) return;
+    if (integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) return;
     auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
     if (!desc) return;
     for (int i = 0; i < 10; ++i) desc->m_anModelKeys[i]   = snap.modelKeys[i];
@@ -461,17 +363,16 @@ std::array<OutfitPreset, MAX_OUTFIT_PRESETS>& Presets() { return g_presets; }
 bool SaveCurrentToPreset(sa::CPed* ped, int presetIdx) {
     EnsureCatalogLoaded();
     if (!sa::IsPedValid(ped) || presetIdx < 0 || presetIdx >= MAX_OUTFIT_PRESETS) return false;
+    if (integrations::sacoop::IsCustomSkinModel(ped->GetModelIndex())) {
+        ui::ShowHelp("~y~Гардероб доступен только для стандартного облика.",
+                     "~y~Wardrobe requires the default character model.");
+        return false;
+    }
     auto* desc = sa::clothes::GetPlayerClothesDesc(ped);
     if (!desc) return false;
 
     auto& pr = g_presets[presetIdx];
     pr.used = true;
-    if (pr.name.empty()) {
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "Outfit #%d", presetIdx + 1);
-        pr.name = buf;
-    }
-
     for (int s = 0; s < CLOTH_SLOT_COUNT; ++s) {
         pr.tex[s].clear();
         pr.mod[s].clear();
@@ -512,6 +413,7 @@ void DeletePreset(int presetIdx) {
 
 void SaveNow() {
     std::string path = GetSaveFilePath(g_saveSlot);
+    if (path.empty()) return; // Unsaved Singleplayer/Host New Game: keep in RAM until saved to slot 1..8
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) return;
 
@@ -526,7 +428,7 @@ void SaveNow() {
         const auto& pr = g_presets[i];
         std::fprintf(f, "[Preset%d]\nUsed=%d\n", i, pr.used ? 1 : 0);
         if (!pr.used) { std::fprintf(f, "\n"); continue; }
-        std::fprintf(f, "Name=%s\nTrigger=%u\n", pr.name.c_str(), static_cast<unsigned>(pr.trigger));
+        std::fprintf(f, "Trigger=%u\n", static_cast<unsigned>(pr.trigger));
         for (int s = 0; s < CLOTH_SLOT_COUNT; ++s) {
             std::fprintf(f, "T%d=%s\nM%d=%s\n", s, pr.tex[s].c_str(), s, pr.mod[s].c_str());
         }
@@ -550,16 +452,16 @@ void OnGameLoad(int slot1to8) {
     g_autoStateInited = false;
 
     std::string path = GetSaveFilePath(g_saveSlot, true);
-    if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    if (path.empty() || GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
     const char* p = path.c_str();
 
-    int cnt = GetPrivateProfileIntA("Owned", "Count", 0, p);
+    int cnt = common::IniReadInt(p, "Owned", "Count", 0);
     for (int i = 0; i < cnt && i < 1024; ++i) {
-        char key[24], val[32] = {};
+        char key[24];
         std::snprintf(key, sizeof(key), "H%d", i);
-        GetPrivateProfileStringA("Owned", key, "", val, sizeof(val), p);
-        if (val[0]) {
-            uint32_t h = static_cast<uint32_t>(std::strtoul(val, nullptr, 16));
+        std::string val = common::IniReadString(p, "Owned", key, "");
+        if (!val.empty()) {
+            uint32_t h = static_cast<uint32_t>(std::strtoul(val.c_str(), nullptr, 16));
             if (h != 0) g_ownedHashes.insert(h);
         }
     }
@@ -567,23 +469,18 @@ void OnGameLoad(int slot1to8) {
     for (int i = 0; i < MAX_OUTFIT_PRESETS; ++i) {
         char sec[24];
         std::snprintf(sec, sizeof(sec), "Preset%d", i);
-        if (GetPrivateProfileIntA(sec, "Used", 0, p) == 0) continue;
+        if (common::IniReadInt(p, sec, "Used", 0) == 0) continue;
         auto& pr = g_presets[i];
         pr.used = true;
-        char buf[128] = {};
-        GetPrivateProfileStringA(sec, "Name", "", buf, sizeof(buf), p);
-        pr.name = buf;
-        int tr = GetPrivateProfileIntA(sec, "Trigger", 0, p);
+        int tr = common::IniReadInt(p, sec, "Trigger", 0);
         pr.trigger = (tr >= 0 && tr < static_cast<int>(AutoTrigger::Count))
             ? static_cast<AutoTrigger>(tr) : AutoTrigger::Manual;
         for (int s = 0; s < CLOTH_SLOT_COUNT; ++s) {
-            char tk[12], mk[12], tv[64] = {}, mv[64] = {};
+            char tk[12], mk[12];
             std::snprintf(tk, sizeof(tk), "T%d", s);
             std::snprintf(mk, sizeof(mk), "M%d", s);
-            GetPrivateProfileStringA(sec, tk, "", tv, sizeof(tv), p);
-            GetPrivateProfileStringA(sec, mk, "", mv, sizeof(mv), p);
-            pr.tex[s] = tv;
-            pr.mod[s] = mv;
+            pr.tex[s] = common::IniReadString(p, sec, tk, "");
+            pr.mod[s] = common::IniReadString(p, sec, mk, "");
         }
     }
     modlog::Info("[Wardrobe] Loaded wardrobe slot %d (%zu owned clothes).", g_saveSlot, g_ownedHashes.size());
@@ -602,13 +499,10 @@ void Tick() {
     sa::CPed* ped = sa::FindPlayerPed(0);
     if (!sa::IsPedValid(ped) || ped->GetHealth() <= 0.0f) return;
 
-    // 1. Complete any queued outfit rebuild as soon as cutscene finishes!
     if (g_pendingRebuild && !sa::IsCutsceneRunning()) {
         SafeRebuildPlayer(ped, true);
     }
 
-    // 2. Periodically sync CJ's currently worn clothes (e.g., mission uniforms) into owned set
-    // CRITICAL: NEVER sync while previewing unowned clothes inside a Clothing Store!
     static uint32_t s_lastSyncMs = 0;
     uint32_t now = sa::GetTimeMs();
     if (!clothesshop::IsShopActive() && (now - s_lastSyncMs >= 3000)) {
@@ -616,7 +510,6 @@ void Tick() {
         SyncWornClothesToOwned(ped);
     }
 
-    // 3. Auto-Equip Outfit Presets on Mission / Free Roam / Wanted transitions!
     if (!pcfg::Get().enableAutoOutfits) return;
     bool onMission = sa::IsOnMission();
     bool isWanted  = (sa::wanted::GetLevel(0) > 0);
@@ -647,7 +540,7 @@ void Tick() {
     if (targetPreset >= 0 && targetPreset != g_lastAutoPresetIdx) {
         g_lastAutoPresetIdx = targetPreset;
         ApplyPresetInternal(ped, g_presets[targetPreset], true);
-        modlog::Info("[Wardrobe] Auto-equipped outfit preset #%d (mission=%d, wanted=%d).",
+        modlog::Info("[Wardrobe] Auto-equipped outfit #%d (mission=%d, wanted=%d).",
                      targetPreset + 1, onMission ? 1 : 0, isWanted ? 1 : 0);
     } else if (targetPreset < 0 && !onMission && !isWanted) {
         g_lastAutoPresetIdx = -1;

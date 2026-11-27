@@ -15,6 +15,7 @@ void PostScriptsTick();
 void Render2D();
 
 bool IsWheelOpen();
+bool IsHoldWheelOpen();
 
 void Reset();
 
